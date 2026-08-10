@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 
 from secagent import db_models  # noqa: F401 -- registers SQLAlchemy tables
+from secagent.agents.executor import DemoEvidenceTool
 from secagent.api.tasks import router as tasks_router
 from secagent.api.system import router as system_router
 from secagent.config import Settings, get_settings
@@ -17,7 +18,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.model_router = ModelRouter(
         build_providers(app.state.settings), mode=app.state.settings.model_mode
     )
-    app.state.tool_registry = ToolRegistry([])
+    app.state.tool_registry = ToolRegistry([DemoEvidenceTool()])
     app.include_router(system_router)
     app.include_router(tasks_router)
     return app

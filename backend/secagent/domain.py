@@ -89,3 +89,27 @@ class ToolResult(BaseModel):
     metrics: dict[str, Any] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
     error: str | None = None
+
+
+class ParsedTask(BaseModel):
+    scene: TaskScene
+    goal: str
+    inputs: list[str] = Field(default_factory=list)
+    constraints: list[str] = Field(default_factory=list)
+    authorization_scope: str
+    risk_level: RiskLevel
+    expected_outputs: list[str] = Field(default_factory=list)
+
+
+class CriticDecision(BaseModel):
+    is_complete: bool
+    confidence: float = Field(ge=0, le=1)
+    reason: str
+    missing_evidence: list[str] = Field(default_factory=list)
+
+
+class TaskRunResult(BaseModel):
+    task_id: str
+    status: TaskStatus
+    is_demo: bool
+    report: str | None = None

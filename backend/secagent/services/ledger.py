@@ -3,6 +3,7 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
+from secagent.domain import ModelResponse, ModelStage, ToolResult
 from secagent.repository import TaskRepository
 
 SENSITIVE_KEYS = {"authorization", "api_key", "cookie", "password", "secret", "token"}
@@ -49,6 +50,29 @@ class LedgerService:
             is_demo=is_demo,
         )
 
+    def record_model_response(
+        self,
+        task_id: str,
+        stage: ModelStage,
+        response: ModelResponse,
+    ) -> str:
+        reasons = {
+            ModelStage.TASK_PARSE: "中文任务理解",
+            ModelStage.PLAN: "技术计划生成",
+            ModelStage.CRITIC: "证据完整性复核",
+            ModelStage.REPORT: "中文报告生成",
+        }
+        return self.record_model_call(
+            task_id,
+            provider=response.provider,
+            model=response.model,
+            stage=stage.value,
+            route_reason=reasons[stage],
+            input_summary=f"{stage.value} structured request",
+            latency_ms=response.latency_ms,
+            is_demo=response.is_demo,
+        )
+
     def record_tool_call(
         self,
         task_id: str,
@@ -86,6 +110,42 @@ class LedgerService:
             content=redact_mapping(content),
             confidence=confidence,
             metadata_json=json.dumps(redact_mapping(metadata or {}), ensure_ascii=False),
+        )
+
+    def record_tool_result(
+        self,
+        task_id: str,
+        step_id: str,
+        tool_name: str,
+        params: dict[str, Any],
+        result: ToolResult,
+    ) -> str:
+        tool_call_id = self.record_tool_call(
+            task_id,
+            step_id=step_id,
+            tool_name=tool_name,
+            params=params,
+            result=result.model_dump(mode="json"),
+        )
+        for item in result.evidence:
+            self.record_evidence(
+                task_id,
+                tool_call_id=tool_call_id,
+                evidence_type=item.get("evidence_type", "observation"),
+                source=item.get("source", tool_name),
+                content=str(item.get("content", "")),
+                confidence=float(item.get("confidence", 1.0)),
+                metadata=item.get("metadata", {}),
+            )
+        return tool_call_id
+
+    def record_error(self, task_id: str, error_type: str, message: str) -> str:
+        return self.record_evidence(
+            task_id,
+            evidence_type="runtime_error",
+            source="agent_runner",
+            content=f"{error_type}: {message}",
+            confidence=1.0,
         )
 
     def snapshot(self, task_id: str) -> dict[str, list[dict[str, Any]]]:

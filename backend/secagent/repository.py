@@ -13,7 +13,7 @@ from secagent.db_models import (
     TaskStepRow,
     ToolCallRow,
 )
-from secagent.domain import PlanStep, TaskCreate, TaskRead, TaskStatus
+from secagent.domain import PlanStep, TaskCreate, TaskRead, TaskScene, TaskStatus
 
 
 class TaskRepository:
@@ -49,6 +49,14 @@ class TaskRepository:
         row.status = status.value
         if is_demo is not None:
             row.is_demo = is_demo
+        self.session.commit()
+        return self._read(row)
+
+    def set_task_scene(self, task_id: str, scene: TaskScene) -> TaskRead:
+        row = self.session.get(TaskRow, task_id)
+        if row is None:
+            raise KeyError(task_id)
+        row.scene = scene.value
         self.session.commit()
         return self._read(row)
 
