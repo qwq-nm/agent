@@ -33,7 +33,7 @@ SCENES = {
     ),
     TaskScene.WEB_ANALYSIS: ScenePolicy(
         TaskScene.WEB_ANALYSIS,
-        (),
+        ("url_guard", "http_fetch", "header_check", "form_extract"),
         ("http_observation",),
     ),
 }

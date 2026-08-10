@@ -106,6 +106,16 @@ class TaskRepository:
         self.session.commit()
         return row
 
+    def is_tool_approved(self, task_id: str, tool_name: str) -> bool:
+        row = self.session.scalar(
+            select(ApprovalRow).where(
+                ApprovalRow.task_id == task_id,
+                ApprovalRow.tool_name == tool_name,
+                ApprovalRow.status == "approved",
+            )
+        )
+        return row is not None
+
     def add_step(self, task_id: str, step_index: int, step: PlanStep) -> str:
         row = TaskStepRow(
             task_id=task_id,

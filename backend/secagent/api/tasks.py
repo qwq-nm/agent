@@ -182,7 +182,7 @@ def retry_task(
 
 
 @router.post("/{task_id}/approve", response_model=TaskRead)
-def approve_task(
+async def approve_task(
     task_id: str,
     payload: ApprovalDecision,
     request: Request,
@@ -190,7 +190,7 @@ def approve_task(
 ) -> TaskRead:
     service = task_service_for(request, repository)
     try:
-        return service.approve(
+        return await service.approve(
             task_id, approved=payload.approved, reason=payload.reason
         )
     except KeyError as exc:

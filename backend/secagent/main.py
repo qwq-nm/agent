@@ -11,6 +11,7 @@ from secagent.db import make_session_factory
 from secagent.providers import build_providers
 from secagent.providers.router import ModelRouter
 from secagent.repository import TaskRepository
+from secagent.security.url_guard import UrlGuard
 from secagent.tools.registry import ToolRegistry
 from secagent.tools.log_tools import (
     AttackPatternDetector,
@@ -24,6 +25,7 @@ from secagent.tools.source_tools import (
     SecretScanner,
     SourceScanner,
 )
+from secagent.tools.web_tools import FormExtract, HeaderCheck, HttpFetch, UrlGuardTool
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -42,6 +44,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.model_router = ModelRouter(
         build_providers(app.state.settings), mode=app.state.settings.model_mode
     )
+    allowed_hosts = {
+        host.strip()
+        for host in app.state.settings.web_allowed_hosts.split(",")
+        if host.strip()
+    }
+    url_guard = UrlGuard(allowed_hosts)
     app.state.tool_registry = ToolRegistry(
         [
             DemoEvidenceTool(),
@@ -53,6 +61,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             SourceScanner(),
             SecretScanner(),
             ConfigChecker(),
+            UrlGuardTool(url_guard),
+            HttpFetch(url_guard),
+            HeaderCheck(),
+            FormExtract(),
         ]
     )
     app.include_router(system_router)

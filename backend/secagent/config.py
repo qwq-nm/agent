@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     upload_max_bytes: int = 10 * 1024 * 1024
     archive_max_files: int = 200
     archive_max_bytes: int = 50 * 1024 * 1024
+    web_allowed_hosts: str = "web-demo"
 
     deepseek_api_key: str | None = None
     deepseek_base_url: str = "https://api.deepseek.com/v1"

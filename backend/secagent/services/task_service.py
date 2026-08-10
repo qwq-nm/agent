@@ -85,7 +85,9 @@ class TaskService:
     def retry(self, task_id: str) -> TaskRead:
         return self.transition(task_id, TaskStatus.RUNNING)
 
-    def approve(self, task_id: str, *, approved: bool, reason: str) -> TaskRead:
+    async def approve(
+        self, task_id: str, *, approved: bool, reason: str
+    ) -> TaskRead:
         task = self.repository.get_task(task_id)
         if task is None:
             raise KeyError(task_id)
@@ -95,4 +97,11 @@ class TaskService:
             task_id, approved=approved, reason=reason
         )
         target = TaskStatus.RUNNING if approved else TaskStatus.CANCELLED
-        return self.transition(task_id, target)
+        updated = self.transition(task_id, target)
+        if approved:
+            await self.runner.run(task_id)
+            latest = self.repository.get_task(task_id)
+            if latest is None:
+                raise KeyError(task_id)
+            return latest
+        return updated

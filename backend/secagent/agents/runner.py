@@ -52,11 +52,17 @@ class AgentRunner:
             self.ledger.record_model_response(task_id, ModelStage.PLAN, plan_call)
             workspace = self.data_dir / "tasks" / task_id
             workspace.mkdir(parents=True, exist_ok=True)
+            runtime: dict = {}
 
             for index, step in enumerate(plan, start=1):
-                params = self._resolve_params(step.params, workspace)
+                params = self._resolve_params(step.params, workspace, runtime)
                 step_id = self.repository.add_step(task_id, index, step)
-                decision = self.risk_gate.check(step.risk_level, approved=False)
+                approved = self.repository.is_tool_approved(
+                    task_id, step.tool_name
+                )
+                decision = self.risk_gate.check(
+                    step.risk_level, approved=approved
+                )
                 if decision.action == "wait":
                     self.repository.add_approval(
                         task_id,
@@ -81,6 +87,10 @@ class AgentRunner:
                 self.repository.update_step(
                     step_id, "success" if result.success else "failed"
                 )
+                if step.tool_name == "http_fetch" and result.evidence:
+                    runtime["http_response"] = result.evidence[0].get(
+                        "metadata", {}
+                    )
                 if not result.success:
                     raise RuntimeError(result.error or result.summary)
 
@@ -115,7 +125,9 @@ class AgentRunner:
             raise
 
     @staticmethod
-    def _resolve_params(params: dict, workspace: Path) -> dict:
+    def _resolve_params(
+        params: dict, workspace: Path, runtime: dict
+    ) -> dict:
         resolved = dict(params)
         if resolved.get("file_path") == "$upload":
             metadata = json.loads(
@@ -129,4 +141,8 @@ class AgentRunner:
             resolved["project_path"] = str(
                 extracted if extracted.is_dir() else workspace / "uploads"
             )
+        if resolved.get("response") == "$http":
+            if "http_response" not in runtime:
+                raise RuntimeError("HTTP observation is not available")
+            resolved["response"] = runtime["http_response"]
         return resolved

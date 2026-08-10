@@ -55,6 +55,13 @@ class Planner:
             params_by_tool = {
                 name: {"project_path": "$project"} for name in allowed_tools
             }
+        elif parsed.scene.value == "web_analysis":
+            params_by_tool = {
+                "url_guard": {"url": task.target_url},
+                "http_fetch": {"url": task.target_url},
+                "header_check": {"response": "$http"},
+                "form_extract": {"response": "$http"},
+            }
         payload = {
             "goal": parsed.goal,
             "allowed_tools": list(allowed_tools),
