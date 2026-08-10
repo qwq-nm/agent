@@ -195,6 +195,7 @@ class TaskRepository:
             "tool_calls": rows(ToolCallRow),
             "evidences": rows(EvidenceRow),
             "reports": rows(ReportRow),
+            "approvals": rows(ApprovalRow),
         }
 
     @staticmethod

@@ -3,6 +3,8 @@ import DashboardView from './views/DashboardView.vue'
 import TaskCreateView from './views/TaskCreateView.vue'
 import TaskDetailView from './views/TaskDetailView.vue'
 import TaskListView from './views/TaskListView.vue'
+import ReportsView from './views/ReportsView.vue'
+import SystemView from './views/SystemView.vue'
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -11,7 +13,7 @@ export const router = createRouter({
     { path: '/tasks/new', component: TaskCreateView },
     { path: '/tasks', component: TaskListView },
     { path: '/tasks/:id', component: TaskDetailView },
-    { path: '/reports', component: TaskListView },
-    { path: '/system', component: DashboardView },
+    { path: '/reports', component: ReportsView },
+    { path: '/system', component: SystemView },
   ],
 })

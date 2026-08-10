@@ -1,12 +1,15 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { api } from '../api/client'
-import type { Task } from '../types'
+import type { Task, TaskDetail } from '../types'
 
 export const useTasksStore = defineStore('tasks', () => {
   const tasks = ref<Task[]>([])
   const loading = ref(false)
   const error = ref('')
+  const detail = ref<TaskDetail>()
+  let pollTimer: ReturnType<typeof setTimeout> | undefined
+  let pollingId: string | undefined
 
   const activeCount = computed(
     () =>
@@ -29,5 +32,37 @@ export const useTasksStore = defineStore('tasks', () => {
     }
   }
 
-  return { tasks, loading, error, activeCount, load }
+  function stopPolling() {
+    pollingId = undefined
+    if (pollTimer) clearTimeout(pollTimer)
+    pollTimer = undefined
+  }
+
+  async function refreshDetail(id: string) {
+    detail.value = await api.getTask(id)
+    if (pollingId === id && detail.value.status === 'running') {
+      pollTimer = setTimeout(() => void refreshDetail(id), 2000)
+    } else if (pollingId === id) {
+      stopPolling()
+    }
+    return detail.value
+  }
+
+  async function startPolling(id: string) {
+    stopPolling()
+    pollingId = id
+    return refreshDetail(id)
+  }
+
+  return {
+    tasks,
+    detail,
+    loading,
+    error,
+    activeCount,
+    load,
+    refreshDetail,
+    startPolling,
+    stopPolling,
+  }
 })

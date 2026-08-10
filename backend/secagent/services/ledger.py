@@ -132,8 +132,24 @@ class LedgerService:
             confidence=1.0,
         )
 
-    def snapshot(self, task_id: str) -> dict[str, list[dict[str, Any]]]:
+    def snapshot(self, task_id: str) -> dict[str, Any]:
         rows = self.repository.ledger_rows(task_id)
+        approvals = [
+            {
+                "id": row.id,
+                "step_id": row.step_id,
+                "tool_name": row.tool_name,
+                "risk_level": row.risk_level,
+                "params_summary": row.params_summary,
+                "status": row.status,
+                "reason": row.reason,
+            }
+            for row in rows["approvals"]
+        ]
+        pending = next(
+            (item for item in reversed(approvals) if item["status"] == "pending"),
+            None,
+        )
         return {
             "steps": [
                 {
@@ -145,6 +161,8 @@ class LedgerService:
                     "params": json.loads(row.params_json),
                     "risk_level": row.risk_level,
                     "status": row.status,
+                    "model_provider": row.model_provider,
+                    "route_reason": row.route_reason,
                 }
                 for row in rows["steps"]
             ],
@@ -186,4 +204,6 @@ class LedgerService:
                 {"id": row.id, "content": row.content, "is_demo": row.is_demo}
                 for row in rows["reports"]
             ],
+            "approvals": approvals,
+            "pending_approval": pending,
         }

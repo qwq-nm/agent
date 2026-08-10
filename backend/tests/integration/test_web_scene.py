@@ -51,6 +51,9 @@ def test_approved_web_scene_records_passive_http_and_form_evidence(tmp_path) -> 
         first = client.post(f"/api/tasks/{task['id']}/run")
         assert first.status_code == 202
         assert first.json()["status"] == "waiting_human"
+        waiting = client.get(f"/api/tasks/{task['id']}").json()
+        assert waiting["pending_approval"]["tool_name"] == "http_fetch"
+        assert waiting["pending_approval"]["risk_level"] == "medium"
         approved = client.post(
             f"/api/tasks/{task['id']}/approve",
             json={"approved": True, "reason": "确认仅进行被动 GET"},
