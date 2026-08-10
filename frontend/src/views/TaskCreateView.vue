@@ -86,7 +86,7 @@ function chooseFile(event: Event) {
       <div class="form-grid">
         <label class="field">
           <span>场景</span>
-          <select v-model="form.scene_hint">
+          <select v-model="form.scene_hint" aria-label="场景">
             <option value="">自动识别</option>
             <option value="incident_response">日志应急响应</option>
             <option value="source_audit">静态源码审计</option>

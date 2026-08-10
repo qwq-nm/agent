@@ -8,3 +8,10 @@ htmlcov/
 data/
 node_modules/
 dist/
+.env
+.venv/
+*.db
+*.sqlite*
+playwright-report/
+test-results/
+.superpowers/

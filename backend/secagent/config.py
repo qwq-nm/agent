@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     archive_max_files: int = 200
     archive_max_bytes: int = 50 * 1024 * 1024
     web_allowed_hosts: str = "web-demo"
+    max_steps_per_task: int = 20
+    max_replans: int = 2
+    task_timeout_seconds: int = 300
 
     deepseek_api_key: str | None = None
     deepseek_base_url: str = "https://api.deepseek.com/v1"
