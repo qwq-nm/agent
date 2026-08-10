@@ -124,4 +124,9 @@ class AgentRunner:
             resolved["file_path"] = str(
                 workspace / "uploads" / metadata["stored_name"]
             )
+        if resolved.get("project_path") == "$project":
+            extracted = workspace / "extracted"
+            resolved["project_path"] = str(
+                extracted if extracted.is_dir() else workspace / "uploads"
+            )
         return resolved

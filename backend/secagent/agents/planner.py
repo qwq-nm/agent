@@ -51,6 +51,10 @@ class Planner:
             else:
                 allowed_tools = ("demo_evidence",)
                 params_by_tool = {"demo_evidence": {}}
+        elif parsed.scene.value == "source_audit":
+            params_by_tool = {
+                name: {"project_path": "$project"} for name in allowed_tools
+            }
         payload = {
             "goal": parsed.goal,
             "allowed_tools": list(allowed_tools),

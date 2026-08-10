@@ -23,7 +23,12 @@ SCENES = {
     ),
     TaskScene.SOURCE_AUDIT: ScenePolicy(
         TaskScene.SOURCE_AUDIT,
-        (),
+        (
+            "project_detector",
+            "source_scanner",
+            "secret_scanner",
+            "config_checker",
+        ),
         ("source_location",),
     ),
     TaskScene.WEB_ANALYSIS: ScenePolicy(

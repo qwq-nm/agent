@@ -18,6 +18,12 @@ from secagent.tools.log_tools import (
     LogTypeDetector,
     TimelineBuilder,
 )
+from secagent.tools.source_tools import (
+    ConfigChecker,
+    ProjectDetector,
+    SecretScanner,
+    SourceScanner,
+)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -43,6 +49,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             LogAnalyzer(),
             AttackPatternDetector(),
             TimelineBuilder(),
+            ProjectDetector(),
+            SourceScanner(),
+            SecretScanner(),
+            ConfigChecker(),
         ]
     )
     app.include_router(system_router)
