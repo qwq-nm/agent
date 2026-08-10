@@ -56,6 +56,13 @@ class AgentRunner:
                 step_id = self.repository.add_step(task_id, index, step)
                 decision = self.risk_gate.check(step.risk_level, approved=False)
                 if decision.action == "wait":
+                    self.repository.add_approval(
+                        task_id,
+                        step_id=step_id,
+                        tool_name=step.tool_name,
+                        risk_level=step.risk_level.value,
+                        params_summary=str(step.params),
+                    )
                     self.repository.set_task_status(task_id, TaskStatus.WAITING_HUMAN)
                     return TaskRunResult(
                         task_id=task_id,

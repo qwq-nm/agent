@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 
 from secagent import db_models  # noqa: F401 -- registers SQLAlchemy tables
@@ -8,13 +10,23 @@ from secagent.config import Settings, get_settings
 from secagent.db import make_session_factory
 from secagent.providers import build_providers
 from secagent.providers.router import ModelRouter
+from secagent.repository import TaskRepository
 from secagent.tools.registry import ToolRegistry
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
-    app = FastAPI(title="SecAgent-X", version="0.1.0")
-    app.state.settings = settings or get_settings()
-    app.state.session_factory = make_session_factory(app.state.settings.database_url)
+    resolved_settings = settings or get_settings()
+    session_factory = make_session_factory(resolved_settings.database_url)
+
+    @asynccontextmanager
+    async def lifespan(application: FastAPI):
+        with application.state.session_factory() as session:
+            TaskRepository(session).recover_interrupted_tasks()
+        yield
+
+    app = FastAPI(title="SecAgent-X", version="0.1.0", lifespan=lifespan)
+    app.state.settings = resolved_settings
+    app.state.session_factory = session_factory
     app.state.model_router = ModelRouter(
         build_providers(app.state.settings), mode=app.state.settings.model_mode
     )

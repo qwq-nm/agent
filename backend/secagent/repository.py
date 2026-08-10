@@ -6,6 +6,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from secagent.db_models import (
+    ApprovalRow,
     EvidenceRow,
     ModelCallRow,
     ReportRow,
@@ -59,6 +60,51 @@ class TaskRepository:
         row.scene = scene.value
         self.session.commit()
         return self._read(row)
+
+    def delete_task(self, task_id: str) -> None:
+        row = self.session.get(TaskRow, task_id)
+        if row is not None:
+            self.session.delete(row)
+            self.session.commit()
+
+    def add_approval(
+        self,
+        task_id: str,
+        *,
+        step_id: str,
+        tool_name: str,
+        risk_level: str,
+        params_summary: str,
+    ) -> str:
+        row = ApprovalRow(
+            task_id=task_id,
+            step_id=step_id,
+            tool_name=tool_name,
+            risk_level=risk_level,
+            params_summary=params_summary,
+        )
+        self.session.add(row)
+        self.session.commit()
+        return row.id
+
+    def decide_latest_approval(
+        self, task_id: str, *, approved: bool, reason: str
+    ) -> ApprovalRow:
+        row = self.session.scalar(
+            select(ApprovalRow)
+            .where(
+                ApprovalRow.task_id == task_id,
+                ApprovalRow.status == "pending",
+            )
+            .order_by(ApprovalRow.created_at.desc())
+        )
+        if row is None:
+            raise KeyError("pending approval not found")
+        row.status = "approved" if approved else "rejected"
+        row.reason = reason
+        row.decided_at = datetime.now(timezone.utc)
+        self.session.commit()
+        return row
 
     def add_step(self, task_id: str, step_index: int, step: PlanStep) -> str:
         row = TaskStepRow(
