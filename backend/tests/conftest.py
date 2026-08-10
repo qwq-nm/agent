@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 from secagent.config import Settings
 from secagent.main import create_app
 from secagent.repository import TaskRepository
+from secagent.services.ledger import LedgerService
 
 
 @pytest.fixture
@@ -30,3 +31,8 @@ def client(app):
 def repository(app):
     with app.state.session_factory() as session:
         yield TaskRepository(session)
+
+
+@pytest.fixture
+def ledger(repository):
+    return LedgerService(repository)
