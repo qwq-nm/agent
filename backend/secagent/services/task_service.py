@@ -57,7 +57,7 @@ class TaskService:
             risk_gate=RiskGate(),
             data_dir=data_dir,
             parser=TaskParser(router),
-            planner=Planner(router, registry),
+            planner=Planner(router, registry, data_dir),
             executor=Executor(registry, ledger),
             critic=Critic(router, ledger),
             reporter=Reporter(router, ledger),

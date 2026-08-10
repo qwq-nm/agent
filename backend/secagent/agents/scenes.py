@@ -13,8 +13,13 @@ class ScenePolicy:
 SCENES = {
     TaskScene.INCIDENT_RESPONSE: ScenePolicy(
         TaskScene.INCIDENT_RESPONSE,
-        ("demo_evidence",),
-        ("raw_line",),
+        (
+            "log_type_detector",
+            "log_analyzer",
+            "attack_pattern_detector",
+            "timeline_builder",
+        ),
+        ("raw_line", "rule_id", "timeline"),
     ),
     TaskScene.SOURCE_AUDIT: ScenePolicy(
         TaskScene.SOURCE_AUDIT,

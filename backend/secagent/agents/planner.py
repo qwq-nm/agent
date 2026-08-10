@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 from pydantic import BaseModel, Field
 
@@ -21,21 +22,42 @@ class PlanDocument(BaseModel):
 
 
 class Planner:
-    def __init__(self, router: ModelRouter, registry: ToolRegistry) -> None:
+    def __init__(
+        self, router: ModelRouter, registry: ToolRegistry, data_dir: Path
+    ) -> None:
         self.router = router
         self.registry = registry
+        self.data_dir = data_dir
 
     async def plan(
         self, task: TaskRead, parsed: ParsedTask
     ) -> tuple[list[PlanStep], ModelResponse]:
         policy = SCENES[parsed.scene]
+        allowed_tools = policy.allowed_tools
+        params_by_tool = {name: {} for name in allowed_tools}
+        upload_metadata = self.data_dir / "tasks" / task.id / "upload.json"
+        if parsed.scene.value == "incident_response":
+            if upload_metadata.is_file():
+                original_name = json.loads(
+                    upload_metadata.read_text(encoding="utf-8")
+                )["original_name"]
+                params_by_tool = {
+                    name: {
+                        "file_path": "$upload",
+                        "source_name": original_name,
+                    }
+                    for name in allowed_tools
+                }
+            else:
+                allowed_tools = ("demo_evidence",)
+                params_by_tool = {"demo_evidence": {}}
         payload = {
             "goal": parsed.goal,
-            "allowed_tools": list(policy.allowed_tools),
-            "params_by_tool": {name: {} for name in policy.allowed_tools},
+            "allowed_tools": list(allowed_tools),
+            "params_by_tool": params_by_tool,
             "risk_by_tool": {
                 name: self.registry.get(name).risk_level.value
-                for name in policy.allowed_tools
+                for name in allowed_tools
             },
         }
         response = await self.router.complete(

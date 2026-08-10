@@ -12,6 +12,12 @@ from secagent.providers import build_providers
 from secagent.providers.router import ModelRouter
 from secagent.repository import TaskRepository
 from secagent.tools.registry import ToolRegistry
+from secagent.tools.log_tools import (
+    AttackPatternDetector,
+    LogAnalyzer,
+    LogTypeDetector,
+    TimelineBuilder,
+)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -30,7 +36,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.model_router = ModelRouter(
         build_providers(app.state.settings), mode=app.state.settings.model_mode
     )
-    app.state.tool_registry = ToolRegistry([DemoEvidenceTool()])
+    app.state.tool_registry = ToolRegistry(
+        [
+            DemoEvidenceTool(),
+            LogTypeDetector(),
+            LogAnalyzer(),
+            AttackPatternDetector(),
+            TimelineBuilder(),
+        ]
+    )
     app.include_router(system_router)
     app.include_router(tasks_router)
     return app

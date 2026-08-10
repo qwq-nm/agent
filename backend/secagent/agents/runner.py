@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 from secagent.agents.critic import Critic
 from secagent.agents.executor import Executor
@@ -53,6 +54,7 @@ class AgentRunner:
             workspace.mkdir(parents=True, exist_ok=True)
 
             for index, step in enumerate(plan, start=1):
+                params = self._resolve_params(step.params, workspace)
                 step_id = self.repository.add_step(task_id, index, step)
                 decision = self.risk_gate.check(step.risk_level, approved=False)
                 if decision.action == "wait":
@@ -61,7 +63,7 @@ class AgentRunner:
                         step_id=step_id,
                         tool_name=step.tool_name,
                         risk_level=step.risk_level.value,
-                        params_summary=str(step.params),
+                        params_summary=str(params),
                     )
                     self.repository.set_task_status(task_id, TaskStatus.WAITING_HUMAN)
                     return TaskRunResult(
@@ -73,7 +75,7 @@ class AgentRunner:
                     task_id=task_id,
                     step_id=step_id,
                     tool_name=step.tool_name,
-                    params=step.params,
+                    params=params,
                     context=ToolContext(task_id, parsed.scene.value, workspace),
                 )
                 self.repository.update_step(
@@ -111,3 +113,15 @@ class AgentRunner:
             self.ledger.record_error(task_id, type(exc).__name__, str(exc))
             self.repository.set_task_status(task_id, TaskStatus.FAILED_RETRYABLE)
             raise
+
+    @staticmethod
+    def _resolve_params(params: dict, workspace: Path) -> dict:
+        resolved = dict(params)
+        if resolved.get("file_path") == "$upload":
+            metadata = json.loads(
+                (workspace / "upload.json").read_text(encoding="utf-8")
+            )
+            resolved["file_path"] = str(
+                workspace / "uploads" / metadata["stored_name"]
+            )
+        return resolved
