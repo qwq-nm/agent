@@ -184,7 +184,12 @@ def test_audit_service_scrubs_quoted_and_escaped_log_labels_without_false_positi
         'payload={"password" : "clear text password", "token":"opaque token"}; '
         "fields={'api_key' = 'private api value', 'cookie':'private session'}; "
         r'escaped={\"key\" : \"private generic value\", '
-        r'\"token\":\"private escaped value\"}'
+        r'\"token\":\"private escaped value\"}; '
+        r'inner_double={\"password\":\"alpha \\\"AUDIT_TOPSECRET_DOUBLE'
+        r'\\\" omega\"}; '
+        r"inner_single={\'token\':\'alpha \\\'AUDIT_TOPSECRET_SINGLE"
+        r"\\\' omega\'}; "
+        r'unclosed={\"cookie\":\"AUDIT UNCLOSED SECRET'
     )
     ordinary_text = (
         "The password policy and API key rotation guide are ready for review."
@@ -210,6 +215,9 @@ def test_audit_service_scrubs_quoted_and_escaped_log_labels_without_false_positi
         "private session",
         "private generic value",
         "private escaped value",
+        "AUDIT_TOPSECRET_DOUBLE",
+        "AUDIT_TOPSECRET_SINGLE",
+        "AUDIT UNCLOSED SECRET",
     ):
         assert secret not in details["message"]
 
@@ -279,7 +287,12 @@ def test_approval_reason_scrubs_quoted_json_and_log_labels_in_database_and_ledge
         '"token":"db token value"}; '
         "log={'api_key' = 'db api value', 'cookie':'db cookie value'}; "
         r'escaped={\"key\" : \"db generic value\", '
-        r'\"token\":\"db escaped value\"}'
+        r'\"token\":\"db escaped value\"}; '
+        r'inner_double={\"password\":\"alpha \\\"DB_TOPSECRET_DOUBLE'
+        r'\\\" omega\"}; '
+        r"inner_single={\'token\':\'alpha \\\'DB_TOPSECRET_SINGLE"
+        r"\\\' omega\'}; "
+        r'unclosed={\"cookie\":\"DB UNCLOSED SECRET'
     )
 
     response = analyst_client.post(
@@ -300,6 +313,9 @@ def test_approval_reason_scrubs_quoted_json_and_log_labels_in_database_and_ledge
         "db cookie value",
         "db generic value",
         "db escaped value",
+        "DB_TOPSECRET_DOUBLE",
+        "DB_TOPSECRET_SINGLE",
+        "DB UNCLOSED SECRET",
     ):
         assert secret not in persisted_reason
         assert secret not in json.dumps(detail)

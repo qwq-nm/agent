@@ -100,3 +100,12 @@ The following failures were observed before their corresponding production chang
 - The expression uses delimiter-bounded character classes and fixed alternatives rather than wildcard or nested repetition, limiting over-consumption and avoiding catastrophic backtracking structure. The approval reason's 1000-character pre-scrub and post-scrub bounds remain enforced.
 - Related audit suite: 17 passed. Task 4 required set: 37 passed. Backend full suite: 90 passed. All runs emitted only the existing Starlette/httpx deprecation warning.
 - `python -m compileall -q backend/secagent` and `git diff --check`: passed for the second fix.
+
+## Third main-review escaped-value fix
+
+- Reproduced the remaining leak when a log-escaped quoted credential value itself contained escaped quotes. The prior value regex stopped at the first inner quote and left the middle and suffix intact; the single-quoted form had the same behavior.
+- RED: the real audit persistence test and approval API-to-database-to-ledger test both failed with inner sentinel text and an unterminated value tail still present.
+- Replaced quoted-value regex matching with a delimiter scanner. Ordinary quoted values close only after an even run of preceding backslashes. In a one-layer escaped wrapper, the equivalent decoded rule closes on backslash runs congruent to one modulo four, so inner escaped quotes are consumed while structural closing quotes terminate the value.
+- The scanner advances monotonically, uses no wildcard/nested regex repetition, and truncates the remaining text after an unterminated sensitive quoted value. Non-sensitive prose remains unchanged and the approval reason is still bounded to 1000 characters before and after scrubbing.
+- GREEN: new focused regressions 2 passed; audit suite 17 passed; Task 4 required set 37 passed; backend full suite 90 passed. Only the existing Starlette/httpx deprecation warning was emitted.
+- `python -m compileall -q backend/secagent` and `git diff --check`: passed for the third fix.

@@ -24,19 +24,10 @@ SECRET_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _OPTIONAL_LABEL_QUOTE = r'''(?:\\["']|["'])?'''
-_SECRET_VALUE = (
-    r'''(?P<secret>\\"[^"\r\n]*\\"|\\'[^'\r\n]*\\'|'''
-    r'''"[^"\r\n]*"|'[^'\r\n]*'|(?:Bearer\s+)?[^\s,;}\]]+)'''
-)
-LABELED_SECRET_PATTERN = re.compile(
-    rf"(?P<label>{_OPTIONAL_LABEL_QUOTE}\b(?:authorization|password|passwd|"
-    rf"token|access[_-]?token|refresh[_-]?token|cookie|api[\s_-]*key|secret)"
-    rf"\b{_OPTIONAL_LABEL_QUOTE}\s*[:=]\s*){_SECRET_VALUE}",
-    re.IGNORECASE,
-)
-GENERIC_KEY_SECRET_PATTERN = re.compile(
-    rf"(?P<label>{_OPTIONAL_LABEL_QUOTE}\bkey\b{_OPTIONAL_LABEL_QUOTE}"
-    rf"\s*[:=]\s*){_SECRET_VALUE}",
+LABELED_SECRET_PREFIX_PATTERN = re.compile(
+    rf"(?P<label>{_OPTIONAL_LABEL_QUOTE}\b(?P<name>authorization|password|passwd|"
+    rf"token|access[_-]?token|refresh[_-]?token|cookie|api[\s_-]*key|secret|"
+    rf"key)\b{_OPTIONAL_LABEL_QUOTE}\s*[:=]\s*)",
     re.IGNORECASE,
 )
 AUDIT_ONLY_SENSITIVE_KEYS = {
@@ -52,25 +43,79 @@ APPROVAL_REASON_MAX_LENGTH = 1000
 
 
 def redact_text(value: str, *, include_generic_key: bool = False) -> str:
-    redacted = LABELED_SECRET_PATTERN.sub(_replace_labeled_secret, value)
-    if include_generic_key:
-        redacted = GENERIC_KEY_SECRET_PATTERN.sub(_replace_labeled_secret, redacted)
+    redacted = _scrub_labeled_secrets(value, include_generic_key=include_generic_key)
     return SECRET_PATTERN.sub("***REDACTED***", redacted)
 
 
-def _replace_labeled_secret(match: re.Match[str]) -> str:
-    secret = match.group("secret")
-    if secret.startswith(r'\"') and secret.endswith(r'\"'):
-        replacement = r'\"***REDACTED***\"'
-    elif secret.startswith(r"\'") and secret.endswith(r"\'"):
-        replacement = r"\'***REDACTED***\'"
-    elif secret.startswith('"') and secret.endswith('"'):
-        replacement = '"***REDACTED***"'
-    elif secret.startswith("'") and secret.endswith("'"):
-        replacement = "'***REDACTED***'"
-    else:
-        replacement = "***REDACTED***"
-    return f'{match.group("label")}{replacement}'
+def _scrub_labeled_secrets(value: str, *, include_generic_key: bool) -> str:
+    """Scrub assignment values in one forward pass over each matched value."""
+    parts: list[str] = []
+    copied_through = 0
+    search_from = 0
+    while match := LABELED_SECRET_PREFIX_PATTERN.search(value, search_from):
+        normalized_name = re.sub(r"[\s_-]+", "", match.group("name").lower())
+        if normalized_name == "key" and not include_generic_key:
+            search_from = match.end()
+            continue
+        scanned = _scan_secret_value(value, match.end())
+        if scanned is None:
+            search_from = match.end()
+            continue
+        value_end, replacement, truncate_tail = scanned
+        parts.append(value[copied_through : match.end()])
+        parts.append(replacement)
+        copied_through = value_end
+        search_from = value_end
+        if truncate_tail:
+            copied_through = len(value)
+            break
+    parts.append(value[copied_through:])
+    return "".join(parts)
+
+
+def _scan_secret_value(
+    value: str, start: int
+) -> tuple[int, str, bool] | None:
+    if start >= len(value) or value[start] in ",;}]\r\n":
+        return None
+    if value[start] == "\\" and start + 1 < len(value):
+        quote = value[start + 1]
+        if quote in {'"', "'"}:
+            end = _find_quoted_end(value, start + 2, quote, escaped_wrapper=True)
+            if end is None:
+                return len(value), "***REDACTED***", True
+            wrapper = f"\\{quote}"
+            return end, f"{wrapper}***REDACTED***{wrapper}", False
+    if value[start] in {'"', "'"}:
+        quote = value[start]
+        end = _find_quoted_end(value, start + 1, quote, escaped_wrapper=False)
+        if end is None:
+            return len(value), "***REDACTED***", True
+        return end, f"{quote}***REDACTED***{quote}", False
+    end = start
+    while end < len(value) and value[end] not in ",;}]\r\n":
+        end += 1
+    return end, "***REDACTED***", False
+
+
+def _find_quoted_end(
+    value: str, start: int, quote: str, *, escaped_wrapper: bool
+) -> int | None:
+    backslash_run = 0
+    for index in range(start, len(value)):
+        character = value[index]
+        if character == "\\":
+            backslash_run += 1
+            continue
+        if character == quote:
+            if escaped_wrapper:
+                closes_value = backslash_run % 4 == 1
+            else:
+                closes_value = backslash_run % 2 == 0
+            if closes_value:
+                return index + 1
+        backslash_run = 0
+    return None
 
 
 def scrub_approval_reason(value: str) -> str:
