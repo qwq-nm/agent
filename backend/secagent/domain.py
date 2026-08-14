@@ -12,6 +12,7 @@ class TaskScene(StrEnum):
 
 class TaskStatus(StrEnum):
     CREATED = "created"
+    QUEUED = "queued"
     PARSED = "parsed"
     PLANNED = "planned"
     RUNNING = "running"
@@ -21,6 +22,11 @@ class TaskStatus(StrEnum):
     FAILED_RETRYABLE = "failed_retryable"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+
+class UserRole(StrEnum):
+    ADMIN = "admin"
+    ANALYST = "analyst"
 
 
 class RiskLevel(StrEnum):

@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 
 from secagent.config import Settings
+from secagent.db import Base
 from secagent.main import create_app
 from secagent.repository import TaskRepository
 from secagent.services.ledger import LedgerService
@@ -22,7 +23,9 @@ def settings(tmp_path):
 
 @pytest.fixture
 def app(settings):
-    return create_app(settings)
+    application = create_app(settings)
+    Base.metadata.create_all(application.state.session_factory.kw["bind"])
+    return application
 
 
 @pytest.fixture

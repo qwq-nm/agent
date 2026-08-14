@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
 from secagent.config import Settings
+from secagent.db import Base
 from secagent.main import create_app
 
 
@@ -10,7 +11,9 @@ def test_mock_task_reaches_report_with_traceable_evidence(tmp_path) -> None:
         model_mode="mock",
         data_dir=tmp_path / "data",
     )
-    with TestClient(create_app(settings)) as client:
+    app = create_app(settings)
+    Base.metadata.create_all(app.state.session_factory.kw["bind"])
+    with TestClient(app) as client:
         task = client.post(
             "/api/tasks",
             json={

@@ -117,6 +117,15 @@ class TaskRepository:
         return row is not None
 
     def add_step(self, task_id: str, step_index: int, step: PlanStep) -> str:
+        existing = self.session.scalar(
+            select(TaskStepRow).where(
+                TaskStepRow.task_id == task_id,
+                TaskStepRow.step_index == step_index,
+            )
+        )
+        if existing is not None:
+            return existing.id
+
         row = TaskStepRow(
             task_id=task_id,
             step_index=step_index,

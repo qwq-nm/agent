@@ -1,11 +1,13 @@
 from fastapi.testclient import TestClient
 
 from secagent.config import Settings
+from secagent.db import Base
 from secagent.main import create_app
 
 
 def test_create_list_and_get_task(tmp_path) -> None:
     app = create_app(Settings(database_url=f"sqlite:///{tmp_path / 'test.db'}"))
+    Base.metadata.create_all(app.state.session_factory.kw["bind"])
     with TestClient(app) as client:
         created = client.post(
             "/api/tasks",

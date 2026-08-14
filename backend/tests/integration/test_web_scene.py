@@ -2,6 +2,7 @@ import httpx
 from fastapi.testclient import TestClient
 
 from secagent.config import Settings
+from secagent.db import Base
 from secagent.main import create_app
 from secagent.security.url_guard import UrlGuard
 from secagent.tools.web_tools import HttpFetch
@@ -33,6 +34,7 @@ def test_approved_web_scene_records_passive_http_and_form_evidence(tmp_path) -> 
         web_allowed_hosts="web-demo",
     )
     app = create_app(settings)
+    Base.metadata.create_all(app.state.session_factory.kw["bind"])
     app.state.tool_registry._tools["http_fetch"] = HttpFetch(
         UrlGuard({"web-demo"}, resolver=lambda host: ["172.20.0.10"]),
         transport=httpx.MockTransport(handler),
