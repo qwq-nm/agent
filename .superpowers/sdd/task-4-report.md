@@ -63,3 +63,30 @@ The following failures were observed before their corresponding production chang
 - Concurrency regression tests run on SQLite. The SQL uses conditional updates/row locking compatible with PostgreSQL, but PostgreSQL-backed concurrency tests remain desirable in CI.
 - Audit append-only behavior is enforced at the application/API boundary: there are no audit update/delete service methods or routes. Database administrators necessarily retain direct database authority.
 - The warning-only Starlette/httpx compatibility issue is outside Task 4 and should be handled in dependency maintenance.
+
+## Main-review security fixes
+
+- Tightened audit persistence with an audit-only recursive policy for generic `key`, body/response-body, exception, client-IP/IP, and identifier aliases. The general ledger redactor remains less destructive so ordinary business-key fields retain their value.
+- Extended recursive string scrubbing for labeled credentials, including quoted values and values nested in mappings or sequences.
+- Approval reasons are scrubbed and limited to 1000 characters at the repository persistence boundary. Ledger snapshots scrub again so legacy rows cannot expose credential-shaped text, while ordinary explanatory text remains intact.
+
+### Fix RED/GREEN evidence
+
+- Audit RED: the new persistence regression failed because a generic `key` value was stored verbatim. GREEN: the strict-alias and existing recursive-redaction cases passed together (2 passed).
+- Approval RED: the API/DB regression showed the full reason stored verbatim, and the repository-boundary regression stored 2016 characters. GREEN: both regressions passed (2 passed).
+- Quoted-secret RED: a quoted password containing spaces left a suffix in the persisted reason. GREEN: the regression passed after quoted values were scrubbed as one unit.
+- Focused audit file: 15 passed before the final quoted-secret refinement; the final verification below reruns the complete required sets.
+
+### Fix self-review and risk notes
+
+- The strict generic `key` policy is intentionally scoped to append-only audit details; normal `redact_mapping()` consumers are unchanged for ordinary business data.
+- Sanitization occurs before the approval update statement, so raw user-controlled reasons never enter the database through the repository. Snapshot-time scrubbing is defense in depth for pre-existing rows.
+- Pattern-based redaction cannot classify every possible opaque secret. Field-level audit redaction is deliberately conservative, and arbitrary unsupported objects remain non-serializable placeholders.
+
+### Fix verification
+
+- Task 4 required set: 35 passed.
+- Backend full suite: 88 passed.
+- Both runs emitted only the existing Starlette/httpx deprecation warning.
+- `python -m compileall -q backend/secagent`: passed.
+- `git diff --check`: passed.

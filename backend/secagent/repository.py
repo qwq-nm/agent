@@ -27,6 +27,7 @@ from secagent.domain import (
     UserRole,
 )
 from secagent.services.audit import AuditService
+from secagent.security.redaction import scrub_approval_reason
 
 if TYPE_CHECKING:
     from secagent.auth.dependencies import AuthenticatedUser
@@ -359,6 +360,7 @@ class TaskRepository:
         decided_by: str | None = None,
         commit: bool = True,
     ) -> ApprovalRow:
+        safe_reason = scrub_approval_reason(reason)
         row = self.session.scalar(
             select(ApprovalRow)
             .where(
@@ -386,7 +388,7 @@ class TaskRepository:
             )
             .values(
                 status="approved" if approved else "rejected",
-                reason=reason,
+                reason=safe_reason,
                 decided_by=decided_by,
                 decided_at=now,
             )

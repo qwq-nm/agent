@@ -4,7 +4,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from secagent.db_models import AuditEventRow
-from secagent.security.redaction import redact_mapping, redact_text
+from secagent.security.redaction import redact_audit_details, redact_text
 
 
 class AuditService:
@@ -32,7 +32,7 @@ class AuditService:
             outcome=outcome,
             ip_address=_safe_identifier(ip_address, 64),
             details_json=json.dumps(
-                redact_mapping(details or {}), ensure_ascii=False
+                redact_audit_details(details or {}), ensure_ascii=False
             ),
         )
         self.session.add(row)

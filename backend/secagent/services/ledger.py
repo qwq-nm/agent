@@ -3,7 +3,7 @@ from typing import Any
 
 from secagent.domain import ModelResponse, ModelStage, ToolResult
 from secagent.repository import TaskRepository
-from secagent.security.redaction import redact_mapping
+from secagent.security.redaction import redact_mapping, scrub_approval_reason
 
 
 class LedgerService:
@@ -142,7 +142,9 @@ class LedgerService:
                 "risk_level": row.risk_level,
                 "params_summary": row.params_summary,
                 "status": row.status,
-                "reason": row.reason,
+                "reason": (
+                    scrub_approval_reason(row.reason) if row.reason is not None else None
+                ),
             }
             for row in rows["approvals"]
         ]

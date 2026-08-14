@@ -22,6 +22,42 @@ def _events(app, action):
         )
 
 
+def _create_waiting_approval(analyst_client, app):
+    from secagent.repository import TaskRepository
+
+    task = analyst_client.post(
+        "/api/tasks",
+        json={
+            "goal": "Inspect approval reason handling",
+            "authorization_scope": "Uploaded logs only",
+        },
+    ).json()
+    with app.state.session_factory() as session:
+        repository = TaskRepository(session)
+        repository.set_task_status(task["id"], TaskStatus.RUNNING)
+        step_id = repository.add_step(
+            task["id"],
+            0,
+            PlanStep(
+                name="Review passive request",
+                purpose="Verify approval handling",
+                tool_name="http_fetch",
+                params={},
+                risk_level=RiskLevel.MEDIUM,
+                need_human_confirm=True,
+            ),
+        )
+        approval_id = repository.add_approval(
+            task["id"],
+            step_id=step_id,
+            tool_name="http_fetch",
+            risk_level="medium",
+            params_summary="{}",
+        )
+        repository.set_task_status(task["id"], TaskStatus.WAITING_HUMAN)
+    return task, approval_id
+
+
 def test_forbidden_access_is_audited(alice_client, bob_task, app, seeded_analyst):
     alice_client.get(f"/api/tasks/{bob_task['id']}")
 
@@ -98,6 +134,49 @@ def test_audit_service_recursively_redacts_sensitive_fields(app, seeded_admin):
     assert "object-secret-must-not-be-serialized" not in json.dumps(details)
 
 
+def test_audit_service_uses_strict_alias_and_inline_secret_redaction(
+    app, seeded_admin
+):
+    secrets = {
+        "key": "ordinary-looking-key-material",
+        "response_body": "raw-provider-response",
+        "body": "raw-request-body",
+        "exception": "exception-internals",
+        "client_ip": "192.0.2.10",
+        "IP": "198.51.100.20",
+        "identifier": "private-user-identifier",
+    }
+    with app.state.session_factory() as session:
+        AuditService(session).record(
+            seeded_admin.id,
+            "test.strict_redaction",
+            "test",
+            "two",
+            "success",
+            {
+                **secrets,
+                "safe": {"business_key": "sort_order", "message": "still useful"},
+                "nested": [
+                    "password=reason-password",
+                    {"message": "cookie: session-cookie; api_key=sk-audit-inline"},
+                ],
+            },
+        )
+        session.commit()
+
+    details = json.loads(_events(app, "test.strict_redaction")[-1].details_json)
+    serialized = json.dumps(details)
+    for field, secret in secrets.items():
+        assert details[field] == "***REDACTED***"
+        assert secret not in serialized
+    assert details["safe"] == {
+        "business_key": "sort_order",
+        "message": "still useful",
+    }
+    for secret in ("reason-password", "session-cookie", "sk-audit-inline"):
+        assert secret not in serialized
+
+
 def test_audit_service_redacts_secret_shaped_resource_identifiers(app, seeded_admin):
     with app.state.session_factory() as session:
         AuditService(session).record(
@@ -113,6 +192,64 @@ def test_audit_service_redacts_secret_shaped_resource_identifiers(app, seeded_ad
     event = _events(app, "test.resource_redaction")[-1]
     assert "sk-attacker-supplied-api-key" not in event.resource_id
     assert "REDACTED" in event.resource_id
+
+
+def test_approval_reason_is_scrubbed_before_database_and_ledger_persistence(
+    analyst_client, app
+):
+    task, approval_id = _create_waiting_approval(analyst_client, app)
+    secrets = (
+        "reason password",
+        "reason-bearer-token",
+        "reason-token",
+        "session-cookie",
+        "sk-review-secret",
+        "spaced-api-key",
+        "generic-key-material",
+    )
+    reason = (
+        'Rejected: password="quoted reason password"; '
+        "Authorization: Bearer reason-bearer-token; "
+        "token=reason-token; cookie=session-cookie; "
+        "api_key=sk-review-secret; API key: spaced-api-key; "
+        "key=generic-key-material"
+    )
+
+    response = analyst_client.post(
+        f"/api/tasks/{task['id']}/approve",
+        json={"approved": False, "reason": reason},
+    )
+
+    assert response.status_code == 200
+    with app.state.session_factory() as session:
+        persisted_reason = session.get(ApprovalRow, approval_id).reason
+    detail = analyst_client.get(f"/api/tasks/{task['id']}").json()
+    ledger_reason = detail["approvals"][-1]["reason"]
+    assert persisted_reason == ledger_reason
+    assert "Rejected:" in persisted_reason
+    assert "***REDACTED***" in persisted_reason
+    for secret in secrets:
+        assert secret not in persisted_reason
+        assert secret not in json.dumps(detail)
+
+
+def test_approval_reason_is_bounded_at_repository_boundary(
+    analyst_client, app
+):
+    from secagent.repository import TaskRepository
+
+    task, approval_id = _create_waiting_approval(analyst_client, app)
+    reason = "Scope reviewed; " + ("x" * 2000)
+
+    with app.state.session_factory() as session:
+        TaskRepository(session).decide_latest_approval(
+            task["id"], approved=False, reason=reason
+        )
+    with app.state.session_factory() as session:
+        persisted_reason = session.get(ApprovalRow, approval_id).reason
+
+    assert persisted_reason.startswith("Scope reviewed; ")
+    assert len(persisted_reason) <= 1000
 
 
 def test_provider_check_and_task_status_actions_are_audited(
