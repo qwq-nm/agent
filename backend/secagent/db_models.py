@@ -232,6 +232,21 @@ class EvidenceRow(Base):
     )
 
 
+class ToolCallEvidenceRow(Base):
+    __tablename__ = "tool_call_evidences"
+
+    tool_call_id: Mapped[str] = mapped_column(
+        ForeignKey("tool_calls.id", ondelete="CASCADE"), primary_key=True
+    )
+    evidence_id: Mapped[str] = mapped_column(
+        ForeignKey("evidences.id", ondelete="CASCADE"), primary_key=True
+    )
+    step_attempt: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc
+    )
+
+
 class ApprovalRow(Base):
     __tablename__ = "approvals"
 

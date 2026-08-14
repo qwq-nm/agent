@@ -117,6 +117,7 @@ class TaskService:
             try:
                 result = await self.runner.run(
                     task_id,
+                    lease,
                     lambda: self.job_service.is_active(
                         lease.job_run_id, lease.worker_id
                     ),

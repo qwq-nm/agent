@@ -44,6 +44,7 @@ REQUIRED_COLUMNS = {
     },
     "tool_calls": {"duration_ms", "attempt", "error_code"},
     "evidences": {"sha256", "file_ref"},
+    "tool_call_evidences": {"tool_call_id", "evidence_id", "step_attempt"},
     "approvals": {"decided_by", "expires_at"},
     "reports": {"version", "evidence_ids_json"},
     "audit_events": {
@@ -78,6 +79,7 @@ def test_team_schema_has_required_tables(tmp_path):
         "model_calls",
         "tool_calls",
         "evidences",
+        "tool_call_evidences",
         "approvals",
         "reports",
         "audit_events",
@@ -126,6 +128,20 @@ def test_team_schema_enforces_ownership_and_task_lifecycle_foreign_keys(tmp_path
         and fk["referred_table"] == "users"
         and fk["options"].get("ondelete") == "RESTRICT"
         for fk in audit_actor
+    )
+
+    bindings = inspector.get_foreign_keys("tool_call_evidences")
+    assert any(
+        fk["constrained_columns"] == ["tool_call_id"]
+        and fk["referred_table"] == "tool_calls"
+        and fk["options"].get("ondelete") == "CASCADE"
+        for fk in bindings
+    )
+    assert any(
+        fk["constrained_columns"] == ["evidence_id"]
+        and fk["referred_table"] == "evidences"
+        and fk["options"].get("ondelete") == "CASCADE"
+        for fk in bindings
     )
 
 

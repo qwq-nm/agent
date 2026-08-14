@@ -63,3 +63,47 @@ Task 5 command `JobRunRow` model or changing its JobRun-to-Task lock order.
 - No GPT provider or production fallback was added; existing model routing remains
   unchanged.
 - Existing limits of ten users and three workers were not altered.
+
+## Review fixes
+
+The post-implementation review identified three Important durability gaps. They
+were reproduced as failing tests before the fixes were applied:
+
+- A controlled worker interleaving expired and recovered the old lease while its
+  tool was blocked. Before the fix, the old worker still committed the step,
+  ToolCall, and Evidence after the replacement worker claimed the job.
+- A successful step accepted a stored 64-character value without proving that it
+  was the SHA-256 digest of the persisted evidence content, and evidence from an
+  older step attempt could satisfy a newer attempt.
+- Retrying a same-attempt partial ToolCall/Evidence commit had no atomic recovery
+  API and could collide with the canonical Evidence uniqueness contract.
+
+All critical Runner/Executor/Ledger writes now carry the immutable `JobLease`.
+Each write transaction first locks and validates JobRun ownership, job attempt,
+`running` status, and expiration, then locks the Task, preserving the established
+JobRun-to-Task order. Tool outcome, canonical Evidence binding, and step terminal
+result are committed atomically; a stale fence rolls the transaction back before
+any stale result, report, or runtime error can be written.
+
+Canonical Evidence retains the existing `(task_id, sha256, source)` uniqueness
+constraint. Migration `20260815_02` adds `tool_call_evidences` so an observation
+is bound to the ToolCall and exact step attempt that observed it. This permits a
+same-attempt partial record to be adopted safely and permits a later attempt to
+reference the same canonical Evidence without falsifying its original provenance.
+Replay now recomputes SHA-256 from persisted content and only accepts bindings
+from the current step attempt.
+
+Review-fix verification:
+
+- Exact RED/GREEN cases for forged hashes, old-attempt evidence, same-attempt
+  partial recovery, and stale-worker database writes: `4 passed`.
+- Task 6 focused, Task 5 lifecycle/enqueue regressions, and schema contract:
+  `51 passed`.
+- Full suite: `136 passed`, `0 failed`.
+- Core coverage: `88.55%` across repository, Runner, Executor, Ledger, JobService,
+  TaskEventService, SSE, and stream tickets (required minimum: 85%).
+- A fresh SQLite database completed `upgrade head -> downgrade 20260814_01 ->
+  upgrade head`; `alembic current` reported `20260815_02 (head)` and
+  `alembic check` reported no upgrade operations (no ORM drift).
+- `python -m compileall -q backend/secagent migrations` and `git diff --check`
+  passed. Git emitted only the repository's line-ending conversion notices.

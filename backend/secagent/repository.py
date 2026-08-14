@@ -16,6 +16,7 @@ from secagent.db_models import (
     ReportRow,
     TaskRow,
     TaskStepRow,
+    ToolCallEvidenceRow,
     ToolCallRow,
     UserRow,
 )
@@ -33,6 +34,10 @@ from secagent.security.redaction import scrub_approval_reason
 
 if TYPE_CHECKING:
     from secagent.auth.dependencies import AuthenticatedUser
+
+
+class StaleJobLease(RuntimeError):
+    pass
 
 
 class AuthRepository:
@@ -183,6 +188,39 @@ class AuthRepository:
 class TaskRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
+
+    def require_job_fence(self, lease: Any, task_id: str) -> JobRunRow:
+        now = datetime.now(timezone.utc)
+        job = self.session.scalar(
+            select(JobRunRow)
+            .where(JobRunRow.id == lease.job_run_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        expires = job.lease_expires_at if job is not None else None
+        if expires is not None and expires.tzinfo is None:
+            expires = expires.replace(tzinfo=timezone.utc)
+        if (
+            job is None
+            or job.task_id != task_id
+            or job.worker_id != lease.worker_id
+            or job.attempt != lease.attempt
+            or job.status != "running"
+            or expires is None
+            or expires <= now
+        ):
+            self.session.rollback()
+            raise StaleJobLease("job lease was lost")
+        task = self.session.scalar(
+            select(TaskRow)
+            .where(TaskRow.id == task_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if task is None or task.status != TaskStatus.RUNNING.value:
+            self.session.rollback()
+            raise StaleJobLease("task execution was invalidated")
+        return job
 
     def create_task(
         self,
@@ -528,7 +566,11 @@ class TaskRepository:
         self.session.refresh(row)
         return self._read(row)
 
-    def set_task_scene(self, task_id: str, scene: TaskScene) -> TaskRead:
+    def set_task_scene(
+        self, task_id: str, scene: TaskScene, *, lease: Any | None = None
+    ) -> TaskRead:
+        if lease is not None:
+            self.require_job_fence(lease, task_id)
         row = self.session.get(TaskRow, task_id)
         if row is None:
             raise KeyError(task_id)
@@ -550,7 +592,11 @@ class TaskRepository:
         tool_name: str,
         risk_level: str,
         params_summary: str,
+        lease: Any | None = None,
+        commit: bool = True,
     ) -> str:
+        if lease is not None:
+            self.require_job_fence(lease, task_id)
         row = ApprovalRow(
             task_id=task_id,
             step_id=step_id,
@@ -560,7 +606,10 @@ class TaskRepository:
             expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
         )
         self.session.add(row)
-        self.session.commit()
+        if commit:
+            self.session.commit()
+        else:
+            self.session.flush()
         return row.id
 
     def decide_latest_approval(
@@ -701,18 +750,44 @@ class TaskRepository:
         ):
             return None
         expected_hashes = set(hashes)
-        persisted_hashes = self.session.scalar(
-            select(func.count(func.distinct(EvidenceRow.sha256)))
-            .select_from(EvidenceRow)
-            .join(ToolCallRow, EvidenceRow.tool_call_id == ToolCallRow.id)
-            .where(
-                EvidenceRow.task_id == task_id,
-                EvidenceRow.sha256.in_(expected_hashes),
-                ToolCallRow.step_id == row.id,
-                ToolCallRow.status == "completed",
-            )
+        calls = list(
+            self.session.scalars(
+                select(ToolCallRow).where(
+                    ToolCallRow.task_id == task_id,
+                    ToolCallRow.step_id == row.id,
+                    ToolCallRow.status == "completed",
+                    ToolCallRow.attempt == row.attempt,
+                )
+            ).all()
         )
-        if persisted_hashes != len(expected_hashes):
+        call_ids = [call.id for call in calls]
+        associated_ids = set(
+            self.session.scalars(
+                select(ToolCallEvidenceRow.evidence_id).where(
+                    ToolCallEvidenceRow.tool_call_id.in_(call_ids),
+                    ToolCallEvidenceRow.step_attempt == row.attempt,
+                )
+            ).all()
+        ) if call_ids else set()
+        persisted_evidence = list(
+            self.session.scalars(
+                select(EvidenceRow).where(
+                    EvidenceRow.task_id == task_id,
+                    EvidenceRow.sha256.in_(expected_hashes),
+                    or_(
+                        EvidenceRow.id.in_(associated_ids),
+                        EvidenceRow.tool_call_id.in_(call_ids),
+                    ),
+                )
+            ).all()
+        )
+        verified_hashes = {
+            evidence.sha256
+            for evidence in persisted_evidence
+            if evidence.sha256
+            == hashlib.sha256(evidence.content.encode("utf-8")).hexdigest()
+        }
+        if verified_hashes != expected_hashes:
             return None
         return stored
 
@@ -723,7 +798,10 @@ class TaskRepository:
         step: PlanStep,
         *,
         idempotency_key: str | None = None,
+        lease: Any | None = None,
     ) -> str:
+        if lease is not None:
+            self.require_job_fence(lease, task_id)
         key = idempotency_key or self.step_idempotency_key(
             task_id, step_index, step
         )
@@ -768,6 +846,112 @@ class TaskRepository:
         self.session.commit()
         return row.id
 
+    def persist_step_result(
+        self,
+        lease: Any,
+        *,
+        step_id: str,
+        tool_name: str,
+        params: dict[str, Any],
+        result: dict[str, Any],
+        evidence: list[dict[str, Any]],
+    ) -> str:
+        self.require_job_fence(lease, lease.task_id)
+        step = self.session.scalar(
+            select(TaskStepRow)
+            .where(TaskStepRow.id == step_id, TaskStepRow.task_id == lease.task_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if step is None:
+            self.session.rollback()
+            raise KeyError(step_id)
+        params_json = json.dumps(params, ensure_ascii=False, sort_keys=True)
+        result_json = json.dumps(result, ensure_ascii=False, sort_keys=True)
+        tool_call = None
+        for candidate in self.session.scalars(
+            select(ToolCallRow).where(
+                ToolCallRow.task_id == lease.task_id,
+                ToolCallRow.step_id == step_id,
+                ToolCallRow.tool_name == tool_name,
+                ToolCallRow.status == "completed",
+                ToolCallRow.attempt == step.attempt,
+            )
+        ).all():
+            try:
+                same_params = json.loads(candidate.params_json) == params
+                same_result = json.loads(candidate.result_json) == result
+            except json.JSONDecodeError:
+                continue
+            if same_params and same_result:
+                tool_call = candidate
+                break
+        if tool_call is None:
+            tool_call = ToolCallRow(
+                task_id=lease.task_id,
+                step_id=step_id,
+                tool_name=tool_name,
+                params_json=params_json,
+                result_json=result_json,
+                status="completed",
+                attempt=step.attempt,
+            )
+            self.session.add(tool_call)
+            self.session.flush()
+
+        evidence_hashes: list[str] = []
+        for item in evidence:
+            content = str(item["content"])
+            digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            evidence_hashes.append(digest)
+            evidence_row = self.session.scalar(
+                select(EvidenceRow).where(
+                    EvidenceRow.task_id == lease.task_id,
+                    EvidenceRow.sha256 == digest,
+                    EvidenceRow.source == str(item["source"]),
+                )
+            )
+            if evidence_row is None:
+                evidence_row = EvidenceRow(
+                    task_id=lease.task_id,
+                    tool_call_id=tool_call.id,
+                    evidence_type=str(item["evidence_type"]),
+                    source=str(item["source"]),
+                    content=content,
+                    sha256=digest,
+                    confidence=float(item["confidence"]),
+                    metadata_json=json.dumps(item["metadata"], ensure_ascii=False),
+                )
+                self.session.add(evidence_row)
+                self.session.flush()
+            elif (
+                evidence_row.content != content
+                or hashlib.sha256(evidence_row.content.encode("utf-8")).hexdigest()
+                != digest
+            ):
+                self.session.rollback()
+                raise ValueError("conflicting canonical evidence")
+            binding = self.session.get(
+                ToolCallEvidenceRow, (tool_call.id, evidence_row.id)
+            )
+            if binding is None:
+                self.session.add(
+                    ToolCallEvidenceRow(
+                        tool_call_id=tool_call.id,
+                        evidence_id=evidence_row.id,
+                        step_attempt=step.attempt,
+                    )
+                )
+        step.status = "success" if result.get("success") is True else "failed"
+        step.result_json = json.dumps(
+            {"result": result, "evidence_hashes": evidence_hashes},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        step.updated_at = datetime.now(timezone.utc)
+        self.session.commit()
+        return tool_call.id
+
     def update_step(self, step_id: str, status: str, **values: Any) -> None:
         row = self.session.get(TaskStepRow, step_id)
         if row is None:
@@ -796,7 +980,9 @@ class TaskRepository:
         row.updated_at = datetime.now(timezone.utc)
         self.session.commit()
 
-    def add_model_call(self, **values: Any) -> str:
+    def add_model_call(self, *, lease: Any | None = None, **values: Any) -> str:
+        if lease is not None:
+            self.require_job_fence(lease, values["task_id"])
         row = ModelCallRow(**values)
         self.session.add(row)
         self.session.commit()
@@ -808,13 +994,29 @@ class TaskRepository:
         self.session.commit()
         return row.id
 
-    def add_evidence(self, **values: Any) -> str:
+    def add_evidence(self, *, lease: Any | None = None, **values: Any) -> str:
+        if lease is not None:
+            self.require_job_fence(lease, values["task_id"])
         row = EvidenceRow(**values)
         self.session.add(row)
         self.session.commit()
         return row.id
 
-    def save_report(self, task_id: str, content: str, *, is_demo: bool) -> str:
+    def save_report(
+        self,
+        task_id: str,
+        content: str,
+        *,
+        is_demo: bool,
+        lease: Any | None = None,
+    ) -> str:
+        if lease is not None:
+            self.require_job_fence(lease, task_id)
+        task = self.session.get(TaskRow, task_id)
+        if task is None:
+            self.session.rollback()
+            raise KeyError(task_id)
+        task.is_demo = is_demo
         row = self.session.scalar(select(ReportRow).where(ReportRow.task_id == task_id))
         if row is None:
             row = ReportRow(task_id=task_id, content=content, is_demo=is_demo)

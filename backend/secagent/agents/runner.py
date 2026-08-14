@@ -9,8 +9,9 @@ from secagent.agents.planner import Planner
 from secagent.agents.reporter import Reporter
 from secagent.agents.risk import RiskGate
 from secagent.domain import ModelStage, TaskRunResult, TaskStatus
-from secagent.repository import TaskRepository
+from secagent.repository import StaleJobLease, TaskRepository
 from secagent.services.ledger import LedgerService
+from secagent.services.job_service import JobLease
 from secagent.tools.base import ToolContext
 from secagent.domain import ToolResult
 from secagent.services.task_events import TaskEventService
@@ -38,35 +39,35 @@ class AgentRunner:
         self.executor = executor
         self.critic = critic
         self.reporter = reporter
-        self._lease_is_active: Callable[[], bool] | None = None
-
     async def run(
         self,
         task_id: str,
+        lease: JobLease,
         lease_is_active: Callable[[], bool] | None = None,
     ) -> TaskRunResult:
-        self._lease_is_active = lease_is_active
         task = self.repository.get_task(task_id)
         if task is None:
             raise KeyError(task_id)
         try:
-            self._ensure_running(task_id)
+            self._ensure_running(task_id, lease_is_active)
             parsed, parse_call = await self.parser.parse(task)
-            self._ensure_running(task_id)
+            self._ensure_running(task_id, lease_is_active)
             self.ledger.record_model_response(
-                task_id, ModelStage.TASK_PARSE, parse_call
+                task_id, ModelStage.TASK_PARSE, parse_call, lease=lease
             )
-            self.repository.set_task_scene(task_id, parsed.scene)
+            self.repository.set_task_scene(task_id, parsed.scene, lease=lease)
 
             plan, plan_call = await self.planner.plan(task, parsed)
-            self._ensure_running(task_id)
-            self.ledger.record_model_response(task_id, ModelStage.PLAN, plan_call)
+            self._ensure_running(task_id, lease_is_active)
+            self.ledger.record_model_response(
+                task_id, ModelStage.PLAN, plan_call, lease=lease
+            )
             workspace = self.data_dir / "tasks" / task_id
             workspace.mkdir(parents=True, exist_ok=True)
             runtime: dict = {}
 
             for index, step in enumerate(plan, start=1):
-                self._ensure_running(task_id)
+                self._ensure_running(task_id, lease_is_active)
                 params = self._resolve_params(step.params, workspace, runtime)
                 idempotency_key = self.repository.step_idempotency_key(
                     task_id, index, step
@@ -86,6 +87,7 @@ class AgentRunner:
                     index,
                     step,
                     idempotency_key=idempotency_key,
+                    lease=lease,
                 )
                 approved = self.repository.is_tool_approved(
                     task_id, step.tool_name
@@ -94,13 +96,15 @@ class AgentRunner:
                     step.risk_level, approved=approved
                 )
                 if decision.action == "wait":
-                    self._ensure_running(task_id)
+                    self._ensure_running(task_id, lease_is_active)
                     self.repository.add_approval(
                         task_id,
                         step_id=step_id,
                         tool_name=step.tool_name,
                         risk_level=step.risk_level.value,
                         params_summary=str(params),
+                        lease=lease,
+                        commit=False,
                     )
                     self.repository.set_task_status(
                         task_id, TaskStatus.WAITING_HUMAN, commit=False
@@ -123,15 +127,8 @@ class AgentRunner:
                     tool_name=step.tool_name,
                     params=params,
                     context=ToolContext(task_id, parsed.scene.value, workspace),
+                    lease=lease,
                 )
-                if result.success:
-                    self.repository.complete_step(
-                        step_id,
-                        result.model_dump(mode="json"),
-                        self.ledger.evidence_hashes(result),
-                    )
-                else:
-                    self.repository.update_step(step_id, "failed")
                 if step.tool_name == "http_fetch" and result.evidence:
                     runtime["http_response"] = result.evidence[0].get(
                         "metadata", {}
@@ -139,31 +136,27 @@ class AgentRunner:
                 if not result.success:
                     raise RuntimeError(result.error or result.summary)
 
-            self._ensure_running(task_id)
+            self._ensure_running(task_id, lease_is_active)
             critic, critic_call = await self.critic.review(task_id, parsed)
-            self._ensure_running(task_id)
+            self._ensure_running(task_id, lease_is_active)
             self.ledger.record_model_response(
-                task_id, ModelStage.CRITIC, critic_call
+                task_id, ModelStage.CRITIC, critic_call, lease=lease
             )
             if not critic.is_complete:
                 raise RuntimeError(f"missing evidence: {critic.missing_evidence}")
 
             report, report_call = await self.reporter.render(task_id, parsed)
-            self._ensure_running(task_id)
+            self._ensure_running(task_id, lease_is_active)
             self.ledger.record_model_response(
-                task_id, ModelStage.REPORT, report_call
+                task_id, ModelStage.REPORT, report_call, lease=lease
             )
             is_demo = any(
                 call.is_demo
                 for call in (parse_call, plan_call, critic_call, report_call)
             )
-            self.repository.set_task_status(
-                task_id,
-                TaskStatus.RUNNING,
-                is_demo=is_demo,
-                commit=False,
+            self.repository.save_report(
+                task_id, report, is_demo=is_demo, lease=lease
             )
-            self.repository.save_report(task_id, report, is_demo=is_demo)
             return TaskRunResult(
                 task_id=task_id,
                 status=TaskStatus.COMPLETED,
@@ -172,17 +165,28 @@ class AgentRunner:
             )
         except ExecutionInterrupted:
             raise
+        except StaleJobLease as exc:
+            raise ExecutionInterrupted("job lease was lost") from exc
         except Exception as exc:
-            self.ledger.record_error(task_id, type(exc).__name__, str(exc))
+            try:
+                self.ledger.record_error(
+                    task_id, type(exc).__name__, str(exc), lease=lease
+                )
+            except StaleJobLease as stale:
+                raise ExecutionInterrupted("job lease was lost") from stale
             raise
 
-    def _ensure_running(self, task_id: str) -> None:
+    def _ensure_running(
+        self,
+        task_id: str,
+        lease_is_active: Callable[[], bool] | None,
+    ) -> None:
         task = self.repository.get_task(task_id)
         if task is None:
             raise KeyError(task_id)
         if task.status is not TaskStatus.RUNNING:
             raise ExecutionInterrupted("task execution was invalidated")
-        if self._lease_is_active is not None and not self._lease_is_active():
+        if lease_is_active is not None and not lease_is_active():
             raise ExecutionInterrupted("job lease was lost")
 
     @staticmethod

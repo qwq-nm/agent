@@ -1,10 +1,48 @@
+import hashlib
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from threading import Event
 
-from secagent.db_models import JobRunRow
+from secagent.db_models import JobRunRow, TaskStepRow
 from secagent.domain import TaskCreate, TaskStatus
 from secagent.services.job_service import JobService
 from secagent.services.task_events import TaskEventService
+from secagent.services.ledger import LedgerService
+from secagent.repository import TaskRepository
 from secagent.domain import PlanStep, RiskLevel
+from secagent.domain import ToolResult
+from secagent.tools.base import BaseTool, ToolContext
+from secagent.worker import execute_queued_task
+
+
+class BlockingEvidenceTool(BaseTool):
+    name = "demo_evidence"
+    scene = "incident_response"
+    risk_level = RiskLevel.LOW
+    idempotent = True
+    timeout_seconds = 10.0
+
+    def __init__(self) -> None:
+        self.entered = Event()
+        self.release = Event()
+
+    async def run(self, params: dict, context: ToolContext) -> ToolResult:
+        self.entered.set()
+        while not self.release.is_set():
+            await asyncio.sleep(0.01)
+        return ToolResult(
+            success=True,
+            summary="old worker result",
+            evidence=[
+                {
+                    "evidence_type": "observation",
+                    "source": "old-worker",
+                    "content": "must not persist",
+                    "confidence": 1.0,
+                }
+            ],
+        )
 
 
 def _expired_running_job(repository, *, attempt: int) -> tuple[str, str]:
@@ -88,7 +126,7 @@ def test_step_is_reused_only_after_success_with_evidence_hash(repository) -> Non
     assert repository.completed_step_result(task.id, key) is None
     retry_id = repository.add_step(task.id, 1, step, idempotency_key=key)
     assert retry_id == step_id
-    assert repository.session.get(__import__("secagent.db_models", fromlist=["TaskStepRow"]).TaskStepRow, step_id).attempt == 2
+    assert repository.session.get(TaskStepRow, step_id).attempt == 2
 
     repository.complete_step(
         step_id,
@@ -112,6 +150,7 @@ def test_step_is_reused_only_after_success_with_evidence_hash(repository) -> Non
         params_json="{}",
         result_json="{}",
         status="completed",
+        attempt=2,
     )
     repository.add_evidence(
         task_id=task.id,
@@ -122,7 +161,180 @@ def test_step_is_reused_only_after_success_with_evidence_hash(repository) -> Non
         sha256="a" * 64,
         confidence=1.0,
     )
+    assert repository.completed_step_result(task.id, key) is None
+
+    content = "verified evidence"
+    content_hash = hashlib.sha256(content.encode()).hexdigest()
+    repository.complete_step(
+        step_id,
+        {"success": True, "summary": "done"},
+        [content_hash],
+    )
+    repository.add_evidence(
+        task_id=task.id,
+        tool_call_id=tool_call_id,
+        evidence_type="observation",
+        source="verified-source",
+        content=content,
+        sha256=content_hash,
+        confidence=1.0,
+    )
     assert repository.completed_step_result(task.id, key)["result"]["summary"] == "done"
+
+
+def test_old_step_attempt_evidence_cannot_complete_new_attempt(repository) -> None:
+    task = repository.create_task(
+        TaskCreate(goal="Attempt-bound scan", authorization_scope="Owned source")
+    )
+    step = PlanStep(
+        name="Scan",
+        purpose="Inspect",
+        tool_name="source_scan",
+        params={},
+        risk_level=RiskLevel.LOW,
+    )
+    key = repository.step_idempotency_key(task.id, 1, step)
+    step_id = repository.add_step(task.id, 1, step, idempotency_key=key)
+    repository.add_step(task.id, 1, step, idempotency_key=key)
+    content = "old attempt evidence"
+    content_hash = hashlib.sha256(content.encode()).hexdigest()
+    tool_call_id = repository.add_tool_call(
+        task_id=task.id,
+        step_id=step_id,
+        tool_name="source_scan",
+        params_json="{}",
+        result_json="{}",
+        status="completed",
+        attempt=1,
+    )
+    repository.add_evidence(
+        task_id=task.id,
+        tool_call_id=tool_call_id,
+        evidence_type="observation",
+        source="old-attempt",
+        content=content,
+        sha256=content_hash,
+        confidence=1.0,
+    )
+    repository.complete_step(
+        step_id,
+        {"success": True, "summary": "stale"},
+        [content_hash],
+    )
+
+    assert repository.session.get(TaskStepRow, step_id).attempt == 2
+    assert repository.completed_step_result(task.id, key) is None
+
+
+def test_partial_same_attempt_result_is_completed_without_duplicate_evidence(
+    repository, fake_queue
+) -> None:
+    task = repository.create_task(
+        TaskCreate(goal="Resume partial result", authorization_scope="Owned source")
+    )
+    repository.set_task_status(task.id, TaskStatus.QUEUED)
+    job = repository.add_job_run(task.id, "partial-command")
+    job.status = "queued"
+    repository.commit()
+    lease = JobService(repository, fake_queue).claim(
+        task.id, job.command_id, "worker-a"
+    )
+    assert lease is not None
+    step = PlanStep(
+        name="Scan",
+        purpose="Inspect",
+        tool_name="source_scan",
+        params={},
+        risk_level=RiskLevel.LOW,
+    )
+    key = repository.step_idempotency_key(task.id, 1, step)
+    step_id = repository.add_step(task.id, 1, step, idempotency_key=key)
+    result = ToolResult(
+        success=True,
+        summary="same observation",
+        evidence=[
+            {
+                "evidence_type": "observation",
+                "source": "partial-source",
+                "content": "same evidence",
+                "confidence": 1.0,
+            }
+        ],
+    )
+    ledger = LedgerService(repository)
+    ledger.record_tool_result(task.id, step_id, step.tool_name, {}, result)
+
+    ledger.record_step_result(
+        lease,
+        step_id=step_id,
+        tool_name=step.tool_name,
+        params={},
+        result=result,
+    )
+
+    rows = repository.ledger_rows(task.id)
+    assert len(rows["tool_calls"]) == 1
+    assert len(rows["evidences"]) == 1
+    assert repository.session.get(TaskStepRow, step_id).status == "success"
+    assert repository.completed_step_result(task.id, key)["result"]["summary"] == (
+        "same observation"
+    )
+
+
+def test_recovered_worker_fences_old_tool_result_writes(
+    analyst_client, app, fake_queue
+) -> None:
+    tool = BlockingEvidenceTool()
+    app.state.tool_registry._tools[tool.name] = tool
+    task = analyst_client.post(
+        "/api/tasks",
+        json={
+            "goal": "Analyze controlled evidence",
+            "authorization_scope": "Built-in evidence only",
+        },
+    ).json()
+    analyst_client.post(
+        f"/api/tasks/{task['id']}/run",
+        headers={"Idempotency-Key": "stale-write-fence"},
+    )
+    queued = fake_queue.enqueued[0]
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        old_worker = executor.submit(
+            asyncio.run,
+            execute_queued_task(
+                queued.task_id,
+                queued.command_id,
+                app.state.session_factory,
+                app.state.model_router,
+                app.state.tool_registry,
+                app.state.settings.data_dir,
+                worker_id="worker-old",
+                heartbeat_seconds=3600,
+            ),
+        )
+        assert tool.entered.wait(timeout=5)
+        with app.state.session_factory() as session:
+            repository = TaskRepository(session)
+            job = repository.get_job_run(queued.command_id)
+            job.lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+            repository.commit()
+            assert JobService(repository, fake_queue).recover_expired() == 1
+            replacement = JobService(repository, fake_queue).claim(
+                task["id"], queued.command_id, "worker-new"
+            )
+            assert replacement is not None
+        tool.release.set()
+        old_worker.result(timeout=10)
+
+    with app.state.session_factory() as session:
+        repository = TaskRepository(session)
+        rows = repository.ledger_rows(task["id"])
+        assert rows["steps"][0].status == "pending"
+        assert rows["steps"][0].result_json is None
+        assert rows["tool_calls"] == []
+        assert rows["evidences"] == []
+        assert rows["reports"] == []
 
 
 def test_step_without_evidence_hash_is_not_reused(repository) -> None:

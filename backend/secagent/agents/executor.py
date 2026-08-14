@@ -1,4 +1,6 @@
-from secagent.domain import RiskLevel, TaskStatus, ToolResult
+from secagent.domain import RiskLevel, ToolResult
+from secagent.repository import StaleJobLease
+from secagent.services.job_service import JobLease
 from secagent.services.ledger import LedgerService
 from secagent.tools.base import BaseTool, ToolContext
 from secagent.tools.registry import ToolRegistry
@@ -43,10 +45,17 @@ class Executor:
         tool_name: str,
         params: dict,
         context: ToolContext,
+        lease: JobLease,
     ) -> ToolResult:
         result = await self.registry.execute(tool_name, params, context)
-        task = self.ledger.repository.get_task(task_id)
-        if task is None or task.status is not TaskStatus.RUNNING:
-            raise ExecutionInterrupted("task execution was invalidated")
-        self.ledger.record_tool_result(task_id, step_id, tool_name, params, result)
+        try:
+            self.ledger.record_step_result(
+                lease,
+                step_id=step_id,
+                tool_name=tool_name,
+                params=params,
+                result=result,
+            )
+        except StaleJobLease as exc:
+            raise ExecutionInterrupted("job lease was lost") from exc
         return result

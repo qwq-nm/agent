@@ -22,9 +22,11 @@ class LedgerService:
         is_demo: bool,
         model: str = "unknown",
         latency_ms: int = 0,
+        lease: Any | None = None,
     ) -> str:
         redacted = redact_mapping({"input_summary": input_summary})
         return self.repository.add_model_call(
+            lease=lease,
             task_id=task_id,
             provider=provider,
             model=model,
@@ -40,6 +42,8 @@ class LedgerService:
         task_id: str,
         stage: ModelStage,
         response: ModelResponse,
+        *,
+        lease: Any | None = None,
     ) -> str:
         reasons = {
             ModelStage.TASK_PARSE: "中文任务理解",
@@ -56,6 +60,7 @@ class LedgerService:
             input_summary=f"{stage.value} structured request",
             latency_ms=response.latency_ms,
             is_demo=response.is_demo,
+            lease=lease,
         )
 
     def record_tool_call(
@@ -86,9 +91,11 @@ class LedgerService:
         confidence: float,
         metadata: dict[str, Any] | None = None,
         tool_call_id: str | None = None,
+        lease: Any | None = None,
     ) -> str:
         redacted_content = redact_mapping(content)
         return self.repository.add_evidence(
+            lease=lease,
             task_id=task_id,
             tool_call_id=tool_call_id,
             evidence_type=evidence_type,
@@ -126,6 +133,42 @@ class LedgerService:
             )
         return tool_call_id
 
+    def record_step_result(
+        self,
+        lease: Any,
+        *,
+        step_id: str,
+        tool_name: str,
+        params: dict[str, Any],
+        result: ToolResult,
+    ) -> str:
+        """Persist a tool outcome, its evidence, and the step result atomically."""
+        safe_params = redact_mapping(params)
+        safe_result = redact_mapping(result.model_dump(mode="json"))
+        safe_evidence: list[dict[str, Any]] = []
+        for item in result.evidence:
+            redacted = redact_mapping(item)
+            metadata = redacted.get("metadata", {})
+            safe_evidence.append(
+                {
+                    "evidence_type": str(
+                        redacted.get("evidence_type", "observation")
+                    ),
+                    "source": str(redacted.get("source", tool_name)),
+                    "content": str(redacted.get("content", "")),
+                    "confidence": float(redacted.get("confidence", 1.0)),
+                    "metadata": metadata if isinstance(metadata, dict) else {},
+                }
+            )
+        return self.repository.persist_step_result(
+            lease,
+            step_id=step_id,
+            tool_name=tool_name,
+            params=safe_params,
+            result=safe_result,
+            evidence=safe_evidence,
+        )
+
     @staticmethod
     def evidence_hashes(result: ToolResult) -> list[str]:
         return [
@@ -135,13 +178,21 @@ class LedgerService:
             for item in result.evidence
         ]
 
-    def record_error(self, task_id: str, error_type: str, message: str) -> str:
+    def record_error(
+        self,
+        task_id: str,
+        error_type: str,
+        message: str,
+        *,
+        lease: Any | None = None,
+    ) -> str:
         return self.record_evidence(
             task_id,
             evidence_type="runtime_error",
             source="agent_runner",
             content=f"{error_type}: {message}",
             confidence=1.0,
+            lease=lease,
         )
 
     def snapshot(self, task_id: str) -> dict[str, Any]:
