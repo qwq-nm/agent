@@ -107,3 +107,29 @@ Review-fix verification:
   `alembic check` reported no upgrade operations (no ORM drift).
 - `python -m compileall -q backend/secagent migrations` and `git diff --check`
   passed. Git emitted only the repository's line-ending conversion notices.
+
+## Repeated runtime-error retry fix
+
+A follow-up review found that two legitimate retries producing the same redacted
+runtime error attempted two inserts against the canonical Evidence uniqueness
+constraint. The second insert raised `IntegrityError`, poisoned the worker
+session, and prevented `JobService.finish` from settling the second JobRun.
+
+The regression test exercises two complete run/failed/retry cycles with two valid
+leases. The initial RED reproduced the unique violation followed by
+`PendingRollbackError`. `record_error` now performs redaction and hashing before a
+specialized repository write. Inside the existing JobRun-to-Task fenced
+transaction, SQLite and PostgreSQL use `ON CONFLICT DO NOTHING`; the canonical row
+is then re-read and its source, content, and recomputed SHA-256 are verified before
+commit. This is race-safe without weakening the unique constraint or reversing
+lock order.
+
+Verification for this fix:
+
+- Exact RED/GREEN retry regression: `1 passed`; both JobRuns settled `failed`, the
+  Task settled `failed_retryable`, both failure events/audits were present, and one
+  redacted canonical runtime-error Evidence remained.
+- Task 5/6 focused regressions: `46 passed`.
+- Full suite: `137 passed`, `0 failed`; compileall and diff-check passed.
+- No schema changed, so the previously verified migration head and drift result
+  remain applicable.

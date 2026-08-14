@@ -184,15 +184,19 @@ class LedgerService:
         error_type: str,
         message: str,
         *,
-        lease: Any | None = None,
+        lease: Any,
     ) -> str:
-        return self.record_evidence(
-            task_id,
+        content = redact_mapping(f"{error_type}: {message}")
+        return self.repository.add_error_evidence(
+            lease,
+            task_id=task_id,
+            tool_call_id=None,
             evidence_type="runtime_error",
             source="agent_runner",
-            content=f"{error_type}: {message}",
+            content=content,
+            sha256=hashlib.sha256(content.encode("utf-8")).hexdigest(),
             confidence=1.0,
-            lease=lease,
+            metadata_json="{}",
         )
 
     def snapshot(self, task_id: str) -> dict[str, Any]:

@@ -4,6 +4,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from threading import Event
 
+import pytest
+
 from secagent.db_models import JobRunRow, TaskStepRow
 from secagent.domain import TaskCreate, TaskStatus
 from secagent.services.job_service import JobService
@@ -42,6 +44,20 @@ class BlockingEvidenceTool(BaseTool):
                     "confidence": 1.0,
                 }
             ],
+        )
+
+
+class RepeatedFailureTool(BaseTool):
+    name = "demo_evidence"
+    scene = "incident_response"
+    risk_level = RiskLevel.LOW
+    idempotent = True
+
+    async def run(self, params: dict, context: ToolContext) -> ToolResult:
+        return ToolResult(
+            success=False,
+            summary="controlled repeated failure",
+            error="token=retry-secret",
         )
 
 
@@ -335,6 +351,77 @@ def test_recovered_worker_fences_old_tool_result_writes(
         assert rows["tool_calls"] == []
         assert rows["evidences"] == []
         assert rows["reports"] == []
+
+
+def test_repeated_runtime_error_reuses_canonical_evidence_and_settles_retry(
+    analyst_client, app, fake_queue, repository
+) -> None:
+    app.state.tool_registry._tools["demo_evidence"] = RepeatedFailureTool()
+    task = analyst_client.post(
+        "/api/tasks",
+        json={
+            "goal": "Exercise a repeatable failure",
+            "authorization_scope": "Built-in evidence only",
+        },
+    ).json()
+    first = analyst_client.post(
+        f"/api/tasks/{task['id']}/run",
+        headers={"Idempotency-Key": "runtime-error-first"},
+    )
+    assert first.status_code == 202
+
+    first_job = fake_queue.enqueued[0]
+    with pytest.raises(RuntimeError, match="retry-secret"):
+        asyncio.run(
+            execute_queued_task(
+                first_job.task_id,
+                first_job.command_id,
+                app.state.session_factory,
+                app.state.model_router,
+                app.state.tool_registry,
+                app.state.settings.data_dir,
+                worker_id="error-worker-first",
+            )
+        )
+    retry = analyst_client.post(
+        f"/api/tasks/{task['id']}/retry",
+        headers={"Idempotency-Key": "runtime-error-second"},
+    )
+    assert retry.status_code == 202
+
+    second_job = fake_queue.enqueued[1]
+    with pytest.raises(RuntimeError, match="retry-secret"):
+        asyncio.run(
+            execute_queued_task(
+                second_job.task_id,
+                second_job.command_id,
+                app.state.session_factory,
+                app.state.model_router,
+                app.state.tool_registry,
+                app.state.settings.data_dir,
+                worker_id="error-worker-second",
+            )
+        )
+
+    rows = repository.ledger_rows(task["id"])
+    runtime_errors = [
+        row for row in rows["evidences"] if row.evidence_type == "runtime_error"
+    ]
+    assert len(runtime_errors) == 1
+    assert "retry-secret" not in runtime_errors[0].content
+    assert repository.get_job_run(first_job.command_id).status == "failed"
+    assert repository.get_job_run(second_job.command_id).status == "failed"
+    assert repository.get_task(task["id"]).status is TaskStatus.FAILED_RETRYABLE
+    events = TaskEventService(repository.session).after(task["id"], 0)
+    assert [event.event_type for event in events].count("task.failed_retryable") == 2
+    failures = [
+        audit
+        for audit in repository.list_audit_events()
+        if audit.resource_id == task["id"]
+        and audit.action == "task.execute"
+        and audit.outcome == "failure"
+    ]
+    assert len(failures) == 2
 
 
 def test_step_without_evidence_hash_is_not_reused(repository) -> None:

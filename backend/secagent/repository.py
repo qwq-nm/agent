@@ -4,6 +4,8 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import and_, case, func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from secagent.db_models import (
@@ -999,6 +1001,74 @@ class TaskRepository:
             self.require_job_fence(lease, values["task_id"])
         row = EvidenceRow(**values)
         self.session.add(row)
+        self.session.commit()
+        return row.id
+
+    def add_error_evidence(self, lease: Any, **values: Any) -> str:
+        """Reuse a canonical runtime error without weakening its uniqueness."""
+        values = dict(values)
+        task_id = str(values["task_id"])
+        source = str(values["source"])
+        content = str(values["content"])
+        digest = str(values["sha256"])
+        values.update(
+            task_id=task_id,
+            source=source,
+            content=content,
+            sha256=digest,
+        )
+        self.require_job_fence(lease, task_id)
+        if (
+            values.get("evidence_type") != "runtime_error"
+            or source != "agent_runner"
+            or hashlib.sha256(content.encode("utf-8")).hexdigest() != digest
+        ):
+            self.session.rollback()
+            raise ValueError("invalid canonical runtime error")
+
+        dialect_name = self.session.get_bind().dialect.name
+        if dialect_name == "postgresql":
+            statement = postgresql_insert(EvidenceRow).values(**values)
+        elif dialect_name == "sqlite":
+            statement = sqlite_insert(EvidenceRow).values(**values)
+        else:
+            existing = self.session.scalar(
+                select(EvidenceRow)
+                .where(
+                    EvidenceRow.task_id == task_id,
+                    EvidenceRow.sha256 == digest,
+                    EvidenceRow.source == source,
+                )
+                .with_for_update()
+            )
+            if existing is None:
+                self.session.add(EvidenceRow(**values))
+                self.session.flush()
+        if dialect_name in {"postgresql", "sqlite"}:
+            self.session.execute(
+                statement.on_conflict_do_nothing(
+                    index_elements=["task_id", "sha256", "source"]
+                )
+            )
+
+        row = self.session.scalar(
+            select(EvidenceRow)
+            .where(
+                EvidenceRow.task_id == task_id,
+                EvidenceRow.sha256 == digest,
+                EvidenceRow.source == source,
+            )
+            .with_for_update()
+        )
+        if (
+            row is None
+            or row.evidence_type != "runtime_error"
+            or row.content != content
+            or row.source != source
+            or hashlib.sha256(row.content.encode("utf-8")).hexdigest() != digest
+        ):
+            self.session.rollback()
+            raise ValueError("conflicting canonical runtime error")
         self.session.commit()
         return row.id
 
