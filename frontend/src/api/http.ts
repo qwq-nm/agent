@@ -33,15 +33,24 @@ async function redirectToLogin() {
   window.dispatchEvent(new Event('secagent:auth-expired'))
 }
 
-async function send(path: string, init: RequestInit): Promise<Response> {
+function isRefreshPath(path: string) {
+  return new URL(path, window.location.origin).pathname === '/api/auth/refresh'
+}
+
+async function send(path: string, init: RequestInit, includeAccessToken: boolean): Promise<Response> {
   const auth = activeAuthStore()
-  return fetch(path, { ...init, credentials: 'same-origin', headers: requestHeaders(init, auth?.accessToken ?? null) })
+  return fetch(path, {
+    ...init,
+    credentials: 'same-origin',
+    headers: requestHeaders(init, includeAccessToken ? auth?.accessToken ?? null : null),
+  })
 }
 
 async function responseFor(path: string, init: RequestInit = {}, retried = false): Promise<Response> {
   assertApiPath(path)
-  const response = await send(path, init)
-  if (response.status !== 401 || retried || path === '/api/auth/refresh') return response
+  const refreshRequest = isRefreshPath(path)
+  const response = await send(path, init, !refreshRequest)
+  if (response.status !== 401 || retried || refreshRequest) return response
 
   const auth = activeAuthStore()
   if (!auth) return response

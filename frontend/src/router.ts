@@ -16,7 +16,28 @@ declare module 'vue-router' {
 }
 
 export function safeRedirectPath(value: unknown): string {
-  return typeof value === 'string' && value.startsWith('/') && !value.startsWith('//') ? value : '/'
+  if (typeof value !== 'string') return '/'
+
+  let normalized = value
+  for (let round = 0; round < 4; round += 1) {
+    try {
+      const decoded = decodeURIComponent(normalized)
+      if (decoded === normalized) break
+      normalized = decoded
+    } catch {
+      return '/'
+    }
+    if (round === 3) return '/'
+  }
+
+  normalized = normalized.replace(/\\/g, '/')
+  if (
+    !normalized.startsWith('/') ||
+    normalized.startsWith('//') ||
+    /[\u0000-\u001F\u007F]/.test(normalized) ||
+    /[a-z][a-z\d+.-]*:/i.test(normalized)
+  ) return '/'
+  return normalized
 }
 
 export const router = createRouter({

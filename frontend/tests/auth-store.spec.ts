@@ -72,3 +72,62 @@ it('rejects external URLs before a bearer token can be sent', async () => {
 
   expect(fetchMock).not.toHaveBeenCalled()
 })
+
+it('clears an expired session after the one permitted retry without a third request', async () => {
+  const auth = useAuthStore()
+  auth.accessToken = 'expired-token'
+  auth.user = analyst
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response('', { status: 401 }))
+    .mockResolvedValueOnce(jsonResponse({ access_token: 'replacement-token', user: analyst }))
+    .mockResolvedValueOnce(new Response('', { status: 401 }))
+  vi.stubGlobal('fetch', fetchMock)
+
+  await expect(apiRequest('/api/tasks')).rejects.toThrow('Request failed')
+
+  expect(fetchMock).toHaveBeenCalledTimes(3)
+  expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+    '/api/tasks',
+    '/api/auth/refresh',
+    '/api/tasks',
+  ])
+  expect(auth.accessToken).toBeNull()
+  expect(auth.user).toBeNull()
+  expect(localStorage.getItem('access_token')).toBeNull()
+  expect(sessionStorage.getItem('access_token')).toBeNull()
+})
+
+it('does not attach a bearer or recursively refresh the refresh endpoint', async () => {
+  const auth = useAuthStore()
+  auth.accessToken = 'existing-token'
+  auth.user = analyst
+  const fetchMock = vi.fn().mockResolvedValue(new Response('', { status: 401 }))
+  vi.stubGlobal('fetch', fetchMock)
+
+  await expect(apiRequest('/api/auth/refresh')).rejects.toThrow('Request failed')
+
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+  expect(fetchMock).toHaveBeenCalledWith(
+    '/api/auth/refresh',
+    expect.objectContaining({ headers: expect.not.objectContaining({ Authorization: expect.anything() }) }),
+  )
+})
+
+it('uses one pending refresh for concurrent bootstrap and refresh calls', async () => {
+  let resolveResponse: (response: Response) => void = () => undefined
+  const fetchMock = vi.fn().mockImplementation(() => new Promise<Response>((resolve) => { resolveResponse = resolve }))
+  vi.stubGlobal('fetch', fetchMock)
+  const auth = useAuthStore()
+
+  const pending = [auth.bootstrap(), auth.bootstrap(), auth.refresh()]
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+  resolveResponse(jsonResponse({ access_token: 'new-token', user: analyst }))
+  await Promise.all(pending)
+  await auth.bootstrap()
+
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+  expect(auth.accessToken).toBe('new-token')
+  expect(auth.user).toEqual(analyst)
+  expect(localStorage.getItem('access_token')).toBeNull()
+  expect(sessionStorage.getItem('access_token')).toBeNull()
+})

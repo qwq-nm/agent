@@ -1,11 +1,13 @@
 import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, expect, it, vi } from 'vitest'
 import { router, safeRedirectPath } from '../src/router'
+import { apiRequest } from '../src/api/http'
 import { useAuthStore } from '../src/stores/auth'
 
 beforeEach(async () => {
   setActivePinia(createPinia())
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 401 })))
+  await router.replace('/login')
   await router.replace('/')
 })
 
@@ -36,10 +38,86 @@ it('prevents analysts from entering administrative routes', async () => {
   await router.push('/team')
 
   expect(router.currentRoute.value.path).toBe('/')
+  await router.push('/audit')
+  expect(router.currentRoute.value.path).toBe('/')
 })
 
-it('accepts only local non-protocol-relative login redirects', () => {
-  expect(safeRedirectPath('/tasks/one?tab=report')).toBe('/tasks/one?tab=report')
-  expect(safeRedirectPath('//example.test')).toBe('/')
-  expect(safeRedirectPath('https://example.test')).toBe('/')
+it('allows admins to enter administrative routes', async () => {
+  const auth = useAuthStore()
+  auth.accessToken = 'memory-only-token'
+  auth.user = { id: 'admin-1', username: 'admin', role: 'admin' }
+
+  await router.push('/team')
+  expect(router.currentRoute.value.path).toBe('/team')
+  await router.push('/audit')
+  expect(router.currentRoute.value.path).toBe('/audit')
+})
+
+it('accepts only normalized local login redirects', () => {
+  expect(safeRedirectPath('/tasks/one?tab=report#summary')).toBe('/tasks/one?tab=report#summary')
+  for (const value of [
+    '//example.test',
+    'https://example.test',
+    '/%2F%2Fevil.test',
+    '/%252F%252Fevil.test',
+    '/\\evil.test',
+    '/%5C%5Cevil.test',
+    '/%E0%A4%A',
+    '/%00tasks',
+    '/https:%2F%2Fevil.test',
+  ]) {
+    expect(safeRedirectPath(value)).toBe('/')
+  }
+  let nested = '//evil.test'
+  for (let round = 0; round < 5; round += 1) nested = encodeURIComponent(nested)
+  expect(safeRedirectPath(`/${nested}`)).toBe('/')
+})
+
+it('clears a failed refresh session and redirects to login', async () => {
+  const auth = useAuthStore()
+  auth.accessToken = 'expired-token'
+  auth.user = { id: 'analyst-1', username: 'alice', role: 'analyst' }
+  await router.push('/tasks')
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response('', { status: 401 }))
+    .mockResolvedValueOnce(new Response('', { status: 401 }))
+  vi.stubGlobal('fetch', fetchMock)
+
+  await expect(apiRequest('/api/tasks')).rejects.toThrow('Request failed')
+  await vi.waitFor(() => expect(router.currentRoute.value.path).toBe('/login'))
+
+  expect(auth.accessToken).toBeNull()
+  expect(auth.user).toBeNull()
+  expect(fetchMock).toHaveBeenCalledTimes(2)
+  expect(fetchMock.mock.calls[1][0]).toBe('/api/auth/refresh')
+  expect(localStorage.getItem('access_token')).toBeNull()
+  expect(sessionStorage.getItem('access_token')).toBeNull()
+})
+
+it('redirects to login after the retry also returns 401 without making a third request', async () => {
+  const auth = useAuthStore()
+  auth.accessToken = 'expired-token'
+  auth.user = { id: 'analyst-1', username: 'alice', role: 'analyst' }
+  await router.push('/tasks')
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response('', { status: 401 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({
+      access_token: 'replacement-token',
+      user: { id: 'analyst-1', username: 'alice', role: 'analyst' },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    .mockResolvedValueOnce(new Response('', { status: 401 }))
+  vi.stubGlobal('fetch', fetchMock)
+
+  await expect(apiRequest('/api/tasks')).rejects.toThrow('Request failed')
+  await vi.waitFor(() => expect(router.currentRoute.value.path).toBe('/login'))
+
+  expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+    '/api/tasks',
+    '/api/auth/refresh',
+    '/api/tasks',
+  ])
+  expect(auth.accessToken).toBeNull()
+  expect(auth.user).toBeNull()
+  expect(localStorage.getItem('access_token')).toBeNull()
+  expect(sessionStorage.getItem('access_token')).toBeNull()
 })
