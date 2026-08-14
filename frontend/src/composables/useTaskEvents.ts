@@ -90,6 +90,7 @@ export function useTaskEvents(
         scheduleReconnect()
       }
       next.onmessage = handleMessage
+      // Register every event emitted by the durable backend event contract.
       for (const eventType of EVENT_TYPES) next.addEventListener(eventType, handleMessage)
     } catch {
       if (!stopped && generation === current && !controller.signal.aborted) scheduleReconnect()

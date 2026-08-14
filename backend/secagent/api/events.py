@@ -53,8 +53,8 @@ async def stream_task_events(
             await asyncio.sleep(poll_interval)
 
 
-def _last_event_id(request: Request) -> int:
-    raw = request.headers.get("Last-Event-ID", "0")
+def _last_event_id(request: Request, after: str | None) -> int:
+    raw = after if after is not None else request.headers.get("Last-Event-ID", "0")
     try:
         value = int(raw)
     except ValueError as exc:
@@ -86,8 +86,9 @@ def task_events(
     task_id: str,
     request: Request,
     ticket: str = Query(min_length=1),
+    after: str | None = Query(default=None),
 ) -> StreamingResponse:
-    last_event_id = _last_event_id(request)
+    last_event_id = _last_event_id(request, after)
     expected_user_id = None
     authorization = request.headers.get("authorization", "")
     if authorization.lower().startswith("bearer "):

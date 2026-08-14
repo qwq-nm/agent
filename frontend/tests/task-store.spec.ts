@@ -32,3 +32,16 @@ it('refreshes active tasks from SSE and stops after a terminal response', async 
   expect(api.getTask).toHaveBeenCalledTimes(2)
   source.restore()
 })
+
+it('does not open a stream when logout wins the initial detail race', async () => {
+  const source = installFakeEventSource()
+  let resolveTask!: (value: never) => void
+  vi.mocked(api.getTask).mockImplementationOnce(() => new Promise((resolve) => { resolveTask = resolve }) as never)
+  const store = useTasksStore()
+  const watching = store.watchTask('t1')
+  window.dispatchEvent(new Event('secagent:auth-cleared'))
+  resolveTask({ id: 't1', status: 'running' } as never)
+  await watching
+  expect(source.instances()).toHaveLength(0)
+  source.restore()
+})

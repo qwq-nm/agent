@@ -47,6 +47,8 @@ export const useTasksStore = defineStore('tasks', () => {
     refreshQueued = false
   }
 
+  window.addEventListener('secagent:auth-cleared', stopWatching)
+
   async function refreshDetail(id: string) {
     const request = ++detailRequest
     const result = await api.getTask(id)

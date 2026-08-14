@@ -361,6 +361,11 @@ class LedgerService:
 
     def snapshot(self, task_id: str) -> dict[str, Any]:
         rows = self.repository.ledger_rows(task_id)
+        runtime = self.repository.task_runtime(task_id)
+        current_stage = next(
+            (row.name for row in reversed(rows["steps"]) if row.status in {"running", "pending"}),
+            None,
+        )
         approvals = [
             {
                 "id": row.id,
@@ -380,6 +385,8 @@ class LedgerService:
             None,
         )
         return {
+            **runtime,
+            "current_stage": current_stage,
             "steps": [
                 {
                     "id": row.id,

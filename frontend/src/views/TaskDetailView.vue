@@ -17,6 +17,7 @@ const busy = ref(false)
 const error = ref('')
 const approvalOpen = ref(false)
 const pendingKeys = new Map<string, string>()
+const pendingActions = new Map<string, Promise<void>>()
 const task = computed(() => store.detail)
 const canRun = computed(() => task.value?.status === 'created')
 const canPause = computed(() => task.value?.status === 'running')
@@ -29,7 +30,15 @@ async function refresh() {
   if (store.detail?.pending_approval) approvalOpen.value = true
 }
 
-async function action(name: 'run' | 'pause' | 'resume' | 'retry' | 'cancel') {
+function action(name: 'run' | 'pause' | 'resume' | 'retry' | 'cancel') {
+  const existing = pendingActions.get(name)
+  if (existing) return existing
+  const work = performAction(name)
+  pendingActions.set(name, work)
+  return work.finally(() => pendingActions.delete(name))
+}
+
+async function performAction(name: 'run' | 'pause' | 'resume' | 'retry' | 'cancel') {
   const key = name === 'pause' ? undefined : pendingKeys.get(name) || crypto.randomUUID()
   if (key) pendingKeys.set(name, key)
   busy.value = true
@@ -49,7 +58,15 @@ async function action(name: 'run' | 'pause' | 'resume' | 'retry' | 'cancel') {
   }
 }
 
-async function decide(approved: boolean, reason: string) {
+function decide(approved: boolean, reason: string) {
+  const existing = pendingActions.get('approve')
+  if (existing) return existing
+  const work = performDecision(approved, reason)
+  pendingActions.set('approve', work)
+  return work.finally(() => pendingActions.delete('approve'))
+}
+
+async function performDecision(approved: boolean, reason: string) {
   const key = pendingKeys.get('approve') || crypto.randomUUID()
   pendingKeys.set('approve', key)
   busy.value = true
@@ -97,7 +114,7 @@ onBeforeUnmount(store.stopWatching)
         <ModelRoutePanel v-else :calls="task.model_calls" />
       </aside>
     </div>
-    <ApprovalDialog :open="approvalOpen" :approval="task.pending_approval" @close="approvalOpen = false" @decide="decide" />
+    <ApprovalDialog :open="approvalOpen" :busy="busy" :approval="task.pending_approval" @close="approvalOpen = false" @decide="decide" />
   </section>
   <section v-else class="page"><div class="panel empty-state">正在加载任务详情…</div></section>
 </template>

@@ -56,4 +56,15 @@ describe('useTaskEvents', () => {
     expect(onEvent).not.toHaveBeenCalled()
     stream.stop()
   })
+
+  it('subscribes to durable job event types exactly once', async () => {
+    const onEvent = vi.fn()
+    const stream = useTaskEvents('task-1', onEvent)
+    await vi.runAllTicks()
+    source.emit({ type: 'job.cancelled', data: '{"attempt":2}' })
+    await vi.runAllTicks()
+    expect(onEvent).toHaveBeenCalledTimes(1)
+    expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ type: 'job.cancelled', data: { attempt: 2 } }))
+    stream.stop()
+  })
 })

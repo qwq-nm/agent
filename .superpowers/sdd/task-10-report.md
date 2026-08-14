@@ -29,10 +29,17 @@
   and store implementation.
 - Team detail RED initially failed because `WorkerStatus` did not exist. The
   worker/model metrics suite passed after the component and panel updates.
+- Review RED reproduced query-cursor replay, initial-refresh logout revival,
+  missing runtime fields, and repeat approval clicks. The cursor now aliases
+  `Last-Event-ID` before ticket consumption; the named SSE frame contract is
+  retained and every currently emitted durable event type is registered once.
+  Watch generations fence the logout race, task detail includes durable worker
+  runtime, and dialog/action controls coalesce pending requests.
 
 ## Verification
 
-- Focused task stream/detail tests: 7 passed.
-- Full frontend tests: 22 passed.
+- Focused task stream/detail tests: 10 passed; backend task-event integration:
+  11 passed.
+- Full frontend tests: 25 passed. Full backend tests: 209 passed.
 - `F:\nodejs\npm.cmd run build`: passed (`vue-tsc --noEmit` and Vite).
 - `git diff --check`: passed.

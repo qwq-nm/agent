@@ -348,6 +348,44 @@ class TaskRepository:
         )
         return int(value or 0)
 
+    def task_runtime(self, task_id: str) -> dict[str, Any]:
+        job = self.session.scalar(
+            select(JobRunRow)
+            .where(JobRunRow.task_id == task_id)
+            .order_by(JobRunRow.created_at.desc(), JobRunRow.id.desc())
+            .limit(1)
+        )
+        if job is None:
+            return {
+                "queue_position": None,
+                "job_attempt": None,
+                "worker_id": None,
+                "worker_heartbeat_at": None,
+            }
+        queue_position = None
+        queued_statuses = ("pending_publish", "publishing", "queued")
+        if job.status in queued_statuses:
+            queue_position = int(
+                self.session.scalar(
+                    select(func.count())
+                    .select_from(JobRunRow)
+                    .where(
+                        JobRunRow.status.in_(queued_statuses),
+                        JobRunRow.created_at <= job.created_at,
+                    )
+                )
+                or 0
+            )
+        heartbeat = job.heartbeat_at
+        if heartbeat is not None and heartbeat.tzinfo is None:
+            heartbeat = heartbeat.replace(tzinfo=timezone.utc)
+        return {
+            "queue_position": queue_position,
+            "job_attempt": job.attempt,
+            "worker_id": job.worker_id,
+            "worker_heartbeat_at": heartbeat.isoformat().replace("+00:00", "Z") if heartbeat else None,
+        }
+
     def claim_job_republish(self, command_id: str) -> bool:
         claimed = self.session.execute(
             update(JobRunRow)

@@ -1,5 +1,6 @@
 import asyncio
 import json
+from datetime import datetime, timezone
 
 import pytest
 import jwt
@@ -193,3 +194,43 @@ def test_invalid_last_event_id_does_not_consume_ticket(
 
     assert invalid.status_code == 400
     assert valid.status_code == 200
+
+
+def test_event_query_cursor_resumes_without_last_event_header(
+    alice_client, app, repository
+) -> None:
+    task = alice_client.post(
+        "/api/tasks",
+        json={"goal": "Resume via query", "authorization_scope": "Owned task only"},
+    ).json()
+    first = TaskEventService(repository.session).append(task["id"], "task.queued", {})
+    second = TaskEventService(repository.session).append(task["id"], "task.running", {})
+    ticket = alice_client.post(f"/api/tasks/{task['id']}/event-ticket").json()["ticket"]
+    app.state.event_stream_max_polls = 1
+
+    streamed = alice_client.get(
+        f"/api/tasks/{task['id']}/events", params={"ticket": ticket, "after": str(first)}
+    )
+
+    assert streamed.status_code == 200
+    assert f"id: {second}" in streamed.text
+    assert f"id: {first}" not in streamed.text
+
+
+def test_task_detail_includes_worker_runtime(alice_client, repository) -> None:
+    task = alice_client.post(
+        "/api/tasks",
+        json={"goal": "Show worker runtime", "authorization_scope": "Owned task only"},
+    ).json()
+    job = repository.add_job_run(task["id"], "worker-runtime-1", attempt=3)
+    job.status = "queued"
+    job.worker_id = "worker-1"
+    job.heartbeat_at = datetime(2026, 8, 15, tzinfo=timezone.utc)
+    repository.commit()
+
+    detail = alice_client.get(f"/api/tasks/{task['id']}").json()
+
+    assert detail["queue_position"] == 1
+    assert detail["job_attempt"] == 3
+    assert detail["worker_id"] == "worker-1"
+    assert detail["worker_heartbeat_at"] == "2026-08-15T00:00:00Z"

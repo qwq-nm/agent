@@ -2,6 +2,7 @@ import { mount } from '@vue/test-utils'
 import { expect, it } from 'vitest'
 import ModelRoutePanel from '../src/components/ModelRoutePanel.vue'
 import WorkerStatus from '../src/components/WorkerStatus.vue'
+import ApprovalDialog from '../src/components/ApprovalDialog.vue'
 
 it('shows queue, attempt, heartbeat, and current stage', () => {
   const wrapper = mount(WorkerStatus, {
@@ -26,4 +27,12 @@ it('renders complete, safe model metrics', () => {
   expect(wrapper.text()).toContain('12 / 8 tokens')
   expect(wrapper.text()).toContain('req-1')
   expect(wrapper.text()).toContain('rate_limited')
+})
+
+it('disables approval decisions while an approval is pending', () => {
+  const wrapper = mount(ApprovalDialog, {
+    props: { open: true, busy: true, approval: { step_id: 's1', tool_name: 'scan', risk_level: 'high', params_summary: '{}' } },
+  })
+  expect(wrapper.get('.dialog-actions button:first-child').attributes('disabled')).toBeDefined()
+  expect(wrapper.get('.dialog-actions button:last-child').attributes('disabled')).toBeDefined()
 })
