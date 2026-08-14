@@ -9,12 +9,88 @@ from secagent.db_models import (
     ApprovalRow,
     EvidenceRow,
     ModelCallRow,
+    RefreshSessionRow,
     ReportRow,
     TaskRow,
     TaskStepRow,
     ToolCallRow,
+    UserRow,
 )
 from secagent.domain import PlanStep, TaskCreate, TaskRead, TaskScene, TaskStatus
+
+
+class AuthRepository:
+    """SQLAlchemy persistence boundary for local users and refresh sessions."""
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def get_user_by_username(self, username: str) -> UserRow | None:
+        return self.session.scalar(select(UserRow).where(UserRow.username == username))
+
+    def get_user(self, user_id: str) -> UserRow | None:
+        return self.session.get(UserRow, user_id)
+
+    def add_user(self, username: str, password_hash: str, role: str) -> UserRow:
+        row = UserRow(username=username, password_hash=password_hash, role=role)
+        self.session.add(row)
+        self.session.flush()
+        return row
+
+    def add_refresh_session(
+        self, user_id: str, token_hash: str, expires_at: datetime
+    ) -> RefreshSessionRow:
+        row = RefreshSessionRow(
+            user_id=user_id, token_hash=token_hash, expires_at=expires_at
+        )
+        self.session.add(row)
+        self.session.flush()
+        return row
+
+    def rotate_refresh_session(
+        self,
+        token_hash: str,
+        replacement_hash: str,
+        replacement_expires_at: datetime,
+        now: datetime,
+    ) -> tuple[RefreshSessionRow, UserRow] | None:
+        claimed = self.session.execute(
+            update(RefreshSessionRow)
+            .where(
+                RefreshSessionRow.token_hash == token_hash,
+                RefreshSessionRow.revoked_at.is_(None),
+                RefreshSessionRow.expires_at > now,
+            )
+            .values(revoked_at=now)
+            .returning(RefreshSessionRow.id, RefreshSessionRow.user_id)
+        ).one_or_none()
+        if claimed is None:
+            return None
+
+        user = self.get_user(claimed.user_id)
+        if user is None or not user.is_active:
+            return None
+
+        replacement = self.add_refresh_session(
+            user.id, replacement_hash, replacement_expires_at
+        )
+        previous = self.session.get(RefreshSessionRow, claimed.id)
+        if previous is None:
+            return None
+        previous.replaced_by_id = replacement.id
+        self.session.flush()
+        return replacement, user
+
+    def revoke_refresh_session(self, token_hash: str, now: datetime) -> bool:
+        result = self.session.execute(
+            update(RefreshSessionRow)
+            .where(
+                RefreshSessionRow.token_hash == token_hash,
+                RefreshSessionRow.revoked_at.is_(None),
+            )
+            .values(revoked_at=now)
+        )
+        return result.rowcount == 1
 
 
 class TaskRepository:
