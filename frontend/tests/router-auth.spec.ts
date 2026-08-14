@@ -56,6 +56,14 @@ it('allows admins to enter administrative routes', async () => {
 it('accepts only normalized local login redirects', () => {
   expect(safeRedirectPath('/tasks/one?tab=report#summary')).toBe('/tasks/one?tab=report#summary')
   for (const value of [
+    '/tasks?filter=a%26b',
+    '/tasks?section=%23summary',
+    '/tasks?next=%3Fdetails',
+    '/tasks?source=https://example.test/report',
+  ]) {
+    expect(safeRedirectPath(value)).toBe(value)
+  }
+  for (const value of [
     '//example.test',
     'https://example.test',
     '/%2F%2Fevil.test',
@@ -64,13 +72,30 @@ it('accepts only normalized local login redirects', () => {
     '/%5C%5Cevil.test',
     '/%E0%A4%A',
     '/%00tasks',
-    '/https:%2F%2Fevil.test',
   ]) {
     expect(safeRedirectPath(value)).toBe('/')
   }
+  expect(safeRedirectPath('/https:%2F%2Fevil.test')).toBe('/https:%2F%2Fevil.test')
   let nested = '//evil.test'
   for (let round = 0; round < 5; round += 1) nested = encodeURIComponent(nested)
   expect(safeRedirectPath(`/${nested}`)).toBe('/')
+})
+
+it('preserves encoded redirect query semantics after login routing', async () => {
+  const auth = useAuthStore()
+  auth.accessToken = 'memory-only-token'
+  auth.user = { id: 'analyst-1', username: 'alice', role: 'analyst' }
+  const redirect = '/tasks?filter=a%26b&section=%23summary&next=%3Fdetails&source=https://example.test/report'
+
+  await router.push({ path: '/login', query: { redirect } })
+
+  expect(router.currentRoute.value.path).toBe('/tasks')
+  expect(router.currentRoute.value.query).toMatchObject({
+    filter: 'a&b',
+    section: '#summary',
+    next: '?details',
+    source: 'https://example.test/report',
+  })
 })
 
 it('clears a failed refresh session and redirects to login', async () => {

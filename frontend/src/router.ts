@@ -35,9 +35,9 @@ export function safeRedirectPath(value: unknown): string {
     !normalized.startsWith('/') ||
     normalized.startsWith('//') ||
     /[\u0000-\u001F\u007F]/.test(normalized) ||
-    /[a-z][a-z\d+.-]*:/i.test(normalized)
+    /^[a-z][a-z\d+.-]*:/i.test(normalized)
   ) return '/'
-  return normalized
+  return value
 }
 
 export const router = createRouter({
