@@ -128,7 +128,7 @@ Worker 队列实现必须隐藏在 `JobQueue` 接口后。首版采用 Celery 5.
 - `paused`：Worker 在当前原子步骤完成后释放执行权；
 - `failed_retryable`：外部模型、网络或 Worker 故障，可由用户重新排队；
 - `failed`：确定性校验失败、预算耗尽或安全策略拒绝后终止；
-- `canceled`：用户取消，不再自动恢复。
+- `cancelled`：用户取消，不再自动恢复。
 
 ### 5.2 排队与并发
 
