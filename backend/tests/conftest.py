@@ -1,5 +1,9 @@
+import os
+
 import pytest
 from fastapi.testclient import TestClient
+
+os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 
 from secagent.config import Settings
 from secagent.main import create_app
