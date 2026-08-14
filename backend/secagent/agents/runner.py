@@ -25,6 +25,7 @@ from secagent.domain import (
     ToolResult,
 )
 from secagent.providers.base import ProviderFailure
+from secagent.providers.router import FIXED_PROVIDER
 from secagent.repository import StaleJobLease, TaskRepository
 from secagent.services.job_service import JobLease
 from secagent.services.ledger import LedgerService
@@ -349,11 +350,12 @@ class AgentRunner:
                 }[stage],
                 "router",
             )
-            provider = router.provider_for(stage)
+            provider_name = FIXED_PROVIDER[stage]
+            provider = router.providers.get(provider_name)
             self.ledger.record_model_error(
                 task_id,
                 stage,
-                provider=exc.provider,
+                provider=provider_name,
                 model=str(getattr(provider, "model", "unknown")),
                 error_code=exc.code.value,
                 request_id=exc.request_id,

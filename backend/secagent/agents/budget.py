@@ -57,6 +57,10 @@ class TaskBudget:
     def check_model_call(self) -> None:
         if self.calls >= self.max_calls:
             raise BudgetExceeded("model_calls")
+        if self.input_tokens >= self.max_input_tokens:
+            raise BudgetExceeded("input_tokens")
+        if self.output_tokens >= self.max_output_tokens:
+            raise BudgetExceeded("output_tokens")
 
     def check_usage(self) -> None:
         for used, maximum, dimension in (

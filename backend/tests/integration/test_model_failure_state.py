@@ -2,17 +2,31 @@ import asyncio
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock
 
 import pytest
 
 from secagent.agents.reporter import Reporter
-from secagent.db_models import EvidenceRow, TaskRow, TaskStepRow
-from secagent.domain import ParsedTask, RiskLevel, TaskCreate, TaskScene
-from secagent.providers.base import ProviderErrorCode, ProviderFailure
+from secagent.db_models import EvidenceRow, ModelCallRow, TaskRow, TaskStepRow
+from secagent.domain import (
+    ModelResponse,
+    ModelStage,
+    ParsedTask,
+    RiskLevel,
+    TaskCreate,
+    TaskScene,
+    TaskStatus,
+)
+from secagent.providers.base import (
+    ProviderErrorCode,
+    ProviderFailure,
+    ProviderUnavailable,
+)
 from secagent.providers.mock import MockProvider
 from secagent.providers.router import ModelRouter
 from secagent.services.task_events import TaskEventService
 from secagent.services.ledger import LedgerService
+from secagent.services.job_service import JobService
 from secagent.worker import execute_queued_task
 
 
@@ -84,8 +98,159 @@ def test_provider_failure_persists_only_sanitized_model_error(
     assert failed["status"] == "error"
     assert failed["error_code"] == "rate_limit"
     assert failed["request_id"] == "req-safe-123"
+    assert failed["attempt"] == 1
     assert "Authorization" not in str(failed)
     assert "response" not in str(failed)
+
+
+def test_missing_fixed_provider_persists_safe_error_and_counts_call(
+    analyst_client, app, fake_queue
+) -> None:
+    app.state.model_router = ModelRouter({"deepseek": MockProvider()}, mode="auto")
+    task = analyst_client.post(
+        "/api/tasks",
+        json={"goal": "Missing GLM", "authorization_scope": "Owned data"},
+    ).json()
+    analyst_client.post(
+        f"/api/tasks/{task['id']}/run",
+        headers={"Idempotency-Key": "missing-provider-001"},
+    )
+    job = fake_queue.enqueued[0]
+
+    with pytest.raises(ProviderUnavailable):
+        asyncio.run(
+            execute_queued_task(
+                job.task_id,
+                job.command_id,
+                app.state.session_factory,
+                app.state.model_router,
+                app.state.tool_registry,
+                app.state.settings.data_dir,
+            )
+        )
+
+    detail = analyst_client.get(f"/api/tasks/{task['id']}").json()
+    assert detail["status"] == "failed_retryable"
+    assert len(detail["model_calls"]) == 1
+    failed = detail["model_calls"][0]
+    assert failed == failed | {
+        "provider": "glm",
+        "model": "unknown",
+        "stage": "task_parse",
+        "status": "error",
+        "error_code": "auth",
+        "request_id": None,
+        "attempt": 1,
+    }
+    assert failed["prompt_tokens"] == failed["completion_tokens"] == 0
+    assert "Authorization" not in str(failed)
+
+
+@pytest.mark.parametrize(
+    ("limit_field", "dimension"),
+    [
+        ("max_input_tokens", "input_tokens"),
+        ("max_output_tokens", "output_tokens"),
+    ],
+)
+def test_consumed_token_budget_stops_before_provider_call(
+    analyst_client, app, fake_queue, limit_field, dimension
+) -> None:
+    provider = MockProvider()
+    provider.complete = AsyncMock(wraps=provider.complete)
+    app.state.model_router = ModelRouter({"mock": provider}, mode="mock")
+    task = analyst_client.post(
+        "/api/tasks",
+        json={"goal": "No extra provider call", "authorization_scope": "Owned data"},
+    ).json()
+    with app.state.session_factory() as session:
+        setattr(session.get(TaskRow, task["id"]), limit_field, 0)
+        session.commit()
+    analyst_client.post(
+        f"/api/tasks/{task['id']}/run",
+        headers={"Idempotency-Key": f"{dimension}-zero"},
+    )
+    job = fake_queue.enqueued[0]
+
+    asyncio.run(
+        execute_queued_task(
+            job.task_id,
+            job.command_id,
+            app.state.session_factory,
+            app.state.model_router,
+            app.state.tool_registry,
+            app.state.settings.data_dir,
+        )
+    )
+
+    detail = analyst_client.get(f"/api/tasks/{task['id']}").json()
+    assert detail["status"] == "failed"
+    assert detail["model_calls"] == []
+    assert provider.complete.await_count == 0
+    with app.state.session_factory() as session:
+        events = TaskEventService(session).after(task["id"], 0)
+        exhausted = [event for event in events if event.event_type == "task.budget_exhausted"]
+        assert json.loads(exhausted[0].payload_json) == {"dimension": dimension}
+
+
+def test_checkpoint_rejects_model_call_from_another_logical_attempt(
+    repository, fake_queue
+) -> None:
+    task = repository.create_task(
+        TaskCreate(goal="Attempt-bound checkpoint", authorization_scope="Owned data")
+    )
+    repository.set_task_status(task.id, TaskStatus.QUEUED)
+    job = repository.add_job_run(task.id, "attempt-two", attempt=2)
+    job.status = "queued"
+    repository.commit()
+    lease = JobService(repository, fake_queue).claim(
+        task.id, job.command_id, "worker-attempt-two"
+    )
+    assert lease is not None and lease.attempt == 2
+    stale_call_id = repository.add_model_call(
+        task_id=task.id,
+        provider="glm",
+        model="glm-5.2",
+        stage="task_parse",
+        route_reason="fixed_stage",
+        input_summary="task_parse structured request",
+        status="completed",
+        is_demo=False,
+        attempt=1,
+    )
+
+    with pytest.raises(ValueError, match="successful model call"):
+        repository.save_orchestration_checkpoint(
+            task.id,
+            lease=lease,
+            fingerprint="f" * 64,
+            stage="task_parse",
+            data={"scene": "incident_response"},
+            model_call_id=stale_call_id,
+        )
+
+    current_call = ModelResponse(
+        provider="glm",
+        model="glm-5.2",
+        data={},
+        latency_ms=1,
+    )
+    current_call_id = LedgerService(repository).record_model_response(
+        task.id, ModelStage.TASK_PARSE, current_call, lease=lease
+    )
+    repository.save_orchestration_checkpoint(
+        task.id,
+        lease=lease,
+        fingerprint="f" * 64,
+        stage="task_parse",
+        data={"scene": "incident_response"},
+        model_call_id=current_call_id,
+    )
+    checkpoint = repository.load_orchestration_checkpoint(
+        task.id, lease=lease, fingerprint="f" * 64
+    )
+    assert checkpoint["stages"]["task_parse"]["model_call_id"] == current_call_id
+    assert repository.session.get(ModelCallRow, current_call_id).attempt == 2
 
 
 def test_budget_exhaustion_is_a_terminal_atomic_event(

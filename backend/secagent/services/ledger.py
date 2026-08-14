@@ -81,9 +81,11 @@ class LedgerService:
         )
         safe_status = status if status in {"completed", "error"} else "error"
         safe_error = error_code if error_code in ERROR_CODES else None
+        attempt = int(getattr(lease, "attempt", 1))
         return self.repository.add_model_call(
             lease=lease,
             task_id=task_id,
+            attempt=attempt,
             provider=_safe_identifier(provider, "unknown") or "unknown",
             model=_safe_identifier(model, "unknown") or "unknown",
             stage=safe_stage,
@@ -396,6 +398,7 @@ class LedgerService:
             "model_calls": [
                 {
                     "id": row.id,
+                    "attempt": row.attempt,
                     "provider": row.provider,
                     "model": row.model,
                     "stage": row.stage,

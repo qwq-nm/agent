@@ -89,3 +89,28 @@ def test_budget_rehydrates_persisted_usage() -> None:
         10,
         3,
     )
+
+
+@pytest.mark.parametrize(
+    ("usage", "dimension"),
+    [
+        ({"input_tokens": 10}, "input_tokens"),
+        ({"output_tokens": 5}, "output_tokens"),
+    ],
+)
+def test_model_call_preflight_rejects_fully_consumed_token_dimension(
+    usage, dimension
+) -> None:
+    budget = TaskBudget(
+        max_calls=8,
+        max_input_tokens=10,
+        max_output_tokens=5,
+        max_steps=20,
+        deadline=datetime.now(timezone.utc) + timedelta(minutes=5),
+        **usage,
+    )
+
+    with pytest.raises(BudgetExceeded, match=dimension) as raised:
+        budget.check_model_call()
+
+    assert raised.value.dimension == dimension

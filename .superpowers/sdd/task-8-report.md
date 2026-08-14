@@ -25,6 +25,11 @@ starts a new logical attempt and cannot reuse failed-attempt checkpoints.
   Alembic drift checking.
 - Retry RED showed a new retry command persisted `attempt=1`. Retry now increments
   the logical task attempt, while approval/resume retain the current attempt.
+- Review RED covered all three budget preflight dimensions, cross-attempt model
+  checkpoint rejection, and an unavailable fixed provider. It proved that an
+  exactly consumed input/output budget still reached the provider, model calls
+  lacked logical-attempt identity, and an unavailable provider left no audit
+  row. The focused review suite now passes all six boundary cases.
 - A full-suite run exposed one compatibility regression in a concurrent enqueue
   monkeypatch after the `add_job_run` signature extension. The initial-attempt
   call shape remains backward compatible; the reproducer and retry test pass.
@@ -32,9 +37,11 @@ starts a new logical attempt and cannot reuse failed-attempt checkpoints.
 ## Implementation notes
 
 - `TaskBudget` exposes `consume_call`, `consume_tokens`, `consume_step`, and
-  `check_deadline`. Model-call capacity and the deadline are checked before a
-  model call; the deadline is checked before each tool call. Successful model
-  responses are persisted, then their exact call and token usage is consumed.
+  `check_deadline`. Call, input-token, output-token capacity and the deadline are
+  checked before a model call; the deadline is checked before each tool call.
+  Successful model responses are persisted, then their exact call and token
+  usage is consumed. A response that crosses a limit still enters the same
+  atomic budget-terminal path.
 - Budget state is reconstructed from durable model-call and task-step rows. The
   deadline and per-task limits live on `tasks`, so approval, resume, worker
   recovery, and explicit retry cannot reset the ledger.
@@ -51,9 +58,12 @@ starts a new logical attempt and cannot reuse failed-attempt checkpoints.
   are never accepted as successful retry checkpoints.
 - Model rows persist provider, model, stage, safe route reason, scrubbed request
   ID, latency, retries, normalized token counts, finish reason, status, error
-  code, and demo flag. Raw prompts, reasoning, Authorization values, response
-  bodies, and arbitrary route reasons are not stored. Provider errors persist
-  only the stable error taxonomy and scrubbed request ID as error details.
+  code, logical attempt, and demo flag. Raw prompts, reasoning, Authorization
+  values, response bodies, and arbitrary route reasons are not stored. Provider
+  errors persist only the stable error taxonomy and scrubbed request ID as error
+  details. A missing fixed provider records exactly one safe error call using the
+  fixed-stage provider name and a non-sensitive configured-model lookup; the
+  error path never invokes routing a second time.
 - Evidence hashing uses redacted canonical UTF-8 JSON content followed by bytes
   from an optional referenced file. File references must resolve beneath that
   task's upload root, must be regular files, and must stay within the size bound;
@@ -73,14 +83,17 @@ starts a new logical attempt and cannot reuse failed-attempt checkpoints.
   `tasks.orchestration_json`.
 - Added Alembic revision `20260815_03_task_orchestration_budget.py`, based on
   `20260815_02`, with upgrade and downgrade paths and ORM-aligned defaults.
-- Migration contract test verifies upgrade from Task 6, downgrade back to Task 6,
-  re-upgrade to head, and `alembic check` with no drift.
+- Added non-null `model_calls.attempt` with default/backfill `1` in Alembic
+  revision `20260815_04_model_call_attempt.py`, based on `20260815_03`.
+- Migration contract tests verify upgrade from Task 6, the 03 -> 04 -> 03 -> 04
+  round trip, re-upgrade to head, and `alembic check` with no drift.
 
 ## Verification
 
-- Task 8 focused budget/fixed-stage/failure/scene suite: `14 passed`, `0 failed`.
-- Full backend suite with coverage: `200 passed`, `0 failed`.
-- Global backend coverage: `91.52%` (required minimum: `85%`).
+- Review boundary suite: `6 passed`, `0 failed`.
+- Task 8/provider/Task 6 focused regression suite: `114 passed`, `0 failed`.
+- Full backend suite with coverage: `207 passed`, `0 failed`.
+- Global backend coverage: `91.55%` (required minimum: `85%`).
 - Fresh SQLite `alembic upgrade head` and `alembic check`: passed with no new
   upgrade operations detected.
 - `python -m compileall -q backend/secagent backend/tests migrations`: passed.
@@ -97,6 +110,12 @@ starts a new logical attempt and cannot reuse failed-attempt checkpoints.
 - The task fingerprint excludes the parse-derived scene but includes immutable
   task input and bounded upload bytes.
 - Exhausted call budgets stop before issuing another expensive model request.
+- Exhausted input or output token budgets also stop before provider invocation,
+  including the exact `used == limit` boundary, without adding a model-call row.
+- Every model call is bound to its fenced logical JobRun attempt; checkpoint load
+  and save reject successful calls from a different attempt.
+- Missing fixed providers produce one sanitized, attempt-bound error metric and
+  consume one call before normal retryable/failed job settlement.
 - Initial JobRun creation preserves the established two-argument repository call
   shape used by concurrent publication tests; only non-initial attempts pass an
   explicit attempt.

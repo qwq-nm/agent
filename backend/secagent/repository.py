@@ -644,6 +644,7 @@ class TaskRepository:
                 and call.task_id == task_id
                 and call.stage == stage
                 and call.status == "completed"
+                and call.attempt == lease.attempt
             ):
                 valid_stages[stage] = value
         checkpoint["stages"] = valid_stages
@@ -685,6 +686,7 @@ class TaskRepository:
             or model_call.task_id != task_id
             or model_call.stage != stage
             or model_call.status != "completed"
+            or model_call.attempt != lease.attempt
         ):
             self.session.rollback()
             raise ValueError("successful model call is required for checkpoint")
@@ -1229,6 +1231,13 @@ class TaskRepository:
     def add_model_call(self, *, lease: Any | None = None, **values: Any) -> str:
         if lease is not None:
             self.require_job_fence(lease, values["task_id"])
+            supplied_attempt = values.get("attempt", lease.attempt)
+            if supplied_attempt != lease.attempt:
+                self.session.rollback()
+                raise ValueError("model call attempt does not match lease")
+            values["attempt"] = lease.attempt
+        else:
+            values.setdefault("attempt", 1)
         row = ModelCallRow(**values)
         self.session.add(row)
         self.session.commit()

@@ -175,6 +175,7 @@ class ModelCallRow(Base):
     task_id: Mapped[str] = mapped_column(
         ForeignKey("tasks.id", ondelete="CASCADE"), index=True
     )
+    attempt: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     provider: Mapped[str] = mapped_column(String(80))
     model: Mapped[str] = mapped_column(String(120), default="unknown")
     stage: Mapped[str] = mapped_column(String(40))

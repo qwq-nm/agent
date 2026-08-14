@@ -37,6 +37,7 @@ REQUIRED_COLUMNS = {
     },
     "task_steps": {"idempotency_key", "attempt", "result_json"},
     "model_calls": {
+        "attempt",
         "request_id",
         "finish_reason",
         "prompt_tokens",
@@ -233,5 +234,44 @@ def test_task8_migration_round_trips_from_task6_and_has_no_drift(tmp_path):
 
     reupgraded = alembic("upgrade", "head")
     assert reupgraded.returncode == 0, reupgraded.stderr
+    drift = alembic("check")
+    assert drift.returncode == 0, drift.stdout + drift.stderr
+
+
+def test_model_call_attempt_migration_round_trips_from_task8_v3(tmp_path):
+    repository_root = Path(__file__).resolve().parents[3]
+    database_path = tmp_path / "model-attempt-migration.db"
+    environment = os.environ.copy()
+    environment["DATABASE_URL"] = f"sqlite:///{database_path.as_posix()}"
+
+    def alembic(*args: str):
+        return subprocess.run(
+            [sys.executable, "-m", "alembic", *args],
+            cwd=repository_root,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    assert alembic("upgrade", "20260815_03").returncode == 0
+    engine = make_engine(environment["DATABASE_URL"])
+    assert "attempt" not in {
+        column["name"] for column in inspect(engine).get_columns("model_calls")
+    }
+
+    upgraded = alembic("upgrade", "head")
+    assert upgraded.returncode == 0, upgraded.stderr
+    assert "attempt" in {
+        column["name"] for column in inspect(engine).get_columns("model_calls")
+    }
+
+    downgraded = alembic("downgrade", "20260815_03")
+    assert downgraded.returncode == 0, downgraded.stderr
+    assert "attempt" not in {
+        column["name"] for column in inspect(engine).get_columns("model_calls")
+    }
+
+    assert alembic("upgrade", "head").returncode == 0
     drift = alembic("check")
     assert drift.returncode == 0, drift.stdout + drift.stderr
