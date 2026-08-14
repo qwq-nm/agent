@@ -1,7 +1,21 @@
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+SAFE_FINISH_REASONS = frozenset(
+    {"stop", "length", "tool_calls", "content_filter", "function_call"}
+)
+
+
+def normalize_finish_reason(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or len(value) > 64:
+        return "unknown"
+    normalized = value.strip().lower()
+    return normalized if normalized in SAFE_FINISH_REASONS else "unknown"
 
 
 class TaskScene(StrEnum):
@@ -83,6 +97,11 @@ class ModelResponse(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     retry_count: int = 0
+
+    @field_validator("finish_reason", mode="before")
+    @classmethod
+    def validate_finish_reason(cls, value: object) -> str | None:
+        return normalize_finish_reason(value)
 
 
 class PlanStep(BaseModel):

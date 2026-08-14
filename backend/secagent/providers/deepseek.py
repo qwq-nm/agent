@@ -55,6 +55,7 @@ class _StructuredProvider:
         started = time.perf_counter()
         initial = await self._send(self._initial_payload(request))
         content, finish_reason = self._completion(initial)
+        prompt_tokens, completion_tokens = _usage_counts(initial.payload)
         try:
             data = validate_output(content, request.response_schema)
             final = initial
@@ -82,12 +83,11 @@ class _StructuredProvider:
                 ) from repair_error
             final = repaired
             retry_count = initial.retry_count + 1 + repaired.retry_count
-
-        usage = (
-            final.payload.get("usage")
-            if isinstance(final.payload.get("usage"), dict)
-            else {}
-        )
+            repair_prompt_tokens, repair_completion_tokens = _usage_counts(
+                repaired.payload
+            )
+            prompt_tokens += repair_prompt_tokens
+            completion_tokens += repair_completion_tokens
         return ModelResponse(
             provider=self.name,
             model=self.model,
@@ -95,8 +95,8 @@ class _StructuredProvider:
             latency_ms=int((time.perf_counter() - started) * 1000),
             request_id=final.request_id,
             finish_reason=finish_reason,
-            prompt_tokens=_safe_token_count(usage.get("prompt_tokens")),
-            completion_tokens=_safe_token_count(usage.get("completion_tokens")),
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
             retry_count=retry_count,
         )
 
@@ -198,4 +198,18 @@ class DeepSeekProvider(_StructuredProvider):
 
 
 def _safe_token_count(value: object) -> int:
-    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+    return (
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        else 0
+    )
+
+
+def _usage_counts(payload: dict[str, Any]) -> tuple[int, int]:
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        return 0, 0
+    return (
+        _safe_token_count(usage.get("prompt_tokens")),
+        _safe_token_count(usage.get("completion_tokens")),
+    )

@@ -83,6 +83,7 @@ async def test_deepseek_repairs_invalid_json_once_with_minimal_redacted_input() 
                         "message": {"content": '{"api_key":"sk-secret-value",'},
                     }
                 ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 2},
             },
             {
                 "id": "repair",
@@ -103,6 +104,8 @@ async def test_deepseek_repairs_invalid_json_once_with_minimal_redacted_input() 
     assert response.data == {"steps": []}
     assert response.request_id == "repair"
     assert response.retry_count == 1
+    assert response.prompt_tokens == 18
+    assert response.completion_tokens == 5
     assert len(requests) == 2
     repair_payload = json.loads(requests[1].content)
     repair_input = json.loads(repair_payload["messages"][0]["content"])
@@ -334,3 +337,22 @@ async def test_deepseek_classifies_malformed_choice_without_raw_exception() -> N
 
     assert caught.value.code is ProviderErrorCode.EMPTY_CONTENT
     assert str(caught.value) == "deepseek: empty_content"
+
+
+@pytest.mark.asyncio
+async def test_deepseek_never_exposes_unknown_finish_reason() -> None:
+    provider = deepseek_provider(
+        returning={
+            "choices": [
+                {
+                    "finish_reason": "Bearer top-secret-token",
+                    "message": {"content": '{"steps": []}'},
+                }
+            ]
+        }
+    )
+
+    response = await provider.complete(plan_request())
+
+    assert response.finish_reason == "unknown"
+    assert "top-secret-token" not in response.model_dump_json()

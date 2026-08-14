@@ -130,3 +130,50 @@ async def test_glm_repair_preserves_schema_field_names_and_bounds_bad_content() 
     assert authorization_rule == {"type": "string"}
     assert "sk-must-not-cross" not in repair_content
     assert len(repair_context["invalid_json"]) <= 8192
+
+
+@pytest.mark.asyncio
+async def test_glm_never_exposes_unknown_finish_reason() -> None:
+    provider = glm_provider(
+        returning={
+            "choices": [
+                {
+                    "finish_reason": "Bearer top-secret-token",
+                    "message": {"content": '{"goal":"g"}'},
+                }
+            ]
+        }
+    )
+
+    response = await provider.complete(parse_request())
+
+    assert response.finish_reason == "unknown"
+    assert "top-secret-token" not in response.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_glm_repair_treats_missing_or_invalid_usage_as_zero() -> None:
+    provider = glm_provider(
+        responses=[
+            {
+                "choices": [
+                    {"finish_reason": "stop", "message": {"content": "{"}}
+                ],
+                "usage": {"prompt_tokens": -1, "completion_tokens": True},
+            },
+            {
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"content": '{"goal":"fixed"}'},
+                    }
+                ]
+            },
+        ]
+    )
+
+    response = await provider.complete(parse_request())
+
+    assert response.prompt_tokens == 0
+    assert response.completion_tokens == 0
+    assert response.retry_count == 1

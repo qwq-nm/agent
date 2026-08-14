@@ -61,10 +61,10 @@ fall back to Mock, while Mock remains available only in explicit mock mode.
 
 ## Verification
 
-- Focused provider/router/metadata suite: `37 passed`, `0 failed`.
-- Full backend suite: `171 passed`, `0 failed`; one pre-existing Starlette
+- Focused provider/router/metadata/config suite: `52 passed`, `0 failed`.
+- Full backend suite: `178 passed`, `0 failed`; one pre-existing Starlette
   TestClient deprecation warning.
-- Global coverage: `91.86%` (required minimum: `85%`).
+- Global coverage: `91.92%` (required minimum: `85%`).
 - `python -m compileall -q backend`: passed.
 - `git diff --check`: passed; Git emitted only repository line-ending conversion
   notices.
@@ -93,3 +93,31 @@ test first:
   EMPTY_CONTENT taxonomy;
 - live startup with one missing key could allocate a client before router
   validation; key/model validation now occurs before pool construction.
+
+## Main-review fixes
+
+The main review identified four Important boundaries. Each was reproduced with a
+failing test before the fix:
+
+- A repair response replaced the initial successful response's token usage. Usage
+  now sums every successful provider response in the completion flow; for example,
+  `10/2 + 8/3` records `18/5`. Missing, boolean, string, or negative counts safely
+  contribute zero. `retry_count` remains the number of extra calls: one repair is
+  one retry, plus any transport retries.
+- An untrusted provider `finish_reason` could reach `ModelResponse` and the ledger
+  unchanged. `ModelResponse` now normalizes a bounded allowlist of protocol values;
+  unknown or oversized values become the fixed string `unknown`. DeepSeek, GLM,
+  serialized responses, and ledger persistence are covered with a Bearer-shaped
+  secret regression. `length` is still intercepted as TRUNCATED before response
+  construction.
+- Docker Compose overrode the Settings defaults with `deepseek-chat` and
+  `glm-4-flash`. Its production environment defaults now match Settings and
+  `.env.example`: `deepseek-v4-pro` and `glm-5.2`.
+- The process-global worker runtime could be initialized twice and concurrent
+  threads could call one `asyncio.Runner.run`, causing `RuntimeError` and leaking a
+  pool. A process-level reentrant lock now serializes initialization, runner use,
+  and shutdown; a runtime lock makes direct run/close calls reentrant-safe. Two
+  Barrier-based thread tests prove one pool, successful calls without RuntimeError,
+  shutdown waiting for an in-flight call, and exactly one close. This serialization
+  matches Celery's default prefork model: each process handles one task at a time,
+  while the configured three worker processes remain concurrent.

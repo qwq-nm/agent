@@ -35,3 +35,23 @@ def test_ledger_persists_safe_provider_response_metadata() -> None:
     assert repository.values["prompt_tokens"] == 12
     assert repository.values["completion_tokens"] == 5
     assert repository.values["retry_count"] == 2
+
+
+def test_model_response_and_ledger_normalize_untrusted_finish_reason() -> None:
+    repository = CapturingRepository()
+    response = ModelResponse(
+        provider="glm",
+        model="glm-5.2",
+        data={"goal": "g"},
+        latency_ms=1,
+        finish_reason="Bearer top-secret-token",
+    )
+
+    LedgerService(repository).record_model_response(
+        "task-1", ModelStage.REPORT, response
+    )
+
+    assert response.finish_reason == "unknown"
+    assert repository.values is not None
+    assert repository.values["finish_reason"] == "unknown"
+    assert "top-secret-token" not in str(repository.values)

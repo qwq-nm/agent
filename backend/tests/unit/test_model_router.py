@@ -1,6 +1,11 @@
+import asyncio
+import threading
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
+import secagent.worker as worker_module
 from secagent.config import Settings
 from secagent.db import Base
 from secagent.domain import ModelRequest, ModelResponse, ModelStage
@@ -11,7 +16,11 @@ from secagent.providers.deepseek import DeepSeekProvider
 from secagent.providers.glm import GLMProvider
 from secagent.providers.router import FIXED_PROVIDER, ModelRouter
 from secagent.queue.fake import FakeJobQueue
-from secagent.worker import _get_worker_runtime, _shutdown_worker_runtime
+from secagent.worker import (
+    _get_worker_runtime,
+    _run_worker_coroutine,
+    _shutdown_worker_runtime,
+)
 
 
 class StubProvider:
@@ -238,3 +247,128 @@ def test_sync_worker_runtime_reuses_and_closes_one_provider_pool(tmp_path) -> No
 
     _shutdown_worker_runtime()
     assert client.is_closed is True
+
+
+def test_worker_runtime_is_thread_safe_and_shutdown_runs_once(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _shutdown_worker_runtime()
+    settings = Settings(
+        database_url=f"sqlite:///{tmp_path / 'thread-worker.db'}",
+        model_mode="live",
+        deepseek_api_key="ds-key",
+        glm_api_key="glm-key",
+    )
+    original_build = worker_module.build_providers
+    build_count = 0
+    build_count_lock = threading.Lock()
+
+    def slow_build(settings):
+        nonlocal build_count
+        with build_count_lock:
+            build_count += 1
+        time.sleep(0.05)
+        return original_build(settings)
+
+    monkeypatch.setattr(worker_module, "build_providers", slow_build)
+    start = threading.Barrier(2)
+    runtimes = []
+    results = []
+    errors = []
+
+    def invoke(index: int) -> None:
+        coroutine = None
+        try:
+            start.wait()
+            runtime = _get_worker_runtime(settings)
+            runtimes.append(runtime)
+            coroutine = asyncio.sleep(0.02, result=index)
+            results.append(_run_worker_coroutine(settings, lambda _: coroutine))
+        except Exception as exc:  # asserted below with both worker threads joined
+            errors.append(exc)
+            if coroutine is not None:
+                coroutine.close()
+
+    threads = [threading.Thread(target=invoke, args=(index,)) for index in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    assert sorted(results) == [0, 1]
+    assert build_count == 1
+    assert len({id(runtime) for runtime in runtimes}) == 1
+    client_ids = {
+        id(runtime.router.providers["deepseek"].client) for runtime in runtimes
+    }
+    assert len(client_ids) == 1
+
+    runtime = runtimes[0]
+    original_close = runtime.router.aclose
+    close_count = 0
+
+    async def counted_close() -> None:
+        nonlocal close_count
+        close_count += 1
+        await original_close()
+
+    runtime.router.aclose = counted_close
+    stop = threading.Barrier(2)
+
+    def shutdown() -> None:
+        stop.wait()
+        _shutdown_worker_runtime()
+
+    shutdown_threads = [threading.Thread(target=shutdown) for _ in range(2)]
+    for thread in shutdown_threads:
+        thread.start()
+    for thread in shutdown_threads:
+        thread.join()
+
+    assert close_count == 1
+    assert runtime.router.providers["deepseek"].client.is_closed is True
+
+
+def test_worker_shutdown_waits_for_inflight_runtime_call(tmp_path) -> None:
+    _shutdown_worker_runtime()
+    settings = Settings(
+        database_url=f"sqlite:///{tmp_path / 'shutdown-worker.db'}",
+        model_mode="live",
+        deepseek_api_key="ds-key",
+        glm_api_key="glm-key",
+    )
+    started = threading.Event()
+    release = threading.Event()
+    run_errors = []
+
+    async def blocked_call() -> str:
+        started.set()
+        await asyncio.to_thread(release.wait)
+        return "finished"
+
+    def invoke() -> None:
+        try:
+            assert (
+                _run_worker_coroutine(settings, lambda _: blocked_call())
+                == "finished"
+            )
+        except Exception as exc:  # asserted after joining the worker thread
+            run_errors.append(exc)
+
+    run_thread = threading.Thread(target=invoke)
+    run_thread.start()
+    assert started.wait(timeout=2)
+
+    shutdown_thread = threading.Thread(target=_shutdown_worker_runtime)
+    shutdown_thread.start()
+    shutdown_thread.join(timeout=0.05)
+    assert shutdown_thread.is_alive()
+
+    release.set()
+    run_thread.join(timeout=2)
+    shutdown_thread.join(timeout=2)
+
+    assert run_errors == []
+    assert run_thread.is_alive() is False
+    assert shutdown_thread.is_alive() is False

@@ -101,3 +101,13 @@ def test_settings_uses_required_production_defaults(monkeypatch: pytest.MonkeyPa
     assert settings.max_model_calls_per_task == 8
     assert settings.max_input_tokens_per_task == 120_000
     assert settings.max_output_tokens_per_task == 24_000
+
+
+def test_docker_compose_provider_defaults_match_settings() -> None:
+    repository_root = Path(__file__).resolve().parents[3]
+    compose = (repository_root / "docker-compose.yml").read_text(encoding="utf-8")
+
+    assert "DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-pro}" in compose
+    assert "GLM_MODEL: ${GLM_MODEL:-glm-5.2}" in compose
+    assert "deepseek-chat" not in compose
+    assert "glm-4-flash" not in compose
