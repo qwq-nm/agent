@@ -1,7 +1,9 @@
 import asyncio
+from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
+from celery.signals import worker_process_shutdown
 from sqlalchemy.orm import Session, sessionmaker
 
 from secagent.agents.executor import DemoEvidenceTool
@@ -28,6 +30,16 @@ from secagent.tools.source_tools import (
 )
 from secagent.tools.web_tools import FormExtract, HeaderCheck, HttpFetch, UrlGuardTool
 from secagent.security.url_guard import UrlGuard
+
+
+@dataclass
+class _WorkerRuntime:
+    runner: asyncio.Runner
+    router: ModelRouter
+    registry: ToolRegistry
+
+
+_runtime: _WorkerRuntime | None = None
 
 
 def build_worker_registry(allowed_hosts: set[str]) -> ToolRegistry:
@@ -81,19 +93,49 @@ async def execute_queued_task(
         )
 
 
+def _get_worker_runtime(settings) -> _WorkerRuntime:
+    global _runtime
+    if _runtime is None:
+        allowed_hosts = {
+            host.strip()
+            for host in settings.web_allowed_hosts.split(",")
+            if host.strip()
+        }
+        _runtime = _WorkerRuntime(
+            runner=asyncio.Runner(),
+            router=ModelRouter(
+                build_providers(settings), mode=settings.model_mode
+            ),
+            registry=build_worker_registry(allowed_hosts),
+        )
+    return _runtime
+
+
+def _shutdown_worker_runtime() -> None:
+    global _runtime
+    runtime, _runtime = _runtime, None
+    if runtime is None:
+        return
+    runtime.runner.run(runtime.router.aclose())
+    runtime.runner.close()
+
+
+@worker_process_shutdown.connect
+def _close_worker_runtime(**_: object) -> None:
+    _shutdown_worker_runtime()
+
+
 @celery.task(name="secagent.run_task")
 def run_task(task_id: str, command_id: str) -> None:
     settings = get_settings()
-    allowed_hosts = {
-        host.strip() for host in settings.web_allowed_hosts.split(",") if host.strip()
-    }
-    asyncio.run(
+    runtime = _get_worker_runtime(settings)
+    runtime.runner.run(
         execute_queued_task(
             task_id,
             command_id,
             make_session_factory(settings.database_url),
-            ModelRouter(build_providers(settings), mode=settings.model_mode),
-            build_worker_registry(allowed_hosts),
+            runtime.router,
+            runtime.registry,
             settings.data_dir,
             worker_id=getattr(run_task.request, "id", None),
             lease_seconds=settings.job_lease_seconds,

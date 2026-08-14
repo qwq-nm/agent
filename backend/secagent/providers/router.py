@@ -1,20 +1,36 @@
 from secagent.domain import ModelRequest, ModelResponse, ModelStage
-from secagent.providers.base import ModelProvider, ProviderUnavailable
+from secagent.providers.base import (
+    ModelProvider,
+    ProviderErrorCode,
+    ProviderUnavailable,
+)
+
+
+FIXED_PROVIDER = {
+    ModelStage.TASK_PARSE: "glm",
+    ModelStage.PLAN: "deepseek",
+    ModelStage.CRITIC: "deepseek",
+    ModelStage.REPORT: "glm",
+}
 
 
 class ModelRouter:
-    defaults = {
-        ModelStage.TASK_PARSE: "glm",
-        ModelStage.REPORT: "glm",
-        ModelStage.PLAN: "deepseek",
-        ModelStage.CRITIC: "deepseek",
-    }
+    defaults = FIXED_PROVIDER
 
     def __init__(self, providers: dict[str, ModelProvider], mode: str = "auto") -> None:
         if mode not in {"auto", "live", "mock"}:
             raise ValueError(f"unsupported model mode: {mode}")
         self.providers = providers
         self.mode = mode
+        if mode == "live":
+            for name in dict.fromkeys(FIXED_PROVIDER.values()):
+                self._require_provider(name)
+        elif mode == "mock":
+            self._require_provider("mock")
+
+    def provider_for(self, stage: ModelStage) -> ModelProvider:
+        name = "mock" if self.mode == "mock" else FIXED_PROVIDER[stage]
+        return self._require_provider(name)
 
     async def complete(
         self,
@@ -22,27 +38,29 @@ class ModelRouter:
         request: ModelRequest,
         preferred: str | None = None,
     ) -> ModelResponse:
-        if self.mode == "mock":
-            return await self.providers["mock"].complete(request)
-
-        primary = preferred or self.defaults[stage]
-        candidates = [primary] if preferred else [
-            primary,
-            "deepseek" if primary == "glm" else "glm",
-        ]
-        last_error: Exception | None = None
-        for name in dict.fromkeys(candidates):
-            try:
-                return await self.providers[name].complete(request)
-            except Exception as exc:
-                last_error = exc
-
-        if self.mode == "auto":
-            return await self.providers["mock"].complete(request)
-        raise ProviderUnavailable(str(last_error))
+        del preferred  # Stage ownership is fixed; manual input cannot override it.
+        staged_request = request.model_copy(update={"stage": stage})
+        return await self.provider_for(stage).complete(staged_request)
 
     def describe(self) -> list[dict[str, str | bool]]:
         return [
             {"name": name, "configured": True, "mode": self.mode}
             for name in self.providers
         ]
+
+    async def aclose(self) -> None:
+        closed: set[int] = set()
+        for provider in self.providers.values():
+            client = getattr(provider, "client", None)
+            if client is None or id(client) in closed:
+                continue
+            closed.add(id(client))
+            await client.aclose()
+
+    def _require_provider(self, name: str) -> ModelProvider:
+        provider = self.providers.get(name)
+        if provider is None:
+            raise ProviderUnavailable(
+                name, ProviderErrorCode.AUTH, retryable=False
+            )
+        return provider

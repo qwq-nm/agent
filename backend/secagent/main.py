@@ -49,14 +49,17 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
-        with application.state.session_factory() as session:
-            JobService(
-                TaskRepository(session),
-                application.state.job_queue,
-                lease_seconds=application.state.settings.job_lease_seconds,
-                max_auto_retries=application.state.settings.job_auto_retries,
-            ).recover_expired()
-        yield
+        try:
+            with application.state.session_factory() as session:
+                JobService(
+                    TaskRepository(session),
+                    application.state.job_queue,
+                    lease_seconds=application.state.settings.job_lease_seconds,
+                    max_auto_retries=application.state.settings.job_auto_retries,
+                ).recover_expired()
+            yield
+        finally:
+            await application.state.model_router.aclose()
 
     app = FastAPI(title="SecAgent-X", version="0.1.0", lifespan=lifespan)
     install_error_handlers(app)

@@ -66,6 +66,7 @@ class TaskRead(TaskCreate):
 
 
 class ModelRequest(BaseModel):
+    stage: ModelStage | None = None
     system: str
     user: str
     response_schema: dict[str, Any]
@@ -77,6 +78,11 @@ class ModelResponse(BaseModel):
     data: dict[str, Any]
     latency_ms: int
     is_demo: bool = False
+    request_id: str | None = None
+    finish_reason: str | None = None
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    retry_count: int = 0
 
 
 class PlanStep(BaseModel):
