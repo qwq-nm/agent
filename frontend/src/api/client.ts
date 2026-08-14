@@ -6,13 +6,10 @@ import type {
   TaskDetail,
   ToolStatus,
 } from '../types'
+import { apiRequest, apiTextRequest } from './http'
 
 export async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, init)
-  if (!response.ok) {
-    throw new Error((await response.text()) || `HTTP ${response.status}`)
-  }
-  return response.json() as Promise<T>
+  return apiRequest<T>(url, init)
 }
 
 export const api = {
@@ -48,9 +45,5 @@ export const lifecycle = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ approved, reason }),
     }),
-  report: async (id: string) => {
-    const response = await fetch(`/api/tasks/${id}/report`)
-    if (!response.ok) throw new Error(await response.text())
-    return response.text()
-  },
+  report: (id: string) => apiTextRequest(`/api/tasks/${id}/report`),
 }

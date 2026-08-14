@@ -5,15 +5,45 @@ import TaskDetailView from './views/TaskDetailView.vue'
 import TaskListView from './views/TaskListView.vue'
 import ReportsView from './views/ReportsView.vue'
 import SystemView from './views/SystemView.vue'
+import LoginView from './views/LoginView.vue'
+import { useAuthStore } from './stores/auth'
+
+declare module 'vue-router' {
+  interface RouteMeta {
+    requiresAuth?: boolean
+    requiresAdmin?: boolean
+  }
+}
+
+export function safeRedirectPath(value: unknown): string {
+  return typeof value === 'string' && value.startsWith('/') && !value.startsWith('//') ? value : '/'
+}
 
 export const router = createRouter({
   history: createWebHistory(),
   routes: [
-    { path: '/', component: DashboardView },
-    { path: '/tasks/new', component: TaskCreateView },
-    { path: '/tasks', component: TaskListView },
-    { path: '/tasks/:id', component: TaskDetailView },
-    { path: '/reports', component: ReportsView },
-    { path: '/system', component: SystemView },
+    { path: '/login', component: LoginView },
+    { path: '/', component: DashboardView, meta: { requiresAuth: true } },
+    { path: '/tasks/new', component: TaskCreateView, meta: { requiresAuth: true } },
+    { path: '/tasks', component: TaskListView, meta: { requiresAuth: true } },
+    { path: '/tasks/:id', component: TaskDetailView, meta: { requiresAuth: true } },
+    { path: '/reports', component: ReportsView, meta: { requiresAuth: true } },
+    { path: '/system', component: SystemView, meta: { requiresAuth: true } },
+    { path: '/team', component: SystemView, meta: { requiresAuth: true, requiresAdmin: true } },
+    { path: '/audit', component: SystemView, meta: { requiresAuth: true, requiresAdmin: true } },
   ],
+})
+
+router.beforeEach(async (to) => {
+  const auth = useAuthStore()
+  await auth.bootstrap()
+  if (to.path === '/login') return auth.user && auth.accessToken ? safeRedirectPath(to.query.redirect) : true
+  if (!to.meta.requiresAuth) return true
+  if (!auth.user || !auth.accessToken) return { path: '/login', query: { redirect: safeRedirectPath(to.fullPath) } }
+  if (to.meta.requiresAdmin && auth.user.role !== 'admin') return '/'
+  return true
+})
+
+window.addEventListener('secagent:auth-expired', () => {
+  if (router.currentRoute.value.path !== '/login') void router.replace({ path: '/login' })
 })

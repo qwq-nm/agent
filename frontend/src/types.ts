@@ -12,6 +12,21 @@ export type TaskStatus =
 
 export type RouteMode = 'auto' | 'manual'
 
+export type UserRole = 'admin' | 'analyst'
+
+export interface AuthUser {
+  id: string
+  username: string
+  role: UserRole
+}
+
+export interface AuthResponse {
+  access_token: string
+  token_type?: 'bearer'
+  expires_in?: number
+  user: AuthUser
+}
+
 export interface Task {
   id: string
   goal: string
