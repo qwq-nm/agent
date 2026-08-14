@@ -205,7 +205,7 @@ class TaskRepository:
         self.session.commit()
 
     def get_task(self, task_id: str) -> TaskRead | None:
-        row = self.session.get(TaskRow, task_id)
+        row = self.session.get(TaskRow, task_id, populate_existing=True)
         return self._read(row) if row else None
 
     def list_tasks(self) -> list[TaskRead]:
@@ -334,7 +334,7 @@ class TaskRepository:
             .values(status=TaskStatus.FAILED_RETRYABLE.value)
         )
 
-    def cancel_pending_jobs(self, task_id: str) -> None:
+    def invalidate_jobs_for_transition(self, task_id: str, action: str) -> None:
         self.session.execute(
             update(JobRunRow)
             .where(
@@ -348,6 +348,36 @@ class TaskRepository:
                 finished_at=datetime.now(timezone.utc),
             )
         )
+        requested_status = (
+            "pause_requested" if action == "pause" else "cancel_requested"
+        )
+        running_statuses = (
+            ("running",)
+            if action == "pause"
+            else ("running", "pause_requested")
+        )
+        self.session.execute(
+            update(JobRunRow)
+            .where(
+                JobRunRow.task_id == task_id,
+                JobRunRow.status.in_(running_statuses),
+            )
+            .values(status=requested_status)
+        )
+
+    def has_unsettled_execution(self, task_id: str) -> bool:
+        row = self.session.scalar(
+            select(JobRunRow)
+            .where(
+                JobRunRow.task_id == task_id,
+                JobRunRow.status.in_(
+                    ("running", "pause_requested", "cancel_requested")
+                ),
+            )
+            .order_by(JobRunRow.created_at)
+            .with_for_update()
+        )
+        return row is not None
 
     def claim_job_execution(self, task_id: str, command_id: str) -> bool:
         job_claimed = self.session.execute(
@@ -389,16 +419,34 @@ class TaskRepository:
         self.session.commit()
         return True
 
-    def finish_job_execution(self, command_id: str, status: str) -> None:
-        self.session.execute(
-            update(JobRunRow)
-            .where(
-                JobRunRow.command_id == command_id,
-                JobRunRow.status == "running",
-            )
-            .values(status=status, finished_at=datetime.now(timezone.utc))
+    def finish_job_execution(self, command_id: str, status: str) -> str:
+        row = self.session.scalar(
+            select(JobRunRow)
+            .where(JobRunRow.command_id == command_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
+        if row is None:
+            self.session.rollback()
+            return "missing"
+        task_target: TaskStatus | None = None
+        if row.status == "pause_requested":
+            row.status = "paused"
+            task_target = TaskStatus.PAUSED
+        elif row.status == "cancel_requested":
+            row.status = "cancelled"
+            task_target = TaskStatus.CANCELLED
+        elif row.status == "running":
+            row.status = status
+        row.finished_at = datetime.now(timezone.utc)
+        if task_target is not None:
+            self.session.execute(
+                update(TaskRow)
+                .where(TaskRow.id == row.task_id)
+                .values(status=task_target.value)
+            )
         self.session.commit()
+        return row.status
 
     def latest_audit_event(self, action: str) -> AuditEventRow | None:
         return self.session.scalar(

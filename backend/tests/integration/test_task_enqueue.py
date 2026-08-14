@@ -95,6 +95,34 @@ def test_run_requires_idempotency_key(analyst_client) -> None:
     assert response.json()["error"]["code"] == "bad_request"
 
 
+def test_different_key_cannot_requeue_an_already_queued_task(
+    analyst_client, app
+) -> None:
+    queue = RecordingQueue()
+    app.state.job_queue = queue
+    task = analyst_client.post(
+        "/api/tasks",
+        json={
+            "goal": "Reject a distinct duplicate command",
+            "authorization_scope": "Uploaded logs only",
+        },
+    ).json()
+    analyst_client.post(
+        f"/api/tasks/{task['id']}/run",
+        headers={"Idempotency-Key": "first-command"},
+    )
+
+    response = analyst_client.post(
+        f"/api/tasks/{task['id']}/run",
+        headers={"Idempotency-Key": "different-command"},
+    )
+
+    assert response.status_code == 409
+    assert set(response.json()) == {"error"}
+    assert response.json()["error"]["code"] == "conflict"
+    assert len(queue.calls) == 1
+
+
 def test_broker_failure_is_retryable_with_same_key(
     analyst_client, app, repository
 ) -> None:

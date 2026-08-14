@@ -53,3 +53,14 @@
 - Broker acknowledgement can be ambiguous if Redis accepts a message and the client then raises. The durable command ID and worker-side claim prevent duplicate execution; a retry may still place duplicate envelopes in the broker, which is normal at-least-once delivery behavior.
 - SQLite exercises conditional-update serialization but not PostgreSQL row-level deadlock behavior. The implementation uses one JobRun-to-Task lock order; PostgreSQL-backed concurrency CI remains desirable.
 - Worker leases, heartbeat recovery, SSE, and deployment services are deliberately deferred to their later tasks.
+
+## Main-review running-command and approval fixes
+
+- Main review reproduced a claimed running job that remained `running` after pause/cancel. A premature resume could create a second command while the old worker continued and later overwrote terminal state.
+- Running jobs now persist `pause_requested` or `cancel_requested`. Resume/new execution checks and locks unsettled JobRun rows first and returns 409 until the old worker atomically finalizes the request to `paused` or `cancelled`; queued-but-unclaimed jobs are cancelled directly.
+- Agent execution checks a freshly reloaded task state before and after model/tool boundaries. Executor checks again after a tool returns and before any tool/evidence ledger write. Completion and failure use conditional RUNNING transitions, so stale workers cannot revive paused/cancelled tasks.
+- RED: controlled tools blocked after worker claim; pause followed by resume admitted a second queued job, cancel was overwritten, and the old runner continued into critic/error handling. A held SQLAlchemy identity-mapped TaskRow also proved `expire_on_commit=False` could hide a cross-session pause.
+- GREEN: resume is 409 while `pause_requested`, succeeds only after the old job becomes `paused`, cancel remains terminal, and both paths record no post-boundary tool calls/reports (only pre-tool parse/plan model calls). `get_task(..., populate_existing=True)` forces fresh boundary reads.
+- Concurrent same-key approval acceptance originally returned `[202, 409]`. On decision conflict it now rolls back, detects the winner's identical durable command, and enters the same coordinated publisher path. The Barrier regression returns `[202, 202]` with one broker publish.
+- A distinct new idempotency key against an already queued `/run` now returns the standard 409 conflict envelope instead of propagating `ValueError` as a server exception.
+- Final fix-focused regression set: 42 passed. Final backend full suite: 110 passed. Final independent review: Approved, with no remaining Critical or Important findings.

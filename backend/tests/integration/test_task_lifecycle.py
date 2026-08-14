@@ -1,4 +1,54 @@
-from secagent.domain import PlanStep, RiskLevel, TaskStatus
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, Event
+
+from fastapi.testclient import TestClient
+
+from secagent.db_models import TaskRow
+from secagent.domain import PlanStep, RiskLevel, TaskStatus, ToolResult
+from secagent.repository import TaskRepository
+from secagent.tools.base import BaseTool, ToolContext
+
+
+class BlockingDemoTool(BaseTool):
+    name = "demo_evidence"
+    scene = "incident_response"
+    risk_level = RiskLevel.LOW
+    idempotent = True
+    timeout_seconds = 5.0
+
+    def __init__(self) -> None:
+        self.entered = Event()
+        self.release = Event()
+        self.calls = 0
+
+    async def run(self, params: dict, context: ToolContext) -> ToolResult:
+        self.calls += 1
+        self.entered.set()
+        while not self.release.is_set():
+            await asyncio.sleep(0.01)
+        return ToolResult(success=True, summary="controlled completion")
+
+
+def test_task_status_boundary_read_refreshes_identity_mapped_row(
+    analyst_client, app, repository
+) -> None:
+    task = analyst_client.post(
+        "/api/tasks",
+        json={
+            "goal": "Refresh worker status boundary",
+            "authorization_scope": "Uploaded logs only",
+        },
+    ).json()
+    repository.set_task_status(task["id"], TaskStatus.RUNNING)
+
+    with app.state.session_factory() as worker_session:
+        held_row = worker_session.get(TaskRow, task["id"])
+        worker_repository = TaskRepository(worker_session)
+        repository.set_task_status(task["id"], TaskStatus.PAUSED)
+
+        assert held_row.status == TaskStatus.RUNNING.value
+        assert worker_repository.get_task(task["id"]).status is TaskStatus.PAUSED
 
 
 def test_pause_resume_cancel_and_recover(
@@ -100,6 +150,94 @@ def test_pause_cancels_old_command_before_resume_enqueues_replacement(
     assert repository.get_job_run(fake_queue.enqueued[1].command_id).status == "queued"
 
 
+def test_running_pause_blocks_resume_until_old_worker_settles(
+    analyst_client, app, repository, fake_queue, run_queued_job
+) -> None:
+    tool = BlockingDemoTool()
+    app.state.tool_registry._tools[tool.name] = tool
+    task = analyst_client.post(
+        "/api/tasks",
+        json={
+            "goal": "Pause running controlled analysis",
+            "authorization_scope": "Uploaded logs only",
+        },
+    ).json()
+    analyst_client.post(
+        f"/api/tasks/{task['id']}/run",
+        headers={"Idempotency-Key": "running-pause-001"},
+    )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        worker = executor.submit(run_queued_job)
+        assert tool.entered.wait(timeout=5)
+        paused = analyst_client.post(f"/api/tasks/{task['id']}/pause")
+        premature_resume = analyst_client.post(
+            f"/api/tasks/{task['id']}/resume",
+            headers={"Idempotency-Key": "premature-resume-001"},
+        )
+        tool.release.set()
+        worker.result(timeout=5)
+
+    old_job = repository.get_job_run(fake_queue.enqueued[0].command_id)
+    assert paused.json()["status"] == "paused"
+    assert premature_resume.status_code == 409
+    assert repository.get_task(task["id"]).status is TaskStatus.PAUSED
+    assert old_job.status == "paused"
+    assert tool.calls == 1
+    assert len(fake_queue.enqueued) == 1
+    detail = analyst_client.get(f"/api/tasks/{task['id']}").json()
+    assert detail["tool_calls"] == []
+    assert [call["stage"] for call in detail["model_calls"]] == [
+        "task_parse",
+        "plan",
+    ]
+    assert detail["reports"] == []
+
+    resumed = analyst_client.post(
+        f"/api/tasks/{task['id']}/resume",
+        headers={"Idempotency-Key": "settled-resume-001"},
+    )
+    assert resumed.status_code == 202
+    assert len(fake_queue.enqueued) == 2
+
+
+def test_running_cancel_is_not_resurrected_when_old_worker_finishes(
+    analyst_client, app, repository, fake_queue, run_queued_job
+) -> None:
+    tool = BlockingDemoTool()
+    app.state.tool_registry._tools[tool.name] = tool
+    task = analyst_client.post(
+        "/api/tasks",
+        json={
+            "goal": "Cancel running controlled analysis",
+            "authorization_scope": "Uploaded logs only",
+        },
+    ).json()
+    analyst_client.post(
+        f"/api/tasks/{task['id']}/run",
+        headers={"Idempotency-Key": "running-cancel-001"},
+    )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        worker = executor.submit(run_queued_job)
+        assert tool.entered.wait(timeout=5)
+        cancelled = analyst_client.post(f"/api/tasks/{task['id']}/cancel")
+        tool.release.set()
+        worker.result(timeout=5)
+
+    assert cancelled.json()["status"] == "cancelled"
+    assert repository.get_task(task["id"]).status is TaskStatus.CANCELLED
+    assert repository.get_job_run(fake_queue.enqueued[0].command_id).status == "cancelled"
+    assert tool.calls == 1
+    detail = analyst_client.get(f"/api/tasks/{task['id']}").json()
+    assert detail["tool_calls"] == []
+    assert [call["stage"] for call in detail["model_calls"]] == [
+        "task_parse",
+        "plan",
+    ]
+    assert detail["reports"] == []
+
+
 def _waiting_task(analyst_client, repository) -> dict:
     task = analyst_client.post(
         "/api/tasks",
@@ -168,3 +306,44 @@ def test_approval_acceptance_creates_new_queued_command(
     assert response.json()["status"] == "queued"
     assert duplicate.json()["status"] == "queued"
     assert [job.task_id for job in fake_queue.enqueued] == [task["id"]]
+
+
+def test_concurrent_same_key_approval_acceptance_replays_winner(
+    analyst_client, app, repository, fake_queue, monkeypatch
+) -> None:
+    task = _waiting_task(analyst_client, repository)
+    decision_barrier = Barrier(2)
+    original_decide = TaskRepository.decide_latest_approval
+
+    def decide_together(repo, task_id, **kwargs):
+        decision_barrier.wait(timeout=5)
+        return original_decide(repo, task_id, **kwargs)
+
+    monkeypatch.setattr(TaskRepository, "decide_latest_approval", decide_together)
+    authorization = analyst_client.headers["Authorization"]
+    headers = {"Idempotency-Key": "concurrent-approve-001"}
+    payload = {"approved": True, "reason": "Authorized passive GET"}
+    with TestClient(app) as first_client, TestClient(app) as second_client:
+        first_client.headers["Authorization"] = authorization
+        second_client.headers["Authorization"] = authorization
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            responses = [
+                future.result(timeout=10)
+                for future in (
+                    executor.submit(
+                        first_client.post,
+                        f"/api/tasks/{task['id']}/approve",
+                        headers=headers,
+                        json=payload,
+                    ),
+                    executor.submit(
+                        second_client.post,
+                        f"/api/tasks/{task['id']}/approve",
+                        headers=headers,
+                        json=payload,
+                    ),
+                )
+            ]
+
+    assert [response.status_code for response in responses] == [202, 202]
+    assert len(fake_queue.enqueued) == 1

@@ -143,6 +143,8 @@ async def run_task(
         result = service.run(task_id, actor, require_idempotency_key(request))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="task not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return result.model_dump(mode="json")
 
 

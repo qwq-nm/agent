@@ -1,7 +1,11 @@
-from secagent.domain import RiskLevel, ToolResult
+from secagent.domain import RiskLevel, TaskStatus, ToolResult
 from secagent.services.ledger import LedgerService
 from secagent.tools.base import BaseTool, ToolContext
 from secagent.tools.registry import ToolRegistry
+
+
+class ExecutionInterrupted(RuntimeError):
+    pass
 
 
 class DemoEvidenceTool(BaseTool):
@@ -41,5 +45,8 @@ class Executor:
         context: ToolContext,
     ) -> ToolResult:
         result = await self.registry.execute(tool_name, params, context)
+        task = self.ledger.repository.get_task(task_id)
+        if task is None or task.status is not TaskStatus.RUNNING:
+            raise ExecutionInterrupted("task execution was invalidated")
         self.ledger.record_tool_result(task_id, step_id, tool_name, params, result)
         return result

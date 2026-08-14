@@ -91,7 +91,17 @@ class TaskService:
         try:
             result = await self.runner.run(task_id)
         except Exception as exc:
-            self.repository.finish_job_execution(command_id, "failed")
+            final_status = self.repository.finish_job_execution(command_id, "failed")
+            if final_status in {"paused", "cancelled"}:
+                self.repository.record_audit(
+                    None,
+                    "task.execute",
+                    "task",
+                    task_id,
+                    final_status,
+                    {"command_id": command_id},
+                )
+                return None
             self.repository.record_audit(
                 None,
                 "task.execute",
@@ -101,13 +111,13 @@ class TaskService:
                 {"command_id": command_id, "error_type": type(exc).__name__},
             )
             raise
-        self.repository.finish_job_execution(command_id, "completed")
+        final_status = self.repository.finish_job_execution(command_id, "completed")
         self.repository.record_audit(
             None,
             "task.execute",
             "task",
             task_id,
-            "success",
+            "success" if final_status == "completed" else final_status,
             {"command_id": command_id},
         )
         return result
@@ -143,6 +153,9 @@ class TaskService:
             return latest
 
         if existing is None:
+            if self.repository.has_unsettled_execution(task_id):
+                self.repository.rollback()
+                raise ValueError("previous task execution is still settling")
             require_transition(task.status, TaskStatus.QUEUED)
             try:
                 self.repository.add_job_run(task_id, command_id)
@@ -230,7 +243,7 @@ class TaskService:
             require_transition(task.status, target)
             # Keep the command/job -> task lock order used by publishers/workers.
             if action in {"pause", "cancel"}:
-                self.repository.cancel_pending_jobs(task_id)
+                self.repository.invalidate_jobs_for_transition(task_id, action)
             updated = self.repository.transition_task_status(
                 task_id, task.status, target, commit=False
             )
@@ -317,6 +330,16 @@ class TaskService:
             )
             raise
         except ValueError:
+            self.repository.rollback()
+            if approved and idempotency_key is not None:
+                command_id = self._command_id(task_id, "approve", idempotency_key)
+                if self.repository.get_job_run(command_id) is not None:
+                    return self._enqueue(
+                        task_id,
+                        actor,
+                        idempotency_key,
+                        "approve",
+                    )
             self.repository.record_audit(
                 actor.id,
                 "task.approve",
@@ -360,25 +383,12 @@ class TaskService:
             command_id = self._command_id(task_id, "approve", idempotency_key)
             self.repository.add_job_run(task_id, command_id)
             self.repository.commit()
-            if self.repository.begin_job_publish(command_id) != "claimed":
-                self.repository.rollback()
-                raise QueueUnavailable()
-            try:
-                broker_id = self.job_queue.enqueue(task_id, command_id)
-            except Exception as exc:
-                self.repository.mark_job_enqueue_failed(task_id, command_id)
-                self.repository.record_audit(
-                    actor.id,
-                    "task.approve",
-                    "task",
-                    task_id,
-                    "failure",
-                    {"command_id": command_id, "error_type": type(exc).__name__},
-                    commit=False,
-                )
-                self.repository.commit()
-                raise QueueUnavailable() from exc
-            self.repository.mark_job_enqueued(command_id, broker_id)
+            return self._enqueue(
+                task_id,
+                actor,
+                idempotency_key,
+                "approve",
+            )
         else:
             self.repository.commit()
         return updated
