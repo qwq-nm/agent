@@ -2,14 +2,21 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { api } from '../api/client'
 import type { Task, TaskDetail } from '../types'
+import { useTaskEvents, type TaskEventStream } from '../composables/useTaskEvents'
+
+const terminalStatuses = new Set(['completed', 'failed', 'cancelled'])
 
 export const useTasksStore = defineStore('tasks', () => {
   const tasks = ref<Task[]>([])
   const loading = ref(false)
   const error = ref('')
   const detail = ref<TaskDetail>()
-  let pollTimer: ReturnType<typeof setTimeout> | undefined
-  let pollingId: string | undefined
+  let stream: TaskEventStream | undefined
+  let watchedTaskId: string | undefined
+  let watchGeneration = 0
+  let detailRequest = 0
+  let refreshInFlight: Promise<TaskDetail | undefined> | undefined
+  let refreshQueued = false
 
   const activeCount = computed(
     () =>
@@ -32,26 +39,49 @@ export const useTasksStore = defineStore('tasks', () => {
     }
   }
 
-  function stopPolling() {
-    pollingId = undefined
-    if (pollTimer) clearTimeout(pollTimer)
-    pollTimer = undefined
+  function stopWatching() {
+    watchGeneration += 1
+    watchedTaskId = undefined
+    stream?.stop()
+    stream = undefined
+    refreshQueued = false
   }
 
   async function refreshDetail(id: string) {
-    detail.value = await api.getTask(id)
-    if (pollingId === id && detail.value.status === 'running') {
-      pollTimer = setTimeout(() => void refreshDetail(id), 2000)
-    } else if (pollingId === id) {
-      stopPolling()
-    }
-    return detail.value
+    const request = ++detailRequest
+    const result = await api.getTask(id)
+    if (request === detailRequest && (!watchedTaskId || watchedTaskId === id)) detail.value = result
+    return result
   }
 
-  async function startPolling(id: string) {
-    stopPolling()
-    pollingId = id
-    return refreshDetail(id)
+  async function refreshFromEvent(id: string, generation: number) {
+    if (generation !== watchGeneration || watchedTaskId !== id) return
+    if (refreshInFlight) {
+      refreshQueued = true
+      return refreshInFlight
+    }
+    refreshInFlight = refreshDetail(id).finally(() => { refreshInFlight = undefined })
+    const result = await refreshInFlight
+    if (generation !== watchGeneration || watchedTaskId !== id) return result
+    if (terminalStatuses.has(result?.status || '')) {
+      stopWatching()
+      return result
+    }
+    if (refreshQueued) {
+      refreshQueued = false
+      return refreshFromEvent(id, generation)
+    }
+    return result
+  }
+
+  async function watchTask(id: string) {
+    stopWatching()
+    watchedTaskId = id
+    const generation = watchGeneration
+    const result = await refreshDetail(id)
+    if (generation !== watchGeneration || watchedTaskId !== id || terminalStatuses.has(result.status)) return result
+    stream = useTaskEvents(id, async () => { await refreshFromEvent(id, generation) })
+    return result
   }
 
   return {
@@ -62,7 +92,10 @@ export const useTasksStore = defineStore('tasks', () => {
     activeCount,
     load,
     refreshDetail,
-    startPolling,
-    stopPolling,
+    watchTask,
+    stopWatching,
+    // Compatibility aliases for callers from the polling implementation.
+    startPolling: watchTask,
+    stopPolling: stopWatching,
   }
 })

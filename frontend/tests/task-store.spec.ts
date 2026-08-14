@@ -1,11 +1,13 @@
 import { setActivePinia, createPinia } from 'pinia'
-import { beforeEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { api } from '../src/api/client'
 import { useTasksStore } from '../src/stores/tasks'
+import { installFakeEventSource } from './fakes/event-source'
 
 vi.mock('../src/api/client', () => ({
   api: { getTask: vi.fn(), listTasks: vi.fn() },
 }))
+vi.mock('../src/api/http', () => ({ apiRequest: vi.fn().mockResolvedValue({ ticket: 'ticket' }) }))
 
 beforeEach(() => {
   setActivePinia(createPinia())
@@ -13,15 +15,20 @@ beforeEach(() => {
   vi.mocked(api.getTask).mockReset()
 })
 
-it('polls running tasks and stops after a terminal response', async () => {
+afterEach(() => vi.useRealTimers())
+
+it('refreshes active tasks from SSE and stops after a terminal response', async () => {
+  const source = installFakeEventSource()
   vi.mocked(api.getTask)
     .mockResolvedValueOnce({ id: 't1', status: 'running' } as never)
     .mockResolvedValueOnce({ id: 't1', status: 'completed' } as never)
   const store = useTasksStore()
-  await store.startPolling('t1')
+  await store.watchTask('t1')
   expect(api.getTask).toHaveBeenCalledTimes(1)
-  await vi.advanceTimersByTimeAsync(2000)
+  source.emit({ lastEventId: '1', data: '{}' })
+  await vi.runAllTicks()
   expect(api.getTask).toHaveBeenCalledTimes(2)
-  await vi.advanceTimersByTimeAsync(4000)
+  await vi.advanceTimersByTimeAsync(10_000)
   expect(api.getTask).toHaveBeenCalledTimes(2)
+  source.restore()
 })

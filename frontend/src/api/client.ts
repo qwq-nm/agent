@@ -34,15 +34,15 @@ export const api = {
 }
 
 export const lifecycle = {
-  run: (id: string) => request(`/api/tasks/${id}/run`, { method: 'POST' }),
+  run: (id: string, idempotencyKey: string) => request(`/api/tasks/${id}/run`, { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey } }),
   pause: (id: string) => request(`/api/tasks/${id}/pause`, { method: 'POST' }),
-  resume: (id: string) => request(`/api/tasks/${id}/resume`, { method: 'POST' }),
-  retry: (id: string) => request(`/api/tasks/${id}/retry`, { method: 'POST' }),
-  cancel: (id: string) => request(`/api/tasks/${id}/cancel`, { method: 'POST' }),
-  approve: (id: string, approved: boolean, reason: string) =>
+  resume: (id: string, idempotencyKey: string) => request(`/api/tasks/${id}/resume`, { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey } }),
+  retry: (id: string, idempotencyKey: string) => request(`/api/tasks/${id}/retry`, { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey } }),
+  cancel: (id: string, idempotencyKey: string) => request(`/api/tasks/${id}/cancel`, { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey } }),
+  approve: (id: string, approved: boolean, reason: string, idempotencyKey: string) =>
     request(`/api/tasks/${id}/approve`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey },
       body: JSON.stringify({ approved, reason }),
     }),
   report: (id: string) => apiTextRequest(`/api/tasks/${id}/report`),

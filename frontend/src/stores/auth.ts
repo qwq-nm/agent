@@ -35,6 +35,7 @@ export const useAuthStore = defineStore('auth', () => {
   function clearAuth() {
     accessToken.value = null
     user.value = null
+    window.dispatchEvent(new Event('secagent:auth-cleared'))
   }
 
   async function login(username: string, password: string) {

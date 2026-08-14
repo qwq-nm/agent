@@ -1,5 +1,6 @@
 export type TaskStatus =
   | 'created'
+  | 'queued'
   | 'parsed'
   | 'planned'
   | 'running'
@@ -73,6 +74,7 @@ export interface Evidence {
   content: string
   confidence: number
   metadata?: Record<string, unknown>
+  evidence_hash?: string
 }
 
 export interface ModelCall {
@@ -83,6 +85,15 @@ export interface ModelCall {
   route_reason: string
   latency_ms: number
   is_demo: boolean
+  attempt?: number
+  input_tokens?: number
+  output_tokens?: number
+  prompt_tokens?: number
+  completion_tokens?: number
+  retry_count?: number
+  request_id?: string | null
+  error_code?: string | null
+  status?: string
 }
 
 export interface ToolCall {
@@ -113,6 +124,12 @@ export interface TaskDetail extends Task {
   tool_calls: ToolCall[]
   reports: TaskReport[]
   pending_approval?: PendingApproval | null
+  queue_position?: number | null
+  job_attempt?: number | null
+  worker_id?: string | null
+  worker_heartbeat_at?: string | null
+  heartbeat_at?: string | null
+  current_stage?: string | null
 }
 
 export interface ModelStatus {
