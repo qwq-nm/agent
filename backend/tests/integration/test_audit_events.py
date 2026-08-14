@@ -177,6 +177,43 @@ def test_audit_service_uses_strict_alias_and_inline_secret_redaction(
         assert secret not in serialized
 
 
+def test_audit_service_scrubs_quoted_and_escaped_log_labels_without_false_positive(
+    app, seeded_admin
+):
+    sensitive_log = (
+        'payload={"password" : "clear text password", "token":"opaque token"}; '
+        "fields={'api_key' = 'private api value', 'cookie':'private session'}; "
+        r'escaped={\"key\" : \"private generic value\", '
+        r'\"token\":\"private escaped value\"}'
+    )
+    ordinary_text = (
+        "The password policy and API key rotation guide are ready for review."
+    )
+
+    with app.state.session_factory() as session:
+        AuditService(session).record(
+            seeded_admin.id,
+            "test.quoted_redaction",
+            "test",
+            "quoted",
+            "success",
+            {"message": sensitive_log, "note": ordinary_text},
+        )
+        session.commit()
+
+    details = json.loads(_events(app, "test.quoted_redaction")[-1].details_json)
+    assert details["note"] == ordinary_text
+    for secret in (
+        "clear text password",
+        "opaque token",
+        "private api value",
+        "private session",
+        "private generic value",
+        "private escaped value",
+    ):
+        assert secret not in details["message"]
+
+
 def test_audit_service_redacts_secret_shaped_resource_identifiers(app, seeded_admin):
     with app.state.session_factory() as session:
         AuditService(session).record(
@@ -229,6 +266,41 @@ def test_approval_reason_is_scrubbed_before_database_and_ledger_persistence(
     assert "Rejected:" in persisted_reason
     assert "***REDACTED***" in persisted_reason
     for secret in secrets:
+        assert secret not in persisted_reason
+        assert secret not in json.dumps(detail)
+
+
+def test_approval_reason_scrubs_quoted_json_and_log_labels_in_database_and_ledger(
+    analyst_client, app
+):
+    task, approval_id = _create_waiting_approval(analyst_client, app)
+    reason = (
+        'Rejected payload: {"password" : "db password value", '
+        '"token":"db token value"}; '
+        "log={'api_key' = 'db api value', 'cookie':'db cookie value'}; "
+        r'escaped={\"key\" : \"db generic value\", '
+        r'\"token\":\"db escaped value\"}'
+    )
+
+    response = analyst_client.post(
+        f"/api/tasks/{task['id']}/approve",
+        json={"approved": False, "reason": reason},
+    )
+
+    assert response.status_code == 200
+    with app.state.session_factory() as session:
+        persisted_reason = session.get(ApprovalRow, approval_id).reason
+    detail = analyst_client.get(f"/api/tasks/{task['id']}").json()
+    assert detail["approvals"][-1]["reason"] == persisted_reason
+    assert persisted_reason.startswith("Rejected payload:")
+    for secret in (
+        "db password value",
+        "db token value",
+        "db api value",
+        "db cookie value",
+        "db generic value",
+        "db escaped value",
+    ):
         assert secret not in persisted_reason
         assert secret not in json.dumps(detail)
 

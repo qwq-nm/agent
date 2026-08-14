@@ -90,3 +90,13 @@ The following failures were observed before their corresponding production chang
 - Both runs emitted only the existing Starlette/httpx deprecation warning.
 - `python -m compileall -q backend/secagent`: passed.
 - `git diff --check`: passed.
+
+## Second main-review redaction fix
+
+- Verified that quoted field labels in JSON/log text bypassed the first labeled-secret expression because the closing quote appeared between the label and `:`/`=`.
+- Added real persistence regressions for both `AuditService` and approval API-to-database-to-ledger flows. They cover double-quoted and single-quoted labels, optional whitespace, colon/equal separators, and backslash-escaped JSON fragments. A non-sensitive password-policy/API-key sentence remains unchanged.
+- RED: both persistence regressions failed with every quoted/escaped value still present.
+- GREEN: both focused regressions passed after accepting optional quoted label boundaries and preserving normal, single-quoted, double-quoted, or escaped value delimiters around the replacement marker.
+- The expression uses delimiter-bounded character classes and fixed alternatives rather than wildcard or nested repetition, limiting over-consumption and avoiding catastrophic backtracking structure. The approval reason's 1000-character pre-scrub and post-scrub bounds remain enforced.
+- Related audit suite: 17 passed. Task 4 required set: 37 passed. Backend full suite: 90 passed. All runs emitted only the existing Starlette/httpx deprecation warning.
+- `python -m compileall -q backend/secagent` and `git diff --check`: passed for the second fix.

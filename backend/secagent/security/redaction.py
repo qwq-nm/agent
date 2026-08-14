@@ -23,14 +23,20 @@ SECRET_PATTERN = re.compile(
     r"\bBearer\s+[A-Za-z0-9._~-]+)",
     re.IGNORECASE,
 )
+_OPTIONAL_LABEL_QUOTE = r'''(?:\\["']|["'])?'''
+_SECRET_VALUE = (
+    r'''(?P<secret>\\"[^"\r\n]*\\"|\\'[^'\r\n]*\\'|'''
+    r'''"[^"\r\n]*"|'[^'\r\n]*'|(?:Bearer\s+)?[^\s,;}\]]+)'''
+)
 LABELED_SECRET_PATTERN = re.compile(
-    r"(?P<label>\b(?:authorization|password|passwd|token|access[_-]?token|"
-    r"refresh[_-]?token|cookie|api[\s_-]*key|secret)\b\s*[:=]\s*)"
-    r'''(?P<secret>"[^"]*"|'[^']*'|(?:Bearer\s+)?[^\s,;]+)''',
+    rf"(?P<label>{_OPTIONAL_LABEL_QUOTE}\b(?:authorization|password|passwd|"
+    rf"token|access[_-]?token|refresh[_-]?token|cookie|api[\s_-]*key|secret)"
+    rf"\b{_OPTIONAL_LABEL_QUOTE}\s*[:=]\s*){_SECRET_VALUE}",
     re.IGNORECASE,
 )
 GENERIC_KEY_SECRET_PATTERN = re.compile(
-    r'''(?P<label>\bkey\b\s*[:=]\s*)(?P<secret>"[^"]*"|'[^']*'|[^\s,;]+)''',
+    rf"(?P<label>{_OPTIONAL_LABEL_QUOTE}\bkey\b{_OPTIONAL_LABEL_QUOTE}"
+    rf"\s*[:=]\s*){_SECRET_VALUE}",
     re.IGNORECASE,
 )
 AUDIT_ONLY_SENSITIVE_KEYS = {
@@ -46,14 +52,25 @@ APPROVAL_REASON_MAX_LENGTH = 1000
 
 
 def redact_text(value: str, *, include_generic_key: bool = False) -> str:
-    redacted = LABELED_SECRET_PATTERN.sub(
-        lambda match: f'{match.group("label")}***REDACTED***', value
-    )
+    redacted = LABELED_SECRET_PATTERN.sub(_replace_labeled_secret, value)
     if include_generic_key:
-        redacted = GENERIC_KEY_SECRET_PATTERN.sub(
-            lambda match: f'{match.group("label")}***REDACTED***', redacted
-        )
+        redacted = GENERIC_KEY_SECRET_PATTERN.sub(_replace_labeled_secret, redacted)
     return SECRET_PATTERN.sub("***REDACTED***", redacted)
+
+
+def _replace_labeled_secret(match: re.Match[str]) -> str:
+    secret = match.group("secret")
+    if secret.startswith(r'\"') and secret.endswith(r'\"'):
+        replacement = r'\"***REDACTED***\"'
+    elif secret.startswith(r"\'") and secret.endswith(r"\'"):
+        replacement = r"\'***REDACTED***\'"
+    elif secret.startswith('"') and secret.endswith('"'):
+        replacement = '"***REDACTED***"'
+    elif secret.startswith("'") and secret.endswith("'"):
+        replacement = "'***REDACTED***'"
+    else:
+        replacement = "***REDACTED***"
+    return f'{match.group("label")}{replacement}'
 
 
 def scrub_approval_reason(value: str) -> str:
