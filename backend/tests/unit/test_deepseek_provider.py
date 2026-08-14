@@ -356,3 +356,60 @@ async def test_deepseek_never_exposes_unknown_finish_reason() -> None:
 
     assert response.finish_reason == "unknown"
     assert "top-secret-token" not in response.model_dump_json()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finish_reason", [" LENGTH ", "LeNgTh"])
+async def test_deepseek_normalizes_length_before_validation_or_repair(
+    finish_reason: str,
+) -> None:
+    requests: list[httpx.Request] = []
+    provider = deepseek_provider(
+        returning={
+            "choices": [
+                {
+                    "finish_reason": finish_reason,
+                    "message": {"content": "not JSON"},
+                }
+            ]
+        },
+        capture=requests,
+    )
+
+    with pytest.raises(ProviderUnavailable) as caught:
+        await provider.complete(plan_request())
+
+    assert caught.value.code is ProviderErrorCode.TRUNCATED
+    assert caught.value.retryable is True
+    assert len(requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_deepseek_repair_token_usage_saturates_at_db_integer_limit() -> None:
+    provider = deepseek_provider(
+        responses=[
+            {
+                "choices": [
+                    {"finish_reason": "stop", "message": {"content": "{"}}
+                ],
+                "usage": {
+                    "prompt_tokens": 2_147_483_647,
+                    "completion_tokens": 2_147_483_646,
+                },
+            },
+            {
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"content": '{"steps": []}'},
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 10},
+            },
+        ]
+    )
+
+    response = await provider.complete(plan_request())
+
+    assert response.prompt_tokens == 2_147_483_647
+    assert response.completion_tokens == 2_147_483_647

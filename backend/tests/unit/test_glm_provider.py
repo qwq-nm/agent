@@ -177,3 +177,52 @@ async def test_glm_repair_treats_missing_or_invalid_usage_as_zero() -> None:
     assert response.prompt_tokens == 0
     assert response.completion_tokens == 0
     assert response.retry_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finish_reason", [" LENGTH ", "LeNgTh"])
+async def test_glm_normalizes_length_before_validation_or_repair(
+    finish_reason: str,
+) -> None:
+    requests: list[httpx.Request] = []
+    provider = glm_provider(
+        returning={
+            "choices": [
+                {
+                    "finish_reason": finish_reason,
+                    "message": {"content": "not JSON"},
+                }
+            ]
+        },
+        capture=requests,
+    )
+
+    with pytest.raises(ProviderUnavailable) as caught:
+        await provider.complete(parse_request())
+
+    assert caught.value.code is ProviderErrorCode.TRUNCATED
+    assert caught.value.retryable is True
+    assert len(requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_glm_maps_oversized_usage_to_zero() -> None:
+    provider = glm_provider(
+        returning={
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {"content": '{"goal":"g"}'},
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 10**100,
+                "completion_tokens": 2_147_483_648,
+            },
+        }
+    )
+
+    response = await provider.complete(parse_request())
+
+    assert response.prompt_tokens == 0
+    assert response.completion_tokens == 0

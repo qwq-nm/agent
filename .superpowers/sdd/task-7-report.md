@@ -61,10 +61,10 @@ fall back to Mock, while Mock remains available only in explicit mock mode.
 
 ## Verification
 
-- Focused provider/router/metadata/config suite: `52 passed`, `0 failed`.
-- Full backend suite: `178 passed`, `0 failed`; one pre-existing Starlette
+- Focused provider/router/metadata/config suite: `59 passed`, `0 failed`.
+- Full backend suite: `185 passed`, `0 failed`; one pre-existing Starlette
   TestClient deprecation warning.
-- Global coverage: `91.92%` (required minimum: `85%`).
+- Global coverage: `91.90%` (required minimum: `85%`).
 - `python -m compileall -q backend`: passed.
 - `git diff --check`: passed; Git emitted only repository line-ending conversion
   notices.
@@ -121,3 +121,19 @@ failing test before the fix:
   shutdown waiting for an in-flight call, and exactly one close. This serialization
   matches Celery's default prefork model: each process handles one task at a time,
   while the configured three worker processes remain concurrent.
+
+## Follow-up review fixes
+
+Two additional provider-boundary regressions were reproduced with failing tests
+and fixed:
+
+- Provider `finish_reason` is now stripped, lower-cased, and allowlist-normalized
+  before content extraction or output validation. Whitespace- or mixed-case
+  variants such as `" LENGTH "` and `"LeNgTh"` immediately raise retryable
+  TRUNCATED failures for both DeepSeek and GLM, with one request and no repair.
+- Token usage is constrained to the PostgreSQL Integer-safe range
+  `0..2147483647`. Boolean, string, negative, and oversized individual values
+  contribute zero; valid initial and repair counts use saturating addition so the
+  final `ModelResponse` and ledger values cannot exceed `2147483647`. DeepSeek,
+  GLM, repair accumulation, domain serialization, and ledger persistence are all
+  covered by regression tests.

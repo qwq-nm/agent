@@ -55,3 +55,25 @@ def test_model_response_and_ledger_normalize_untrusted_finish_reason() -> None:
     assert repository.values is not None
     assert repository.values["finish_reason"] == "unknown"
     assert "top-secret-token" not in str(repository.values)
+
+
+def test_model_response_and_ledger_reject_usage_outside_db_integer_range() -> None:
+    repository = CapturingRepository()
+    response = ModelResponse(
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        data={"steps": []},
+        latency_ms=1,
+        prompt_tokens=10**100,
+        completion_tokens=2_147_483_648,
+    )
+
+    LedgerService(repository).record_model_response(
+        "task-1", ModelStage.PLAN, response
+    )
+
+    assert response.prompt_tokens == 0
+    assert response.completion_tokens == 0
+    assert repository.values is not None
+    assert repository.values["prompt_tokens"] == 0
+    assert repository.values["completion_tokens"] == 0

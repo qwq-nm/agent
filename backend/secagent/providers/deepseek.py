@@ -7,7 +7,14 @@ from typing import Any
 
 import httpx
 
-from secagent.domain import ModelRequest, ModelResponse, ModelStage
+from secagent.domain import (
+    MAX_DB_INTEGER,
+    ModelRequest,
+    ModelResponse,
+    ModelStage,
+    normalize_finish_reason,
+    normalize_token_count,
+)
 from secagent.providers.base import ProviderErrorCode, ProviderUnavailable
 from secagent.providers.http_client import JSONResponse, ProviderHTTPClient
 from secagent.providers.validation import (
@@ -86,8 +93,12 @@ class _StructuredProvider:
             repair_prompt_tokens, repair_completion_tokens = _usage_counts(
                 repaired.payload
             )
-            prompt_tokens += repair_prompt_tokens
-            completion_tokens += repair_completion_tokens
+            prompt_tokens = _saturating_add(
+                prompt_tokens, repair_prompt_tokens
+            )
+            completion_tokens = _saturating_add(
+                completion_tokens, repair_completion_tokens
+            )
         return ModelResponse(
             provider=self.name,
             model=self.model,
@@ -162,8 +173,6 @@ class _StructuredProvider:
     def _completion(self, response: JSONResponse) -> tuple[str, str | None]:
         try:
             choice = response.payload["choices"][0]
-            finish_reason = choice.get("finish_reason")
-            content = choice["message"]["content"]
         except (AttributeError, KeyError, IndexError, TypeError) as exc:
             raise ProviderUnavailable(
                 self.name,
@@ -171,6 +180,14 @@ class _StructuredProvider:
                 True,
                 response.request_id,
             ) from exc
+        if not isinstance(choice, dict):
+            raise ProviderUnavailable(
+                self.name,
+                ProviderErrorCode.EMPTY_CONTENT,
+                True,
+                response.request_id,
+            )
+        finish_reason = normalize_finish_reason(choice.get("finish_reason"))
         if finish_reason == "length":
             raise ProviderUnavailable(
                 self.name,
@@ -178,6 +195,15 @@ class _StructuredProvider:
                 True,
                 response.request_id,
             )
+        try:
+            content = choice["message"]["content"]
+        except (KeyError, TypeError) as exc:
+            raise ProviderUnavailable(
+                self.name,
+                ProviderErrorCode.EMPTY_CONTENT,
+                True,
+                response.request_id,
+            ) from exc
         if not isinstance(content, str) or not content.strip():
             raise ProviderUnavailable(
                 self.name,
@@ -185,7 +211,7 @@ class _StructuredProvider:
                 True,
                 response.request_id,
             )
-        return content, finish_reason if isinstance(finish_reason, str) else None
+        return content, finish_reason
 
 
 class DeepSeekProvider(_StructuredProvider):
@@ -198,11 +224,11 @@ class DeepSeekProvider(_StructuredProvider):
 
 
 def _safe_token_count(value: object) -> int:
-    return (
-        value
-        if isinstance(value, int) and not isinstance(value, bool) and value >= 0
-        else 0
-    )
+    return normalize_token_count(value)
+
+
+def _saturating_add(first: int, second: int) -> int:
+    return min(MAX_DB_INTEGER, first + second)
 
 
 def _usage_counts(payload: dict[str, Any]) -> tuple[int, int]:

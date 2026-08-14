@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, field_validator
 SAFE_FINISH_REASONS = frozenset(
     {"stop", "length", "tool_calls", "content_filter", "function_call"}
 )
+MAX_DB_INTEGER = 2_147_483_647
 
 
 def normalize_finish_reason(value: object) -> str | None:
@@ -16,6 +17,16 @@ def normalize_finish_reason(value: object) -> str | None:
         return "unknown"
     normalized = value.strip().lower()
     return normalized if normalized in SAFE_FINISH_REASONS else "unknown"
+
+
+def normalize_token_count(value: object) -> int:
+    if (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 0 <= value <= MAX_DB_INTEGER
+    ):
+        return value
+    return 0
 
 
 class TaskScene(StrEnum):
@@ -102,6 +113,11 @@ class ModelResponse(BaseModel):
     @classmethod
     def validate_finish_reason(cls, value: object) -> str | None:
         return normalize_finish_reason(value)
+
+    @field_validator("prompt_tokens", "completion_tokens", mode="before")
+    @classmethod
+    def validate_token_count(cls, value: object) -> int:
+        return normalize_token_count(value)
 
 
 class PlanStep(BaseModel):
