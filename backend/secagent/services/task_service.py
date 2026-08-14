@@ -1,4 +1,6 @@
+import asyncio
 import hashlib
+from contextlib import suppress
 from pathlib import Path
 
 from sqlalchemy.exc import IntegrityError
@@ -17,6 +19,8 @@ from secagent.providers.router import ModelRouter
 from secagent.queue.base import JobQueue
 from secagent.repository import TaskRepository
 from secagent.services.ledger import LedgerService
+from secagent.services.job_service import JobLease, JobService
+from secagent.services.task_events import TaskEventService
 from secagent.tools.registry import ToolRegistry
 
 TRANSITIONS = {
@@ -56,9 +60,22 @@ class TaskService:
         registry: ToolRegistry,
         data_dir: Path,
         job_queue: JobQueue,
+        *,
+        lease_seconds: int = 90,
+        heartbeat_seconds: int = 15,
+        max_auto_retries: int = 1,
+        heartbeat_session_factory=None,
     ) -> None:
         self.repository = repository
         self.job_queue = job_queue
+        self.heartbeat_seconds = heartbeat_seconds
+        self.heartbeat_session_factory = heartbeat_session_factory
+        self.job_service = JobService(
+            repository,
+            job_queue,
+            lease_seconds=lease_seconds,
+            max_auto_retries=max_auto_retries,
+        )
         ledger = LedgerService(repository)
         self.runner = AgentRunner(
             repository=repository,
@@ -77,8 +94,11 @@ class TaskService:
     ) -> TaskRead:
         return self._enqueue(task_id, actor, idempotency_key, "run")
 
-    async def execute_queued(self, task_id: str, command_id: str) -> TaskRunResult | None:
-        if not self.repository.claim_job_execution(task_id, command_id):
+    async def execute_queued(
+        self, task_id: str, command_id: str, worker_id: str
+    ) -> TaskRunResult | None:
+        lease = self.job_service.claim(task_id, command_id, worker_id)
+        if lease is None:
             return None
         self.repository.record_audit(
             None,
@@ -88,39 +108,90 @@ class TaskService:
             "started",
             {"command_id": command_id},
         )
+        heartbeat = (
+            asyncio.create_task(self._heartbeat(lease))
+            if self.heartbeat_session_factory is not None
+            else None
+        )
         try:
-            result = await self.runner.run(task_id)
-        except Exception as exc:
-            final_status = self.repository.finish_job_execution(command_id, "failed")
-            if final_status in {"paused", "cancelled"}:
+            try:
+                result = await self.runner.run(
+                    task_id,
+                    lambda: self.job_service.is_active(
+                        lease.job_run_id, lease.worker_id
+                    ),
+                )
+            except Exception as exc:
+                job = self.repository.get_job_run(command_id)
+                requested = job.status if job is not None else "missing"
+                finished = self.job_service.finish(
+                    lease.job_run_id, lease.worker_id, "failed"
+                )
+                if finished and requested in {
+                    "pause_requested",
+                    "cancel_requested",
+                }:
+                    final_status = {
+                        "pause_requested": "paused",
+                        "cancel_requested": "cancelled",
+                    }[requested]
+                    self.repository.record_audit(
+                        None,
+                        "task.execute",
+                        "task",
+                        task_id,
+                        final_status,
+                        {"command_id": command_id},
+                    )
+                    return None
+                if not finished:
+                    self.repository.record_audit(
+                        None,
+                        "task.execute",
+                        "task",
+                        task_id,
+                        "stale",
+                        {"error_type": type(exc).__name__},
+                    )
+                    return None
                 self.repository.record_audit(
                     None,
                     "task.execute",
                     "task",
                     task_id,
-                    final_status,
-                    {"command_id": command_id},
+                    "failure",
+                    {"command_id": command_id, "error_type": type(exc).__name__},
                 )
-                return None
+                raise
+            finished = self.job_service.finish(
+                lease.job_run_id, lease.worker_id, "completed"
+            )
             self.repository.record_audit(
                 None,
                 "task.execute",
                 "task",
                 task_id,
-                "failure",
-                {"command_id": command_id, "error_type": type(exc).__name__},
+                "success" if finished else "stale",
+                {"command_id": command_id},
             )
-            raise
-        final_status = self.repository.finish_job_execution(command_id, "completed")
-        self.repository.record_audit(
-            None,
-            "task.execute",
-            "task",
-            task_id,
-            "success" if final_status == "completed" else final_status,
-            {"command_id": command_id},
-        )
-        return result
+            return result if finished else None
+        finally:
+            if heartbeat is not None:
+                heartbeat.cancel()
+                with suppress(asyncio.CancelledError):
+                    await heartbeat
+
+    async def _heartbeat(self, lease: JobLease) -> None:
+        while True:
+            await asyncio.sleep(self.heartbeat_seconds)
+            with self.heartbeat_session_factory() as session:
+                renewed = JobService(
+                    TaskRepository(session),
+                    None,
+                    lease_seconds=self.job_service.lease_seconds,
+                ).heartbeat(lease.job_run_id, lease.worker_id)
+            if renewed is None:
+                return
 
     @staticmethod
     def _command_id(task_id: str, action: str, idempotency_key: str) -> str:
@@ -185,6 +256,12 @@ class TaskService:
         else:
             updated = task
         if needs_commit:
+            TaskEventService(self.repository.session).append(
+                task_id,
+                "task.queued",
+                {"action": action},
+                commit=False,
+            )
             self.repository.record_audit(
                 actor.id,
                 f"task.{action}",
@@ -215,6 +292,12 @@ class TaskService:
             broker_id = self.job_queue.enqueue(task_id, command_id)
         except Exception as exc:
             self.repository.mark_job_enqueue_failed(task_id, command_id)
+            TaskEventService(self.repository.session).append(
+                task_id,
+                "task.failed_retryable",
+                {"action": action, "reason": "queue_unavailable"},
+                commit=False,
+            )
             self.repository.record_audit(
                 actor.id,
                 f"task.{action}",
@@ -259,8 +342,21 @@ class TaskService:
             )
             raise
         self.repository.record_audit(
-            actor.id, f"task.{action}", "task", task_id, "success", {}
+            actor.id,
+            f"task.{action}",
+            "task",
+            task_id,
+            "success",
+            {},
+            commit=False,
         )
+        TaskEventService(self.repository.session).append(
+            task_id,
+            f"task.{target.value}",
+            {"action": action},
+            commit=False,
+        )
+        self.repository.commit()
         return updated
 
     def pause(self, task_id: str, actor: AuthenticatedUser) -> TaskRead:
@@ -377,6 +473,12 @@ class TaskService:
             task_id,
             "success",
             {"approved": approved, "approval_id": approval.id},
+            commit=False,
+        )
+        TaskEventService(self.repository.session).append(
+            task_id,
+            f"task.{target.value}",
+            {"action": "approve", "approved": approved},
             commit=False,
         )
         if approved:

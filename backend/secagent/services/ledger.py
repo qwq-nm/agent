@@ -1,4 +1,5 @@
 import json
+import hashlib
 from typing import Any
 
 from secagent.domain import ModelResponse, ModelStage, ToolResult
@@ -86,12 +87,14 @@ class LedgerService:
         metadata: dict[str, Any] | None = None,
         tool_call_id: str | None = None,
     ) -> str:
+        redacted_content = redact_mapping(content)
         return self.repository.add_evidence(
             task_id=task_id,
             tool_call_id=tool_call_id,
             evidence_type=evidence_type,
             source=source,
-            content=redact_mapping(content),
+            content=redacted_content,
+            sha256=hashlib.sha256(redacted_content.encode("utf-8")).hexdigest(),
             confidence=confidence,
             metadata_json=json.dumps(redact_mapping(metadata or {}), ensure_ascii=False),
         )
@@ -122,6 +125,15 @@ class LedgerService:
                 metadata=item.get("metadata", {}),
             )
         return tool_call_id
+
+    @staticmethod
+    def evidence_hashes(result: ToolResult) -> list[str]:
+        return [
+            hashlib.sha256(
+                str(redact_mapping(str(item.get("content", "")))).encode("utf-8")
+            ).hexdigest()
+            for item in result.evidence
+        ]
 
     def record_error(self, task_id: str, error_type: str, message: str) -> str:
         return self.record_evidence(

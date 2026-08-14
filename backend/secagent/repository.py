@@ -1,3 +1,4 @@
+import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
@@ -331,7 +332,10 @@ class TaskRepository:
                 TaskRow.id == task_id,
                 TaskRow.status == TaskStatus.QUEUED.value,
             )
-            .values(status=TaskStatus.FAILED_RETRYABLE.value)
+            .values(
+                status=TaskStatus.FAILED_RETRYABLE.value,
+                status_version=TaskRow.status_version + 1,
+            )
         )
 
     def invalidate_jobs_for_transition(self, task_id: str, action: str) -> None:
@@ -399,7 +403,10 @@ class TaskRepository:
                 TaskRow.id == task_id,
                 TaskRow.status == TaskStatus.QUEUED.value,
             )
-            .values(status=TaskStatus.RUNNING.value)
+            .values(
+                status=TaskStatus.RUNNING.value,
+                status_version=TaskRow.status_version + 1,
+            )
             .returning(TaskRow.id)
         ).scalar_one_or_none()
         if task_claimed is None:
@@ -443,7 +450,10 @@ class TaskRepository:
             self.session.execute(
                 update(TaskRow)
                 .where(TaskRow.id == row.task_id)
-                .values(status=task_target.value)
+                .values(
+                    status=task_target.value,
+                    status_version=TaskRow.status_version + 1,
+                )
             )
         self.session.commit()
         return row.status
@@ -475,7 +485,9 @@ class TaskRepository:
         row = self.session.get(TaskRow, task_id)
         if row is None:
             raise KeyError(task_id)
-        row.status = status.value
+        if row.status != status.value:
+            row.status = status.value
+            row.status_version += 1
         if is_demo is not None:
             row.is_demo = is_demo
         if commit:
@@ -498,7 +510,10 @@ class TaskRepository:
                 TaskRow.id == task_id,
                 TaskRow.status == current.value,
             )
-            .values(status=target.value)
+            .values(
+                status=target.value,
+                status_version=TaskRow.status_version + 1,
+            )
             .returning(TaskRow.id)
         ).scalar_one_or_none()
         if claimed is None:
@@ -637,7 +652,81 @@ class TaskRepository:
         )
         return row is not None
 
-    def add_step(self, task_id: str, step_index: int, step: PlanStep) -> str:
+    @staticmethod
+    def step_idempotency_key(
+        task_id: str, step_index: int, step: PlanStep
+    ) -> str:
+        canonical = json.dumps(
+            {
+                "task_id": task_id,
+                "step_index": step_index,
+                "step": step.model_dump(mode="json"),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def completed_step_result(
+        self, task_id: str, idempotency_key: str
+    ) -> dict[str, Any] | None:
+        row = self.session.scalar(
+            select(TaskStepRow).where(
+                TaskStepRow.task_id == task_id,
+                TaskStepRow.idempotency_key == idempotency_key,
+                TaskStepRow.status == "success",
+                TaskStepRow.result_json.is_not(None),
+            )
+        )
+        if row is None or row.result_json is None:
+            return None
+        try:
+            stored = json.loads(row.result_json)
+        except (TypeError, json.JSONDecodeError):
+            return None
+        hashes = stored.get("evidence_hashes")
+        result = stored.get("result")
+        if (
+            not isinstance(result, dict)
+            or result.get("success") is not True
+            or not isinstance(hashes, list)
+            or not hashes
+            or any(
+                not isinstance(value, str)
+                or len(value) != 64
+                or any(character not in "0123456789abcdef" for character in value)
+                for value in hashes
+            )
+        ):
+            return None
+        expected_hashes = set(hashes)
+        persisted_hashes = self.session.scalar(
+            select(func.count(func.distinct(EvidenceRow.sha256)))
+            .select_from(EvidenceRow)
+            .join(ToolCallRow, EvidenceRow.tool_call_id == ToolCallRow.id)
+            .where(
+                EvidenceRow.task_id == task_id,
+                EvidenceRow.sha256.in_(expected_hashes),
+                ToolCallRow.step_id == row.id,
+                ToolCallRow.status == "completed",
+            )
+        )
+        if persisted_hashes != len(expected_hashes):
+            return None
+        return stored
+
+    def add_step(
+        self,
+        task_id: str,
+        step_index: int,
+        step: PlanStep,
+        *,
+        idempotency_key: str | None = None,
+    ) -> str:
+        key = idempotency_key or self.step_idempotency_key(
+            task_id, step_index, step
+        )
         existing = self.session.scalar(
             select(TaskStepRow).where(
                 TaskStepRow.task_id == task_id,
@@ -645,11 +734,29 @@ class TaskRepository:
             )
         )
         if existing is not None:
+            if (
+                existing.idempotency_key == key
+                and self.completed_step_result(task_id, key) is not None
+            ):
+                return existing.id
+            existing.idempotency_key = key
+            existing.attempt += 1
+            existing.name = step.name
+            existing.purpose = step.purpose
+            existing.tool_name = step.tool_name
+            existing.params_json = json.dumps(step.params, ensure_ascii=False)
+            existing.risk_level = step.risk_level.value
+            existing.need_human_confirm = step.need_human_confirm
+            existing.status = "pending"
+            existing.result_json = None
+            existing.updated_at = datetime.now(timezone.utc)
+            self.session.commit()
             return existing.id
 
         row = TaskStepRow(
             task_id=task_id,
             step_index=step_index,
+            idempotency_key=key,
             name=step.name,
             purpose=step.purpose,
             tool_name=step.tool_name,
@@ -667,8 +774,26 @@ class TaskRepository:
             raise KeyError(step_id)
         row.status = status
         row.updated_at = datetime.now(timezone.utc)
-        for key in {"model_provider", "route_reason"} & values.keys():
+        for key in {"model_provider", "route_reason", "result_json"} & values.keys():
             setattr(row, key, values[key])
+        self.session.commit()
+
+    def complete_step(
+        self,
+        step_id: str,
+        result: dict[str, Any],
+        evidence_hashes: list[str],
+    ) -> None:
+        row = self.session.get(TaskStepRow, step_id)
+        if row is None:
+            raise KeyError(step_id)
+        row.status = "success"
+        row.result_json = json.dumps(
+            {"result": result, "evidence_hashes": evidence_hashes},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        row.updated_at = datetime.now(timezone.utc)
         self.session.commit()
 
     def add_model_call(self, **values: Any) -> str:

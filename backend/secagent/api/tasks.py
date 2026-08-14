@@ -18,6 +18,7 @@ from secagent.domain import TaskCreate, TaskRead
 from secagent.repository import TaskRepository
 from secagent.services.ledger import LedgerService
 from secagent.services.task_service import TaskService
+from secagent.services.task_events import TaskEventService
 from secagent.services.storage import StorageService
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
@@ -75,6 +76,9 @@ def task_service_for(request: Request, repository: TaskRepository) -> TaskServic
         request.app.state.tool_registry,
         request.app.state.settings.data_dir,
         request.app.state.job_queue,
+        lease_seconds=request.app.state.settings.job_lease_seconds,
+        heartbeat_seconds=request.app.state.settings.job_heartbeat_seconds,
+        max_auto_retries=request.app.state.settings.job_auto_retries,
     )
 
 
@@ -112,9 +116,16 @@ async def create_task(
             raise HTTPException(
                 status_code=422, detail="Upload validation failed"
             ) from exc
-    repository.record_audit(
-        actor.id, "task.create", "task", task.id, "success", {}
+    TaskEventService(repository.session).append(
+        task.id,
+        "task.created",
+        {},
+        commit=False,
     )
+    repository.record_audit(
+        actor.id, "task.create", "task", task.id, "success", {}, commit=False
+    )
+    repository.commit()
     return task
 
 

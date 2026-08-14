@@ -1,5 +1,6 @@
 import asyncio
 from pathlib import Path
+from uuid import uuid4
 
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -57,6 +58,11 @@ async def execute_queued_task(
     router: ModelRouter,
     registry: ToolRegistry,
     data_dir: Path,
+    *,
+    worker_id: str | None = None,
+    lease_seconds: int = 90,
+    heartbeat_seconds: int = 15,
+    max_auto_retries: int = 1,
 ) -> None:
     with session_factory() as session:
         service = TaskService(
@@ -65,8 +71,14 @@ async def execute_queued_task(
             registry,
             data_dir,
             CeleryJobQueue(),
+            lease_seconds=lease_seconds,
+            heartbeat_seconds=heartbeat_seconds,
+            max_auto_retries=max_auto_retries,
+            heartbeat_session_factory=session_factory,
         )
-        await service.execute_queued(task_id, command_id)
+        await service.execute_queued(
+            task_id, command_id, worker_id or f"worker-{uuid4()}"
+        )
 
 
 @celery.task(name="secagent.run_task")
@@ -83,5 +95,9 @@ def run_task(task_id: str, command_id: str) -> None:
             ModelRouter(build_providers(settings), mode=settings.model_mode),
             build_worker_registry(allowed_hosts),
             settings.data_dir,
+            worker_id=getattr(run_task.request, "id", None),
+            lease_seconds=settings.job_lease_seconds,
+            heartbeat_seconds=settings.job_heartbeat_seconds,
+            max_auto_retries=settings.job_auto_retries,
         )
     )

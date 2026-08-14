@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+from collections.abc import Callable
 
 from secagent.agents.critic import Critic
 from secagent.agents.executor import ExecutionInterrupted, Executor
@@ -11,6 +12,8 @@ from secagent.domain import ModelStage, TaskRunResult, TaskStatus
 from secagent.repository import TaskRepository
 from secagent.services.ledger import LedgerService
 from secagent.tools.base import ToolContext
+from secagent.domain import ToolResult
+from secagent.services.task_events import TaskEventService
 
 
 class AgentRunner:
@@ -35,8 +38,14 @@ class AgentRunner:
         self.executor = executor
         self.critic = critic
         self.reporter = reporter
+        self._lease_is_active: Callable[[], bool] | None = None
 
-    async def run(self, task_id: str) -> TaskRunResult:
+    async def run(
+        self,
+        task_id: str,
+        lease_is_active: Callable[[], bool] | None = None,
+    ) -> TaskRunResult:
+        self._lease_is_active = lease_is_active
         task = self.repository.get_task(task_id)
         if task is None:
             raise KeyError(task_id)
@@ -59,7 +68,25 @@ class AgentRunner:
             for index, step in enumerate(plan, start=1):
                 self._ensure_running(task_id)
                 params = self._resolve_params(step.params, workspace, runtime)
-                step_id = self.repository.add_step(task_id, index, step)
+                idempotency_key = self.repository.step_idempotency_key(
+                    task_id, index, step
+                )
+                cached = self.repository.completed_step_result(
+                    task_id, idempotency_key
+                )
+                if cached is not None:
+                    result = ToolResult.model_validate(cached["result"])
+                    if step.tool_name == "http_fetch" and result.evidence:
+                        runtime["http_response"] = result.evidence[0].get(
+                            "metadata", {}
+                        )
+                    continue
+                step_id = self.repository.add_step(
+                    task_id,
+                    index,
+                    step,
+                    idempotency_key=idempotency_key,
+                )
                 approved = self.repository.is_tool_approved(
                     task_id, step.tool_name
                 )
@@ -75,7 +102,16 @@ class AgentRunner:
                         risk_level=step.risk_level.value,
                         params_summary=str(params),
                     )
-                    self.repository.set_task_status(task_id, TaskStatus.WAITING_HUMAN)
+                    self.repository.set_task_status(
+                        task_id, TaskStatus.WAITING_HUMAN, commit=False
+                    )
+                    TaskEventService(self.repository.session).append(
+                        task_id,
+                        "task.waiting_human",
+                        {"step_index": index},
+                        commit=False,
+                    )
+                    self.repository.commit()
                     return TaskRunResult(
                         task_id=task_id,
                         status=TaskStatus.WAITING_HUMAN,
@@ -88,9 +124,14 @@ class AgentRunner:
                     params=params,
                     context=ToolContext(task_id, parsed.scene.value, workspace),
                 )
-                self.repository.update_step(
-                    step_id, "success" if result.success else "failed"
-                )
+                if result.success:
+                    self.repository.complete_step(
+                        step_id,
+                        result.model_dump(mode="json"),
+                        self.ledger.evidence_hashes(result),
+                    )
+                else:
+                    self.repository.update_step(step_id, "failed")
                 if step.tool_name == "http_fetch" and result.evidence:
                     runtime["http_response"] = result.evidence[0].get(
                         "metadata", {}
@@ -116,15 +157,9 @@ class AgentRunner:
                 call.is_demo
                 for call in (parse_call, plan_call, critic_call, report_call)
             )
-            self.repository.transition_task_status(
-                task_id,
-                TaskStatus.RUNNING,
-                TaskStatus.COMPLETED,
-                commit=False,
-            )
             self.repository.set_task_status(
                 task_id,
-                TaskStatus.COMPLETED,
+                TaskStatus.RUNNING,
                 is_demo=is_demo,
                 commit=False,
             )
@@ -138,18 +173,6 @@ class AgentRunner:
         except ExecutionInterrupted:
             raise
         except Exception as exc:
-            try:
-                self.repository.transition_task_status(
-                    task_id,
-                    TaskStatus.RUNNING,
-                    TaskStatus.FAILED_RETRYABLE,
-                    commit=False,
-                )
-            except ValueError as interrupted:
-                self.repository.rollback()
-                raise ExecutionInterrupted(
-                    "task execution was invalidated"
-                ) from interrupted
             self.ledger.record_error(task_id, type(exc).__name__, str(exc))
             raise
 
@@ -159,6 +182,8 @@ class AgentRunner:
             raise KeyError(task_id)
         if task.status is not TaskStatus.RUNNING:
             raise ExecutionInterrupted("task execution was invalidated")
+        if self._lease_is_active is not None and not self._lease_is_active():
+            raise ExecutionInterrupted("job lease was lost")
 
     @staticmethod
     def _resolve_params(

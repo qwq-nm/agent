@@ -1,14 +1,21 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from redis import Redis
 
 from secagent import db_models  # noqa: F401 -- registers SQLAlchemy tables
 from secagent.agents.executor import DemoEvidenceTool
 from secagent.api.admin import router as admin_router
 from secagent.api.auth import router as auth_router
 from secagent.api.errors import install_error_handlers
+from secagent.api.events import router as events_router
 from secagent.api.tasks import router as tasks_router
 from secagent.api.system import router as system_router
+from secagent.auth.stream_tickets import (
+    FakeTicketReplayStore,
+    RedisTicketReplayStore,
+    StreamTicketService,
+)
 from secagent.config import Settings, get_settings
 from secagent.db import make_session_factory
 from secagent.providers import build_providers
@@ -16,6 +23,7 @@ from secagent.providers.router import ModelRouter
 from secagent.queue.base import JobQueue
 from secagent.queue.celery_queue import CeleryJobQueue
 from secagent.repository import TaskRepository
+from secagent.services.job_service import JobService
 from secagent.security.url_guard import UrlGuard
 from secagent.tools.registry import ToolRegistry
 from secagent.tools.log_tools import (
@@ -42,7 +50,12 @@ def create_app(
     @asynccontextmanager
     async def lifespan(application: FastAPI):
         with application.state.session_factory() as session:
-            TaskRepository(session).recover_interrupted_tasks()
+            JobService(
+                TaskRepository(session),
+                application.state.job_queue,
+                lease_seconds=application.state.settings.job_lease_seconds,
+                max_auto_retries=application.state.settings.job_auto_retries,
+            ).recover_expired()
         yield
 
     app = FastAPI(title="SecAgent-X", version="0.1.0", lifespan=lifespan)
@@ -50,6 +63,14 @@ def create_app(
     app.state.settings = resolved_settings
     app.state.session_factory = session_factory
     app.state.job_queue = job_queue or CeleryJobQueue()
+    replay_store = (
+        FakeTicketReplayStore()
+        if resolved_settings.database_url.startswith("sqlite")
+        else RedisTicketReplayStore(Redis.from_url(resolved_settings.redis_url))
+    )
+    app.state.stream_ticket_service = StreamTicketService(
+        resolved_settings.jwt_key(), replay_store
+    )
     app.state.model_router = ModelRouter(
         build_providers(app.state.settings), mode=app.state.settings.model_mode
     )
@@ -80,6 +101,7 @@ def create_app(
     app.include_router(auth_router)
     app.include_router(admin_router)
     app.include_router(tasks_router)
+    app.include_router(events_router)
     return app
 
 
