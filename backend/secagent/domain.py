@@ -59,6 +59,7 @@ class TaskCreate(BaseModel):
 
 class TaskRead(TaskCreate):
     id: str
+    owner_id: str | None
     scene: TaskScene | None = None
     status: TaskStatus
     is_demo: bool = False

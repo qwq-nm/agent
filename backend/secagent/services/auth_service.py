@@ -16,6 +16,7 @@ from secagent.auth.tokens import (
 from secagent.config import Settings
 from secagent.domain import UserRole
 from secagent.repository import AuthRepository
+from secagent.services.audit import AuditService
 
 
 class AuthenticationError(ValueError):
@@ -27,6 +28,18 @@ class AuthenticationConfigurationError(RuntimeError):
 
 
 class UserAlreadyExistsError(ValueError):
+    pass
+
+
+class UserNotFoundError(ValueError):
+    pass
+
+
+class LastActiveAdminError(ValueError):
+    pass
+
+
+class UserLimitReachedError(ValueError):
     pass
 
 
@@ -58,18 +71,127 @@ class AuthService:
     def from_session(cls, session: Session, settings: Settings) -> "AuthService":
         return cls(session, settings, AuthRepository(session))
 
-    def create_user(self, username: str, password: str, role: UserRole) -> UserRead:
+    def create_user(
+        self,
+        username: str,
+        password: str,
+        role: UserRole,
+        *,
+        actor_id: str | None = None,
+    ) -> UserRead:
+        self.repository.lock_users_for_team_limit()
+        if self.repository.count_users() >= 10:
+            AuditService(self.session).record(
+                actor_id,
+                "user.create",
+                "user",
+                username,
+                "failure",
+                {"reason": "user_limit_reached"},
+            )
+            self.session.commit()
+            raise UserLimitReachedError(username)
         try:
             row = self.repository.add_user(
                 username=username,
                 password_hash=hash_password(password),
                 role=role.value,
             )
+            AuditService(self.session).record(
+                actor_id,
+                "user.create",
+                "user",
+                row.id,
+                "success",
+                {"username": username, "role": role.value},
+            )
             self.session.commit()
         except IntegrityError as exc:
             self.session.rollback()
+            AuditService(self.session).record(
+                actor_id,
+                "user.create",
+                "user",
+                username,
+                "failure",
+                {"reason": "username_conflict"},
+            )
+            self.session.commit()
             raise UserAlreadyExistsError(username) from exc
         return self._read_user(row)
+
+    def list_users(self):
+        return self.repository.list_users()
+
+    def update_user(
+        self,
+        user_id: str,
+        *,
+        actor_id: str,
+        is_active: bool | None,
+        password: str | None,
+    ):
+        row = self.repository.get_user(user_id)
+        if row is None:
+            AuditService(self.session).record(
+                actor_id,
+                "user.update",
+                "user",
+                user_id,
+                "failure",
+                {"reason": "not_found"},
+            )
+            self.session.commit()
+            raise UserNotFoundError(user_id)
+
+        active_admins = None
+        if is_active is False and row.role == UserRole.ADMIN.value:
+            active_admins = self.repository.active_admins_for_update()
+            self.session.refresh(row)
+        else:
+            row = self.repository.get_user_for_update(user_id)
+            if row is None:
+                raise UserNotFoundError(user_id)
+
+        if (
+            is_active is False
+            and row.is_active
+            and row.role == UserRole.ADMIN.value
+            and active_admins is not None
+            and len(active_admins) <= 1
+        ):
+            AuditService(self.session).record(
+                actor_id,
+                "user.update",
+                "user",
+                user_id,
+                "failure",
+                {"reason": "last_active_admin"},
+            )
+            self.session.commit()
+            raise LastActiveAdminError(user_id)
+
+        changed: list[str] = []
+        if is_active is not None:
+            row.is_active = is_active
+            changed.append("is_active")
+        if password is not None:
+            row.password_hash = hash_password(password)
+            changed.append("password")
+        if is_active is False or password is not None:
+            self.repository.revoke_all_active_sessions(
+                user_id, datetime.now(timezone.utc)
+            )
+        AuditService(self.session).record(
+            actor_id,
+            "user.update",
+            "user",
+            user_id,
+            "success",
+            {"changed_fields": changed},
+        )
+        self.session.commit()
+        return row
 
     def login(self, username: str, password: str) -> AuthResult:
         user = self.repository.get_user_by_username(username)

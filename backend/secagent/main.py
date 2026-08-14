@@ -4,7 +4,9 @@ from fastapi import FastAPI
 
 from secagent import db_models  # noqa: F401 -- registers SQLAlchemy tables
 from secagent.agents.executor import DemoEvidenceTool
+from secagent.api.admin import router as admin_router
 from secagent.api.auth import router as auth_router
+from secagent.api.errors import install_error_handlers
 from secagent.api.tasks import router as tasks_router
 from secagent.api.system import router as system_router
 from secagent.config import Settings, get_settings
@@ -40,6 +42,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         yield
 
     app = FastAPI(title="SecAgent-X", version="0.1.0", lifespan=lifespan)
+    install_error_handlers(app)
     app.state.settings = resolved_settings
     app.state.session_factory = session_factory
     app.state.model_router = ModelRouter(
@@ -70,6 +73,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.include_router(system_router)
     app.include_router(auth_router)
+    app.include_router(admin_router)
     app.include_router(tasks_router)
     return app
 

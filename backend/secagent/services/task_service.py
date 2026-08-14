@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from secagent.api.errors import ApprovalExpired
+from secagent.auth.dependencies import AuthenticatedUser
 from secagent.agents.critic import Critic
 from secagent.agents.executor import Executor
 from secagent.agents.parser import TaskParser
@@ -63,45 +65,137 @@ class TaskService:
             reporter=Reporter(router, ledger),
         )
 
-    async def run(self, task_id: str) -> TaskRunResult:
-        return await self.runner.run(task_id)
-
-    def transition(self, task_id: str, target: TaskStatus) -> TaskRead:
-        task = self.repository.get_task(task_id)
+    async def run(self, task_id: str, actor: AuthenticatedUser) -> TaskRunResult:
+        task = self.repository.get_authorized(task_id, actor)
         if task is None:
             raise KeyError(task_id)
-        require_transition(task.status, target)
-        return self.repository.set_task_status(task_id, target)
+        self.repository.record_audit(
+            actor.id, "task.run", "task", task_id, "started", {}
+        )
+        return await self.runner.run(task_id)
 
-    def pause(self, task_id: str) -> TaskRead:
-        return self.transition(task_id, TaskStatus.PAUSED)
+    def transition(
+        self,
+        task_id: str,
+        target: TaskStatus,
+        actor: AuthenticatedUser,
+        action: str,
+    ) -> TaskRead:
+        task = self.repository.get_authorized(task_id, actor)
+        if task is None:
+            raise KeyError(task_id)
+        try:
+            require_transition(task.status, target)
+            updated = self.repository.transition_task_status(
+                task_id, task.status, target, commit=False
+            )
+        except ValueError:
+            self.repository.record_audit(
+                actor.id,
+                f"task.{action}",
+                "task",
+                task_id,
+                "failure",
+                {"from_status": task.status.value, "to_status": target.value},
+            )
+            raise
+        self.repository.record_audit(
+            actor.id, f"task.{action}", "task", task_id, "success", {}
+        )
+        return updated
 
-    def resume(self, task_id: str) -> TaskRead:
-        return self.transition(task_id, TaskStatus.RUNNING)
+    def pause(self, task_id: str, actor: AuthenticatedUser) -> TaskRead:
+        return self.transition(task_id, TaskStatus.PAUSED, actor, "pause")
 
-    def cancel(self, task_id: str) -> TaskRead:
-        return self.transition(task_id, TaskStatus.CANCELLED)
+    def resume(self, task_id: str, actor: AuthenticatedUser) -> TaskRead:
+        return self.transition(task_id, TaskStatus.RUNNING, actor, "resume")
 
-    def retry(self, task_id: str) -> TaskRead:
-        return self.transition(task_id, TaskStatus.RUNNING)
+    def cancel(self, task_id: str, actor: AuthenticatedUser) -> TaskRead:
+        return self.transition(task_id, TaskStatus.CANCELLED, actor, "cancel")
+
+    def retry(self, task_id: str, actor: AuthenticatedUser) -> TaskRead:
+        return self.transition(task_id, TaskStatus.RUNNING, actor, "retry")
 
     async def approve(
-        self, task_id: str, *, approved: bool, reason: str
+        self,
+        task_id: str,
+        actor: AuthenticatedUser,
+        *,
+        approved: bool,
+        reason: str,
     ) -> TaskRead:
-        task = self.repository.get_task(task_id)
+        task = self.repository.get_authorized(task_id, actor)
         if task is None:
             raise KeyError(task_id)
         if task.status is not TaskStatus.WAITING_HUMAN:
+            self.repository.record_audit(
+                actor.id,
+                "task.approve",
+                "task",
+                task_id,
+                "failure",
+                {"from_status": task.status.value},
+            )
             raise ValueError("task is not waiting for approval")
-        self.repository.decide_latest_approval(
-            task_id, approved=approved, reason=reason
-        )
+        try:
+            approval = self.repository.decide_latest_approval(
+                task_id,
+                approved=approved,
+                reason=reason,
+                decided_by=actor.id,
+                commit=False,
+            )
+        except ApprovalExpired as exc:
+            self.repository.record_audit(
+                actor.id,
+                "approval.expired",
+                "approval",
+                exc.approval_id,
+                "failure",
+                {"task_id": task_id},
+            )
+            raise
+        except ValueError:
+            self.repository.record_audit(
+                actor.id,
+                "task.approve",
+                "task",
+                task_id,
+                "failure",
+                {"reason": "pending_approval_not_found"},
+            )
+            raise
         target = TaskStatus.RUNNING if approved else TaskStatus.CANCELLED
-        updated = self.transition(task_id, target)
+        try:
+            updated = self.repository.transition_task_status(
+                task_id,
+                TaskStatus.WAITING_HUMAN,
+                target,
+                commit=False,
+            )
+        except ValueError:
+            self.repository.rollback()
+            self.repository.record_audit(
+                actor.id,
+                "task.approve",
+                "task",
+                task_id,
+                "failure",
+                {"reason": "concurrent_state_change"},
+            )
+            raise
+        self.repository.record_audit(
+            actor.id,
+            "task.approve",
+            "task",
+            task_id,
+            "success",
+            {"approved": approved, "approval_id": approval.id},
+        )
         if approved:
             await self.runner.run(task_id)
             latest = self.repository.get_task(task_id)
             if latest is None:
                 raise KeyError(task_id)
-            return latest
+            updated = latest
         return updated

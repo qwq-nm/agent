@@ -64,6 +64,14 @@ def seeded_analyst(app):
         )
 
 
+@pytest.fixture
+def seeded_bob(app):
+    with app.state.session_factory() as session:
+        return AuthService.from_session(session, app.state.settings).create_user(
+            "bob", "Bob-Secure-Pass-9", UserRole.ANALYST
+        )
+
+
 def _authenticated_client(app, username: str, password: str):
     with TestClient(app) as value:
         response = value.post(
@@ -82,3 +90,27 @@ def admin_client(app, seeded_admin):
 @pytest.fixture
 def analyst_client(app, seeded_analyst):
     yield from _authenticated_client(app, "alice", "Correct-Horse-9")
+
+
+@pytest.fixture
+def alice_client(analyst_client):
+    return analyst_client
+
+
+@pytest.fixture
+def bob_client(app, seeded_bob):
+    yield from _authenticated_client(app, "bob", "Bob-Secure-Pass-9")
+
+
+@pytest.fixture
+def bob_task(bob_client):
+    response = bob_client.post(
+        "/api/tasks",
+        json={
+            "goal": "Inspect Bob's authorized logs",
+            "authorization_scope": "Bob's uploaded logs only",
+            "route_mode": "auto",
+        },
+    )
+    assert response.status_code == 201
+    return response.json()

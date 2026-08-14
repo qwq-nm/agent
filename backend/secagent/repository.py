@@ -1,12 +1,13 @@
 import json
-from datetime import datetime, timezone
-from typing import Any
+from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import case, select, update
+from sqlalchemy import and_, case, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from secagent.db_models import (
     ApprovalRow,
+    AuditEventRow,
     EvidenceRow,
     ModelCallRow,
     RefreshSessionRow,
@@ -16,7 +17,19 @@ from secagent.db_models import (
     ToolCallRow,
     UserRow,
 )
-from secagent.domain import PlanStep, TaskCreate, TaskRead, TaskScene, TaskStatus
+from secagent.api.errors import ApprovalExpired, ForbiddenResource
+from secagent.domain import (
+    PlanStep,
+    TaskCreate,
+    TaskRead,
+    TaskScene,
+    TaskStatus,
+    UserRole,
+)
+from secagent.services.audit import AuditService
+
+if TYPE_CHECKING:
+    from secagent.auth.dependencies import AuthenticatedUser
 
 
 class AuthRepository:
@@ -31,11 +44,53 @@ class AuthRepository:
     def get_user(self, user_id: str) -> UserRow | None:
         return self.session.get(UserRow, user_id)
 
+    def get_user_for_update(self, user_id: str) -> UserRow | None:
+        return self.session.scalar(
+            select(UserRow).where(UserRow.id == user_id).with_for_update()
+        )
+
     def add_user(self, username: str, password_hash: str, role: str) -> UserRow:
         row = UserRow(username=username, password_hash=password_hash, role=role)
         self.session.add(row)
         self.session.flush()
         return row
+
+    def list_users(self) -> list[UserRow]:
+        return list(
+            self.session.scalars(select(UserRow).order_by(UserRow.created_at)).all()
+        )
+
+    def lock_users_for_team_limit(self) -> None:
+        self.session.scalars(
+            select(UserRow).order_by(UserRow.id).with_for_update()
+        ).all()
+
+    def count_users(self) -> int:
+        return self.session.scalar(select(func.count()).select_from(UserRow)) or 0
+
+    def active_admins_for_update(self) -> list[UserRow]:
+        return list(
+            self.session.scalars(
+                select(UserRow)
+                .where(
+                    UserRow.role == UserRole.ADMIN.value,
+                    UserRow.is_active.is_(True),
+                )
+                .order_by(UserRow.id)
+                .with_for_update()
+            ).all()
+        )
+
+    def revoke_all_active_sessions(self, user_id: str, now: datetime) -> int:
+        result = self.session.execute(
+            update(RefreshSessionRow)
+            .where(
+                RefreshSessionRow.user_id == user_id,
+                RefreshSessionRow.revoked_at.is_(None),
+            )
+            .values(revoked_at=now)
+        )
+        return result.rowcount
 
     def add_refresh_session(
         self, user_id: str, token_hash: str, expires_at: datetime
@@ -54,6 +109,17 @@ class AuthRepository:
         replacement_expires_at: datetime,
         now: datetime,
     ) -> tuple[RefreshSessionRow, UserRow] | None:
+        user_id = self.session.scalar(
+            select(RefreshSessionRow.user_id).where(
+                RefreshSessionRow.token_hash == token_hash
+            )
+        )
+        if user_id is None:
+            return None
+        user = self.get_user_for_update(user_id)
+        if user is None or not user.is_active:
+            return None
+
         claimed = self.session.execute(
             update(RefreshSessionRow)
             .where(
@@ -65,10 +131,6 @@ class AuthRepository:
             .returning(RefreshSessionRow.id, RefreshSessionRow.user_id)
         ).one_or_none()
         if claimed is None:
-            return None
-
-        user = self.get_user(claimed.user_id)
-        if user is None or not user.is_active:
             return None
 
         replacement = self.add_refresh_session(
@@ -119,11 +181,23 @@ class TaskRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
 
-    def create_task(self, payload: TaskCreate) -> TaskRead:
-        row = TaskRow(**payload.model_dump(mode="json"))
+    def create_task(
+        self,
+        payload: TaskCreate,
+        owner_id: str | None = None,
+        *,
+        commit: bool = True,
+    ) -> TaskRead:
+        row = TaskRow(owner_id=owner_id, **payload.model_dump(mode="json"))
         self.session.add(row)
-        self.session.commit()
+        if commit:
+            self.session.commit()
+        else:
+            self.session.flush()
         return self._read(row)
+
+    def rollback(self) -> None:
+        self.session.rollback()
 
     def get_task(self, task_id: str) -> TaskRead | None:
         row = self.session.get(TaskRow, task_id)
@@ -135,12 +209,70 @@ class TaskRepository:
         ).all()
         return [self._read(row) for row in rows]
 
+    def get_authorized(
+        self, task_id: str, actor: "AuthenticatedUser"
+    ) -> TaskRead | None:
+        task = self.get_task(task_id)
+        if task is None:
+            return None
+        if not can_access_task(actor, task.owner_id):
+            AuditService(self.session).record(
+                actor.id,
+                "task.access_denied",
+                "task",
+                task_id,
+                "denied",
+                {"actor_role": actor.role.value},
+            )
+            self.session.commit()
+            raise ForbiddenResource("task")
+        return task
+
+    def list_authorized(self, actor: "AuthenticatedUser") -> list[TaskRead]:
+        query = select(TaskRow)
+        if actor.role is not UserRole.ADMIN:
+            query = query.where(TaskRow.owner_id == actor.id)
+        rows = self.session.scalars(query.order_by(TaskRow.created_at.desc())).all()
+        return [self._read(row) for row in rows]
+
+    def record_audit(
+        self,
+        actor_id: str | None,
+        action: str,
+        resource_type: str,
+        resource_id: str | None,
+        outcome: str,
+        details: dict[str, Any] | None = None,
+    ) -> AuditEventRow:
+        row = AuditService(self.session).record(
+            actor_id, action, resource_type, resource_id, outcome, details
+        )
+        self.session.commit()
+        return row
+
+    def latest_audit_event(self, action: str) -> AuditEventRow | None:
+        return self.session.scalar(
+            select(AuditEventRow)
+            .where(AuditEventRow.action == action)
+            .order_by(AuditEventRow.id.desc())
+        )
+
+    def list_audit_events(self, *, limit: int = 100) -> list[AuditEventRow]:
+        return list(
+            self.session.scalars(
+                select(AuditEventRow)
+                .order_by(AuditEventRow.id.desc())
+                .limit(limit)
+            ).all()
+        )
+
     def set_task_status(
         self,
         task_id: str,
         status: TaskStatus,
         *,
         is_demo: bool | None = None,
+        commit: bool = True,
     ) -> TaskRead:
         row = self.session.get(TaskRow, task_id)
         if row is None:
@@ -148,7 +280,39 @@ class TaskRepository:
         row.status = status.value
         if is_demo is not None:
             row.is_demo = is_demo
-        self.session.commit()
+        if commit:
+            self.session.commit()
+        else:
+            self.session.flush()
+        return self._read(row)
+
+    def transition_task_status(
+        self,
+        task_id: str,
+        current: TaskStatus,
+        target: TaskStatus,
+        *,
+        commit: bool = True,
+    ) -> TaskRead:
+        claimed = self.session.execute(
+            update(TaskRow)
+            .where(
+                TaskRow.id == task_id,
+                TaskRow.status == current.value,
+            )
+            .values(status=target.value)
+            .returning(TaskRow.id)
+        ).scalar_one_or_none()
+        if claimed is None:
+            raise ValueError("task state changed concurrently")
+        if commit:
+            self.session.commit()
+        else:
+            self.session.flush()
+        row = self.session.get(TaskRow, claimed)
+        if row is None:
+            raise KeyError(task_id)
+        self.session.refresh(row)
         return self._read(row)
 
     def set_task_scene(self, task_id: str, scene: TaskScene) -> TaskRead:
@@ -180,13 +344,20 @@ class TaskRepository:
             tool_name=tool_name,
             risk_level=risk_level,
             params_summary=params_summary,
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
         )
         self.session.add(row)
         self.session.commit()
         return row.id
 
     def decide_latest_approval(
-        self, task_id: str, *, approved: bool, reason: str
+        self,
+        task_id: str,
+        *,
+        approved: bool,
+        reason: str,
+        decided_by: str | None = None,
+        commit: bool = True,
     ) -> ApprovalRow:
         row = self.session.scalar(
             select(ApprovalRow)
@@ -197,12 +368,65 @@ class TaskRepository:
             .order_by(ApprovalRow.created_at.desc())
         )
         if row is None:
-            raise KeyError("pending approval not found")
-        row.status = "approved" if approved else "rejected"
-        row.reason = reason
-        row.decided_at = datetime.now(timezone.utc)
-        self.session.commit()
-        return row
+            raise ValueError("pending approval not found")
+        now = datetime.now(timezone.utc)
+        legacy_cutoff = now - timedelta(hours=24)
+        claimed = self.session.execute(
+            update(ApprovalRow)
+            .where(
+                ApprovalRow.id == row.id,
+                ApprovalRow.status == "pending",
+                or_(
+                    ApprovalRow.expires_at > now,
+                    and_(
+                        ApprovalRow.expires_at.is_(None),
+                        ApprovalRow.created_at > legacy_cutoff,
+                    ),
+                ),
+            )
+            .values(
+                status="approved" if approved else "rejected",
+                reason=reason,
+                decided_by=decided_by,
+                decided_at=now,
+            )
+            .returning(ApprovalRow.id)
+            .execution_options(synchronize_session=False)
+        ).scalar_one_or_none()
+        if claimed is None:
+            expired = self.session.execute(
+                update(ApprovalRow)
+                .where(
+                    ApprovalRow.id == row.id,
+                    ApprovalRow.status == "pending",
+                    or_(
+                        ApprovalRow.expires_at <= now,
+                        and_(
+                            ApprovalRow.expires_at.is_(None),
+                            ApprovalRow.created_at <= legacy_cutoff,
+                        ),
+                    ),
+                )
+                .values(status="expired")
+                .returning(ApprovalRow.id)
+                .execution_options(synchronize_session=False)
+            ).scalar_one_or_none()
+            if expired is not None:
+                if commit:
+                    self.session.commit()
+                else:
+                    self.session.flush()
+                raise ApprovalExpired(row.id)
+            raise ValueError("pending approval not found")
+        if commit:
+            self.session.commit()
+        else:
+            self.session.flush()
+        decided = self.session.get(ApprovalRow, claimed)
+        if decided is None:
+            raise ValueError("pending approval not found")
+        self.session.refresh(decided)
+        return decided
 
     def is_tool_approved(self, task_id: str, tool_name: str) -> bool:
         row = self.session.scalar(
@@ -308,3 +532,7 @@ class TaskRepository:
     @staticmethod
     def _read(row: TaskRow) -> TaskRead:
         return TaskRead.model_validate(row, from_attributes=True)
+
+
+def can_access_task(actor: "AuthenticatedUser", owner_id: str | None) -> bool:
+    return actor.role is UserRole.ADMIN or actor.id == owner_id

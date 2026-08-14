@@ -2,7 +2,9 @@ from fastapi.testclient import TestClient
 
 from secagent.config import Settings
 from secagent.db import Base
+from secagent.domain import UserRole
 from secagent.main import create_app
+from secagent.services.auth_service import AuthService
 
 
 def test_mock_task_reaches_report_with_traceable_evidence(tmp_path) -> None:
@@ -10,10 +12,21 @@ def test_mock_task_reaches_report_with_traceable_evidence(tmp_path) -> None:
         database_url=f"sqlite:///{(tmp_path / 'agent.db').as_posix()}",
         model_mode="mock",
         data_dir=tmp_path / "data",
+        jwt_signing_key="test-signing-key-at-least-32-bytes",
     )
     app = create_app(settings)
     Base.metadata.create_all(app.state.session_factory.kw["bind"])
+    with app.state.session_factory() as session:
+        AuthService.from_session(session, app.state.settings).create_user(
+            "alice", "Correct-Horse-9", UserRole.ANALYST
+        )
     with TestClient(app) as client:
+        login = client.post(
+            "/api/auth/login",
+            json={"username": "alice", "password": "Correct-Horse-9"},
+        )
+        assert login.status_code == 200
+        client.headers["Authorization"] = f"Bearer {login.json()['access_token']}"
         task = client.post(
             "/api/tasks",
             json={

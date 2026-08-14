@@ -3,7 +3,7 @@ import json
 import zipfile
 
 
-def test_source_zip_is_statically_audited_with_masked_evidence(client) -> None:
+def test_source_zip_is_statically_audited_with_masked_evidence(analyst_client) -> None:
     archive = io.BytesIO()
     with zipfile.ZipFile(archive, "w") as output:
         output.writestr(
@@ -13,7 +13,7 @@ def test_source_zip_is_statically_audited_with_masked_evidence(client) -> None:
         )
         output.writestr("vulnerable_app/config.py", "DEBUG = True\n")
     archive.seek(0)
-    created = client.post(
+    created = analyst_client.post(
         "/api/tasks",
         data={
             "payload": json.dumps(
@@ -29,11 +29,11 @@ def test_source_zip_is_statically_audited_with_masked_evidence(client) -> None:
         files={"file": ("vulnerable_app.zip", archive.getvalue(), "application/zip")},
     ).json()
 
-    response = client.post(f"/api/tasks/{created['id']}/run")
+    response = analyst_client.post(f"/api/tasks/{created['id']}/run")
     assert response.status_code == 202
-    detail = client.get(f"/api/tasks/{created['id']}").json()
+    detail = analyst_client.get(f"/api/tasks/{created['id']}").json()
     assert detail["status"] == "completed"
-    report = client.get(f"/api/tasks/{created['id']}/report").text
+    report = analyst_client.get(f"/api/tasks/{created['id']}/report").text
     assert "PY-CMD-001" in report
     assert "CFG-DEBUG-001" in report
     assert "app.py:" in report

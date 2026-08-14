@@ -1,8 +1,8 @@
 from secagent.domain import TaskStatus
 
 
-def test_pause_resume_cancel_and_recover(client, repository) -> None:
-    task = client.post(
+def test_pause_resume_cancel_and_recover(analyst_client, repository) -> None:
+    task = analyst_client.post(
         "/api/tasks",
         json={
             "goal": "分析示例日志",
@@ -11,9 +11,9 @@ def test_pause_resume_cancel_and_recover(client, repository) -> None:
         },
     ).json()
     task_id = task["id"]
-    assert client.post(f"/api/tasks/{task_id}/pause").json()["status"] == "paused"
-    assert client.post(f"/api/tasks/{task_id}/resume").status_code == 202
-    assert client.post(f"/api/tasks/{task_id}/cancel").json()["status"] == "cancelled"
+    assert analyst_client.post(f"/api/tasks/{task_id}/pause").json()["status"] == "paused"
+    assert analyst_client.post(f"/api/tasks/{task_id}/resume").status_code == 202
+    assert analyst_client.post(f"/api/tasks/{task_id}/cancel").json()["status"] == "cancelled"
     repository.set_task_status(task_id, TaskStatus.RUNNING)
     assert repository.recover_interrupted_tasks() == 1
     assert repository.get_task(task_id).status is TaskStatus.FAILED_RETRYABLE

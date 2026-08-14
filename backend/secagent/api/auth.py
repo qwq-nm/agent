@@ -1,7 +1,8 @@
+from hashlib import sha256
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
-from pydantic import BaseModel
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
+from pydantic import BaseModel, Field
 
 from secagent.auth.dependencies import auth_service
 from secagent.services.auth_service import (
@@ -11,6 +12,7 @@ from secagent.services.auth_service import (
     AuthService,
     UserRead,
 )
+from secagent.services.audit import AuditService
 
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -18,8 +20,8 @@ REFRESH_COOKIE = "refresh_token"
 
 
 class LoginRequest(BaseModel):
-    username: str
-    password: str
+    username: str = Field(min_length=1, max_length=80)
+    password: str = Field(min_length=1, max_length=256)
 
 
 class AuthResponse(BaseModel):
@@ -32,12 +34,23 @@ class AuthResponse(BaseModel):
 @router.post("/login", response_model=AuthResponse)
 def login(
     payload: LoginRequest,
+    request: Request,
     response: Response,
     service: Annotated[AuthService, Depends(auth_service)],
 ) -> AuthResponse:
     try:
         result = service.login(payload.username, payload.password)
     except AuthenticationError:
+        AuditService(service.session).record(
+            None,
+            "auth.login_failed",
+            "user",
+            sha256(payload.username.encode("utf-8")).hexdigest(),
+            "failure",
+            {},
+            ip_address=request.client.host if request.client else None,
+        )
+        service.session.commit()
         raise _unauthorized("Invalid username or password") from None
     except AuthenticationConfigurationError:
         raise _unavailable() from None

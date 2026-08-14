@@ -13,6 +13,7 @@ from fastapi import (
 from pydantic import BaseModel, Field, ValidationError
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
+from secagent.auth.dependencies import AuthenticatedUser, current_user
 from secagent.domain import TaskCreate, TaskRead
 from secagent.repository import TaskRepository
 from secagent.services.ledger import LedgerService
@@ -28,6 +29,7 @@ def get_repository(request: Request) -> Iterator[TaskRepository]:
 
 
 RepositoryDep = Annotated[TaskRepository, Depends(get_repository)]
+ActorDep = Annotated[AuthenticatedUser, Depends(current_user)]
 
 
 async def parse_task_create(request: Request) -> tuple[TaskCreate, UploadFile | None]:
@@ -48,6 +50,8 @@ async def parse_task_create(request: Request) -> tuple[TaskCreate, UploadFile | 
             return TaskCreate.model_validate_json(raw_payload), upload
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.errors()) from exc
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="Invalid request body") from exc
     raise HTTPException(
         status_code=415,
         detail="use application/json or multipart/form-data",
@@ -74,28 +78,43 @@ def task_service_for(request: Request, repository: TaskRepository) -> TaskServic
 
 
 @router.post("", response_model=TaskRead, status_code=status.HTTP_201_CREATED)
-async def create_task(request: Request, repository: RepositoryDep) -> TaskRead:
+async def create_task(
+    request: Request, repository: RepositoryDep, actor: ActorDep
+) -> TaskRead:
     payload, upload = await parse_task_create(request)
-    task = repository.create_task(payload)
+    task = repository.create_task(payload, actor.id, commit=False)
     if upload is not None:
         storage = storage_for(request)
         try:
             await storage.save_upload(task.id, upload)
         except Exception as exc:
-            repository.delete_task(task.id)
+            repository.rollback()
             storage.remove_workspace(task.id)
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+            repository.record_audit(
+                actor.id,
+                "task.create",
+                "task",
+                task.id,
+                "failure",
+                {"error_type": type(exc).__name__},
+            )
+            raise HTTPException(
+                status_code=422, detail="Upload validation failed"
+            ) from exc
+    repository.record_audit(
+        actor.id, "task.create", "task", task.id, "success", {}
+    )
     return task
 
 
 @router.get("", response_model=list[TaskRead])
-def list_tasks(repository: RepositoryDep) -> list[TaskRead]:
-    return repository.list_tasks()
+def list_tasks(repository: RepositoryDep, actor: ActorDep) -> list[TaskRead]:
+    return repository.list_authorized(actor)
 
 
 @router.get("/{task_id}")
-def get_task(task_id: str, repository: RepositoryDep) -> dict:
-    task = repository.get_task(task_id)
+def get_task(task_id: str, repository: RepositoryDep, actor: ActorDep) -> dict:
+    task = repository.get_authorized(task_id, actor)
     if task is None:
         raise HTTPException(status_code=404, detail="task not found")
     return task.model_dump(mode="json") | LedgerService(repository).snapshot(task_id)
@@ -106,16 +125,23 @@ async def run_task(
     task_id: str,
     request: Request,
     repository: RepositoryDep,
+    actor: ActorDep,
 ) -> dict:
-    if repository.get_task(task_id) is None:
-        raise HTTPException(status_code=404, detail="task not found")
     service = task_service_for(request, repository)
-    result = await service.run(task_id)
+    try:
+        result = await service.run(task_id, actor)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="task not found") from exc
     return result.model_dump(mode="json")
 
 
 @router.get("/{task_id}/report")
-def get_report(task_id: str, repository: RepositoryDep) -> Response:
+def get_report(
+    task_id: str, repository: RepositoryDep, actor: ActorDep
+) -> Response:
+    task = repository.get_authorized(task_id, actor)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
     snapshot = LedgerService(repository).snapshot(task_id)
     if not snapshot["reports"]:
         raise HTTPException(status_code=404, detail="report not found")
@@ -135,10 +161,11 @@ def lifecycle_action(
     task_id: str,
     request: Request,
     repository: TaskRepository,
+    actor: AuthenticatedUser,
 ) -> TaskRead:
     service = task_service_for(request, repository)
     try:
-        return getattr(service, action)(task_id)
+        return getattr(service, action)(task_id, actor)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="task not found") from exc
     except ValueError as exc:
@@ -147,9 +174,9 @@ def lifecycle_action(
 
 @router.post("/{task_id}/pause", response_model=TaskRead)
 def pause_task(
-    task_id: str, request: Request, repository: RepositoryDep
+    task_id: str, request: Request, repository: RepositoryDep, actor: ActorDep
 ) -> TaskRead:
-    return lifecycle_action("pause", task_id, request, repository)
+    return lifecycle_action("pause", task_id, request, repository, actor)
 
 
 @router.post(
@@ -158,16 +185,16 @@ def pause_task(
     status_code=status.HTTP_202_ACCEPTED,
 )
 def resume_task(
-    task_id: str, request: Request, repository: RepositoryDep
+    task_id: str, request: Request, repository: RepositoryDep, actor: ActorDep
 ) -> TaskRead:
-    return lifecycle_action("resume", task_id, request, repository)
+    return lifecycle_action("resume", task_id, request, repository, actor)
 
 
 @router.post("/{task_id}/cancel", response_model=TaskRead)
 def cancel_task(
-    task_id: str, request: Request, repository: RepositoryDep
+    task_id: str, request: Request, repository: RepositoryDep, actor: ActorDep
 ) -> TaskRead:
-    return lifecycle_action("cancel", task_id, request, repository)
+    return lifecycle_action("cancel", task_id, request, repository, actor)
 
 
 @router.post(
@@ -176,9 +203,9 @@ def cancel_task(
     status_code=status.HTTP_202_ACCEPTED,
 )
 def retry_task(
-    task_id: str, request: Request, repository: RepositoryDep
+    task_id: str, request: Request, repository: RepositoryDep, actor: ActorDep
 ) -> TaskRead:
-    return lifecycle_action("retry", task_id, request, repository)
+    return lifecycle_action("retry", task_id, request, repository, actor)
 
 
 @router.post("/{task_id}/approve", response_model=TaskRead)
@@ -187,11 +214,12 @@ async def approve_task(
     payload: ApprovalDecision,
     request: Request,
     repository: RepositoryDep,
+    actor: ActorDep,
 ) -> TaskRead:
     service = task_service_for(request, repository)
     try:
         return await service.approve(
-            task_id, approved=payload.approved, reason=payload.reason
+            task_id, actor, approved=payload.approved, reason=payload.reason
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

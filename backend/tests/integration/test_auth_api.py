@@ -68,7 +68,12 @@ def test_login_rejects_invalid_password_and_disabled_user(client, app, seeded_an
 
     assert invalid.status_code == 401
     assert disabled.status_code == 401
-    assert invalid.json() == disabled.json()
+    for response in (invalid, disabled):
+        error = response.json()["error"]
+        assert error["code"] == "unauthorized"
+        assert error["message"] == "Invalid username or password"
+        assert error["fields"] is None
+        assert error["trace_id"]
 
 
 def test_missing_signing_key_does_not_persist_refresh_session(
@@ -99,7 +104,11 @@ def test_unreadable_signing_key_file_returns_generic_503(
         )
 
     assert response.status_code == 503
-    assert response.json() == {"detail": "Authentication unavailable"}
+    error = response.json()["error"]
+    assert error["code"] == "service_unavailable"
+    assert error["message"] == "Authentication unavailable"
+    assert error["fields"] is None
+    assert error["trace_id"]
     assert str(missing_file) not in response.text
     with app.state.session_factory() as session:
         assert session.scalar(select(RefreshSessionRow)) is None
