@@ -9,6 +9,7 @@ from secagent.db_models import (
     ApprovalRow,
     AuditEventRow,
     EvidenceRow,
+    JobRunRow,
     ModelCallRow,
     RefreshSessionRow,
     ReportRow,
@@ -200,6 +201,9 @@ class TaskRepository:
     def rollback(self) -> None:
         self.session.rollback()
 
+    def commit(self) -> None:
+        self.session.commit()
+
     def get_task(self, task_id: str) -> TaskRead | None:
         row = self.session.get(TaskRow, task_id)
         return self._read(row) if row else None
@@ -244,12 +248,157 @@ class TaskRepository:
         resource_id: str | None,
         outcome: str,
         details: dict[str, Any] | None = None,
+        *,
+        commit: bool = True,
     ) -> AuditEventRow:
         row = AuditService(self.session).record(
             actor_id, action, resource_type, resource_id, outcome, details
         )
-        self.session.commit()
+        if commit:
+            self.session.commit()
         return row
+
+    def get_job_run(self, command_id: str) -> JobRunRow | None:
+        return self.session.scalar(
+            select(JobRunRow).where(JobRunRow.command_id == command_id)
+        )
+
+    def add_job_run(self, task_id: str, command_id: str) -> JobRunRow:
+        row = JobRunRow(
+            task_id=task_id,
+            command_id=command_id,
+            status="pending_publish",
+        )
+        self.session.add(row)
+        self.session.flush()
+        return row
+
+    def claim_job_republish(self, command_id: str) -> bool:
+        claimed = self.session.execute(
+            update(JobRunRow)
+            .where(
+                JobRunRow.command_id == command_id,
+                JobRunRow.status == "enqueue_failed",
+            )
+            .values(status="pending_publish")
+            .returning(JobRunRow.id)
+        ).scalar_one_or_none()
+        self.session.flush()
+        return claimed is not None
+
+    def begin_job_publish(self, command_id: str) -> str:
+        claimed = self.session.execute(
+            update(JobRunRow)
+            .where(
+                JobRunRow.command_id == command_id,
+                JobRunRow.status.in_(("pending_publish", "publishing")),
+            )
+            .values(status="publishing")
+            .returning(JobRunRow.id)
+        ).scalar_one_or_none()
+        if claimed is not None:
+            return "claimed"
+        self.session.expire_all()
+        row = self.get_job_run(command_id)
+        return row.status if row is not None else "missing"
+
+    def mark_job_enqueued(self, command_id: str, broker_id: str) -> None:
+        self.session.execute(
+            update(JobRunRow)
+            .where(
+                JobRunRow.command_id == command_id,
+                JobRunRow.status == "publishing",
+            )
+            .values(status="queued", broker_id=broker_id)
+        )
+        self.session.commit()
+
+    def mark_job_enqueue_failed(self, task_id: str, command_id: str) -> None:
+        claimed = self.session.execute(
+            update(JobRunRow)
+            .where(
+                JobRunRow.command_id == command_id,
+                JobRunRow.status == "publishing",
+            )
+            .values(status="enqueue_failed")
+            .returning(JobRunRow.id)
+        ).scalar_one_or_none()
+        if claimed is None:
+            return
+        self.session.execute(
+            update(TaskRow)
+            .where(
+                TaskRow.id == task_id,
+                TaskRow.status == TaskStatus.QUEUED.value,
+            )
+            .values(status=TaskStatus.FAILED_RETRYABLE.value)
+        )
+
+    def cancel_pending_jobs(self, task_id: str) -> None:
+        self.session.execute(
+            update(JobRunRow)
+            .where(
+                JobRunRow.task_id == task_id,
+                JobRunRow.status.in_(
+                    ("pending_publish", "publishing", "queued", "enqueue_failed")
+                ),
+            )
+            .values(
+                status="cancelled",
+                finished_at=datetime.now(timezone.utc),
+            )
+        )
+
+    def claim_job_execution(self, task_id: str, command_id: str) -> bool:
+        job_claimed = self.session.execute(
+            update(JobRunRow)
+            .where(
+                JobRunRow.task_id == task_id,
+                JobRunRow.command_id == command_id,
+                JobRunRow.status.in_(("publishing", "queued")),
+            )
+            .values(status="running", started_at=datetime.now(timezone.utc))
+            .returning(JobRunRow.id)
+        ).scalar_one_or_none()
+        if job_claimed is None:
+            self.session.rollback()
+            return False
+        task_claimed = self.session.execute(
+            update(TaskRow)
+            .where(
+                TaskRow.id == task_id,
+                TaskRow.status == TaskStatus.QUEUED.value,
+            )
+            .values(status=TaskStatus.RUNNING.value)
+            .returning(TaskRow.id)
+        ).scalar_one_or_none()
+        if task_claimed is None:
+            self.session.execute(
+                update(JobRunRow)
+                .where(
+                    JobRunRow.id == job_claimed,
+                    JobRunRow.status == "running",
+                )
+                .values(
+                    status="cancelled",
+                    finished_at=datetime.now(timezone.utc),
+                )
+            )
+            self.session.commit()
+            return False
+        self.session.commit()
+        return True
+
+    def finish_job_execution(self, command_id: str, status: str) -> None:
+        self.session.execute(
+            update(JobRunRow)
+            .where(
+                JobRunRow.command_id == command_id,
+                JobRunRow.status == "running",
+            )
+            .values(status=status, finished_at=datetime.now(timezone.utc))
+        )
+        self.session.commit()
 
     def latest_audit_event(self, action: str) -> AuditEventRow | None:
         return self.session.scalar(

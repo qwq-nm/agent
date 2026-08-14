@@ -27,6 +27,11 @@ class ApprovalExpired(ApiError):
         self.approval_id = approval_id
 
 
+class QueueUnavailable(ApiError):
+    def __init__(self) -> None:
+        super().__init__(503, "service_unavailable", "Task queue is unavailable")
+
+
 _STATUS_CODES = {
     400: "bad_request",
     401: "unauthorized",

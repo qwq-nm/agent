@@ -1,3 +1,4 @@
+import asyncio
 import os
 
 import pytest
@@ -9,9 +10,11 @@ from secagent.config import Settings
 from secagent.db import Base
 from secagent.domain import UserRole
 from secagent.main import create_app
+from secagent.queue.fake import FakeJobQueue
 from secagent.repository import TaskRepository
 from secagent.services.auth_service import AuthService
 from secagent.services.ledger import LedgerService
+from secagent.worker import execute_queued_task
 
 
 @pytest.fixture
@@ -25,8 +28,31 @@ def settings(tmp_path):
 
 
 @pytest.fixture
-def app(settings):
-    application = create_app(settings)
+def fake_queue():
+    return FakeJobQueue()
+
+
+@pytest.fixture
+def run_queued_job(app, fake_queue):
+    def run(index: int = -1) -> None:
+        job = fake_queue.enqueued[index]
+        asyncio.run(
+            execute_queued_task(
+                job.task_id,
+                job.command_id,
+                app.state.session_factory,
+                app.state.model_router,
+                app.state.tool_registry,
+                app.state.settings.data_dir,
+            )
+        )
+
+    return run
+
+
+@pytest.fixture
+def app(settings, fake_queue):
+    application = create_app(settings, job_queue=fake_queue)
     Base.metadata.create_all(application.state.session_factory.kw["bind"])
     return application
 

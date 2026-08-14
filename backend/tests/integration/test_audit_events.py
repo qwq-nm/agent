@@ -404,6 +404,7 @@ def test_expired_approval_returns_conflict_and_keeps_task_waiting(
 
     response = analyst_client.post(
         f"/api/tasks/{task['id']}/approve",
+        headers={"Idempotency-Key": "expired-approval-001"},
         json={"approved": True, "reason": "approved too late"},
     )
 
@@ -434,6 +435,7 @@ def test_missing_pending_approval_is_state_conflict_and_is_audited(
 
     response = analyst_client.post(
         f"/api/tasks/{task['id']}/approve",
+        headers={"Idempotency-Key": "missing-approval-001"},
         json={"approved": True, "reason": "no pending approval exists"},
     )
 

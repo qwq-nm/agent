@@ -74,7 +74,18 @@ def task_service_for(request: Request, repository: TaskRepository) -> TaskServic
         request.app.state.model_router,
         request.app.state.tool_registry,
         request.app.state.settings.data_dir,
+        request.app.state.job_queue,
     )
+
+
+def require_idempotency_key(request: Request) -> str:
+    value = request.headers.get("Idempotency-Key")
+    if value is None or not value.strip() or len(value) > 255:
+        raise HTTPException(
+            status_code=400,
+            detail="Idempotency-Key header is required and must be at most 255 characters",
+        )
+    return value
 
 
 @router.post("", response_model=TaskRead, status_code=status.HTTP_201_CREATED)
@@ -129,7 +140,7 @@ async def run_task(
 ) -> dict:
     service = task_service_for(request, repository)
     try:
-        result = await service.run(task_id, actor)
+        result = service.run(task_id, actor, require_idempotency_key(request))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="task not found") from exc
     return result.model_dump(mode="json")
@@ -162,10 +173,13 @@ def lifecycle_action(
     request: Request,
     repository: TaskRepository,
     actor: AuthenticatedUser,
+    idempotency_key: str | None = None,
 ) -> TaskRead:
     service = task_service_for(request, repository)
     try:
-        return getattr(service, action)(task_id, actor)
+        if idempotency_key is None:
+            return getattr(service, action)(task_id, actor)
+        return getattr(service, action)(task_id, actor, idempotency_key)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="task not found") from exc
     except ValueError as exc:
@@ -187,7 +201,14 @@ def pause_task(
 def resume_task(
     task_id: str, request: Request, repository: RepositoryDep, actor: ActorDep
 ) -> TaskRead:
-    return lifecycle_action("resume", task_id, request, repository, actor)
+    return lifecycle_action(
+        "resume",
+        task_id,
+        request,
+        repository,
+        actor,
+        require_idempotency_key(request),
+    )
 
 
 @router.post("/{task_id}/cancel", response_model=TaskRead)
@@ -205,7 +226,14 @@ def cancel_task(
 def retry_task(
     task_id: str, request: Request, repository: RepositoryDep, actor: ActorDep
 ) -> TaskRead:
-    return lifecycle_action("retry", task_id, request, repository, actor)
+    return lifecycle_action(
+        "retry",
+        task_id,
+        request,
+        repository,
+        actor,
+        require_idempotency_key(request),
+    )
 
 
 @router.post("/{task_id}/approve", response_model=TaskRead)
@@ -213,14 +241,23 @@ async def approve_task(
     task_id: str,
     payload: ApprovalDecision,
     request: Request,
+    response: Response,
     repository: RepositoryDep,
     actor: ActorDep,
 ) -> TaskRead:
     service = task_service_for(request, repository)
     try:
-        return await service.approve(
-            task_id, actor, approved=payload.approved, reason=payload.reason
+        idempotency_key = require_idempotency_key(request) if payload.approved else None
+        result = await service.approve(
+            task_id,
+            actor,
+            approved=payload.approved,
+            reason=payload.reason,
+            idempotency_key=idempotency_key,
         )
+        if payload.approved:
+            response.status_code = status.HTTP_202_ACCEPTED
+        return result
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:

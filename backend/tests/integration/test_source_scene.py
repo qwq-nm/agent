@@ -3,7 +3,9 @@ import json
 import zipfile
 
 
-def test_source_zip_is_statically_audited_with_masked_evidence(analyst_client) -> None:
+def test_source_zip_is_statically_audited_with_masked_evidence(
+    analyst_client, run_queued_job
+) -> None:
     archive = io.BytesIO()
     with zipfile.ZipFile(archive, "w") as output:
         output.writestr(
@@ -29,8 +31,13 @@ def test_source_zip_is_statically_audited_with_masked_evidence(analyst_client) -
         files={"file": ("vulnerable_app.zip", archive.getvalue(), "application/zip")},
     ).json()
 
-    response = analyst_client.post(f"/api/tasks/{created['id']}/run")
+    response = analyst_client.post(
+        f"/api/tasks/{created['id']}/run",
+        headers={"Idempotency-Key": "source-run-001"},
+    )
     assert response.status_code == 202
+    assert response.json()["status"] == "queued"
+    run_queued_job()
     detail = analyst_client.get(f"/api/tasks/{created['id']}").json()
     assert detail["status"] == "completed"
     report = analyst_client.get(f"/api/tasks/{created['id']}/report").text

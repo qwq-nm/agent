@@ -13,6 +13,8 @@ from secagent.config import Settings, get_settings
 from secagent.db import make_session_factory
 from secagent.providers import build_providers
 from secagent.providers.router import ModelRouter
+from secagent.queue.base import JobQueue
+from secagent.queue.celery_queue import CeleryJobQueue
 from secagent.repository import TaskRepository
 from secagent.security.url_guard import UrlGuard
 from secagent.tools.registry import ToolRegistry
@@ -31,7 +33,9 @@ from secagent.tools.source_tools import (
 from secagent.tools.web_tools import FormExtract, HeaderCheck, HttpFetch, UrlGuardTool
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None, job_queue: JobQueue | None = None
+) -> FastAPI:
     resolved_settings = settings or get_settings()
     session_factory = make_session_factory(resolved_settings.database_url)
 
@@ -45,6 +49,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     install_error_handlers(app)
     app.state.settings = resolved_settings
     app.state.session_factory = session_factory
+    app.state.job_queue = job_queue or CeleryJobQueue()
     app.state.model_router = ModelRouter(
         build_providers(app.state.settings), mode=app.state.settings.model_mode
     )

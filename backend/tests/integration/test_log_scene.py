@@ -5,7 +5,9 @@ from pathlib import Path
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "access_attack.log"
 
 
-def test_uploaded_log_scene_produces_traceable_scan_report(analyst_client) -> None:
+def test_uploaded_log_scene_produces_traceable_scan_report(
+    analyst_client, run_queued_job
+) -> None:
     with FIXTURE.open("rb") as source:
         created = analyst_client.post(
             "/api/tasks",
@@ -23,8 +25,13 @@ def test_uploaded_log_scene_produces_traceable_scan_report(analyst_client) -> No
             files={"file": ("access_attack.log", source, "text/plain")},
         ).json()
 
-    response = analyst_client.post(f"/api/tasks/{created['id']}/run")
+    response = analyst_client.post(
+        f"/api/tasks/{created['id']}/run",
+        headers={"Idempotency-Key": "log-run-001"},
+    )
     assert response.status_code == 202
+    assert response.json()["status"] == "queued"
+    run_queued_job()
     detail = analyst_client.get(f"/api/tasks/{created['id']}").json()
     assert detail["status"] == "completed"
     assert any(

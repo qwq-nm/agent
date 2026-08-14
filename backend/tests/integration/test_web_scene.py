@@ -1,3 +1,5 @@
+import asyncio
+
 import httpx
 from fastapi.testclient import TestClient
 
@@ -5,9 +7,11 @@ from secagent.config import Settings
 from secagent.db import Base
 from secagent.domain import UserRole
 from secagent.main import create_app
+from secagent.queue.fake import FakeJobQueue
 from secagent.security.url_guard import UrlGuard
 from secagent.tools.web_tools import HttpFetch
 from secagent.services.auth_service import AuthService
+from secagent.worker import execute_queued_task
 
 
 HTML = """<!doctype html><html><body>
@@ -36,7 +40,8 @@ def test_approved_web_scene_records_passive_http_and_form_evidence(tmp_path) -> 
         web_allowed_hosts="web-demo",
         jwt_signing_key="test-signing-key-at-least-32-bytes",
     )
-    app = create_app(settings)
+    queue = FakeJobQueue()
+    app = create_app(settings, job_queue=queue)
     Base.metadata.create_all(app.state.session_factory.kw["bind"])
     with app.state.session_factory() as session:
         AuthService.from_session(session, app.state.settings).create_user(
@@ -63,18 +68,44 @@ def test_approved_web_scene_records_passive_http_and_form_evidence(tmp_path) -> 
                 "target_url": "http://web-demo/",
             },
         ).json()
-        first = client.post(f"/api/tasks/{task['id']}/run")
+        first = client.post(
+            f"/api/tasks/{task['id']}/run",
+            headers={"Idempotency-Key": "web-run-001"},
+        )
         assert first.status_code == 202
-        assert first.json()["status"] == "waiting_human"
+        assert first.json()["status"] == "queued"
+        first_job = queue.enqueued[0]
+        asyncio.run(
+            execute_queued_task(
+                first_job.task_id,
+                first_job.command_id,
+                app.state.session_factory,
+                app.state.model_router,
+                app.state.tool_registry,
+                app.state.settings.data_dir,
+            )
+        )
         waiting = client.get(f"/api/tasks/{task['id']}").json()
         assert waiting["pending_approval"]["tool_name"] == "http_fetch"
         assert waiting["pending_approval"]["risk_level"] == "medium"
         approved = client.post(
             f"/api/tasks/{task['id']}/approve",
+            headers={"Idempotency-Key": "web-approve-001"},
             json={"approved": True, "reason": "确认仅进行被动 GET"},
         )
-        assert approved.status_code == 200
-        assert approved.json()["status"] == "completed"
+        assert approved.status_code == 202
+        assert approved.json()["status"] == "queued"
+        approved_job = queue.enqueued[1]
+        asyncio.run(
+            execute_queued_task(
+                approved_job.task_id,
+                approved_job.command_id,
+                app.state.session_factory,
+                app.state.model_router,
+                app.state.tool_registry,
+                app.state.settings.data_dir,
+            )
+        )
         report = client.get(f"/api/tasks/{task['id']}/report").text
         assert "http://web-demo/" in report
         assert "HTTP 200" in report
