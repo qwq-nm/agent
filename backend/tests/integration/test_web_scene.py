@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from secagent.config import Settings
 from secagent.db import Base
+from secagent.db_models import TaskStepRow
 from secagent.domain import UserRole
 from secagent.main import create_app
 from secagent.queue.fake import FakeJobQueue
@@ -112,3 +113,18 @@ def test_approved_web_scene_records_passive_http_and_form_evidence(tmp_path) -> 
         assert "content-type" in report
         assert "action=/search" in report
         assert "q" in report and "page" in report
+        detail = client.get(f"/api/tasks/{task['id']}").json()
+        assert [call["stage"] for call in detail["model_calls"]] == [
+            "task_parse",
+            "plan",
+            "critic",
+            "report",
+        ]
+        with app.state.session_factory() as session:
+            steps = (
+                session.query(TaskStepRow)
+                .filter_by(task_id=task["id"])
+                .order_by(TaskStepRow.step_index)
+                .all()
+            )
+            assert [step.attempt for step in steps] == [1, 1, 1, 1]

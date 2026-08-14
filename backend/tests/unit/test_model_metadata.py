@@ -77,3 +77,24 @@ def test_model_response_and_ledger_reject_usage_outside_db_integer_range() -> No
     assert repository.values is not None
     assert repository.values["prompt_tokens"] == 0
     assert repository.values["completion_tokens"] == 0
+
+
+def test_model_metrics_drop_prompts_raw_route_reasons_and_unsafe_request_ids() -> None:
+    repository = CapturingRepository()
+
+    LedgerService(repository).record_model_call(
+        "task-1",
+        provider="glm",
+        model="glm-5.2",
+        stage="task_parse",
+        route_reason="Authorization: Bearer route-secret",
+        input_summary="prompt Authorization: Bearer prompt-secret",
+        request_id="req-1\nAuthorization: Bearer request-secret",
+        is_demo=False,
+    )
+
+    assert repository.values is not None
+    assert repository.values["route_reason"] == "fixed_stage"
+    assert repository.values["input_summary"] == "task_parse structured request"
+    assert repository.values["request_id"] is None
+    assert "secret" not in str(repository.values)

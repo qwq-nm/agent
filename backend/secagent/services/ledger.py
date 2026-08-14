@@ -1,15 +1,58 @@
 import json
 import hashlib
+import re
+from pathlib import Path
 from typing import Any
 
-from secagent.domain import ModelResponse, ModelStage, ToolResult
+from secagent.domain import (
+    ModelResponse,
+    ModelStage,
+    ToolResult,
+    normalize_finish_reason,
+    normalize_token_count,
+)
 from secagent.repository import TaskRepository
 from secagent.security.redaction import redact_mapping, scrub_approval_reason
 
 
+ROUTE_REASONS = {
+    "中文任务理解",
+    "技术计划生成",
+    "证据完整性复核",
+    "中文报告生成",
+    "fixed_stage",
+}
+ERROR_CODES = {
+    "auth",
+    "rate_limit",
+    "server",
+    "timeout",
+    "network",
+    "empty_content",
+    "truncated",
+    "invalid_json",
+    "invalid_schema",
+}
+SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9._:/-]{1,128}$")
+
+
+def _safe_identifier(value: object, fallback: str | None = None) -> str | None:
+    if isinstance(value, str) and SAFE_IDENTIFIER.fullmatch(value):
+        return value
+    return fallback
+
+
 class LedgerService:
-    def __init__(self, repository: TaskRepository) -> None:
+    def __init__(
+        self,
+        repository: TaskRepository,
+        *,
+        data_dir: Path | None = None,
+        evidence_file_max_bytes: int = 10 * 1024 * 1024,
+    ) -> None:
         self.repository = repository
+        self.data_dir = data_dir
+        self.evidence_file_max_bytes = evidence_file_max_bytes
 
     def record_model_call(
         self,
@@ -27,24 +70,34 @@ class LedgerService:
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
         retry_count: int = 0,
+        status: str = "completed",
+        error_code: str | None = None,
         lease: Any | None = None,
     ) -> str:
-        redacted = redact_mapping({"input_summary": input_summary})
+        del input_summary  # Never persist prompts, reasoning, or request bodies.
+        safe_stage = stage if stage in {item.value for item in ModelStage} else "unknown"
+        safe_route_reason = (
+            route_reason if route_reason in ROUTE_REASONS else "fixed_stage"
+        )
+        safe_status = status if status in {"completed", "error"} else "error"
+        safe_error = error_code if error_code in ERROR_CODES else None
         return self.repository.add_model_call(
             lease=lease,
             task_id=task_id,
-            provider=provider,
-            model=model,
-            stage=stage,
-            route_reason=route_reason,
-            input_summary=redacted["input_summary"],
-            request_id=request_id,
-            finish_reason=finish_reason,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            retry_count=retry_count,
-            latency_ms=latency_ms,
+            provider=_safe_identifier(provider, "unknown") or "unknown",
+            model=_safe_identifier(model, "unknown") or "unknown",
+            stage=safe_stage,
+            route_reason=safe_route_reason[:64],
+            input_summary=f"{safe_stage} structured request",
+            request_id=_safe_identifier(request_id),
+            finish_reason=normalize_finish_reason(finish_reason),
+            prompt_tokens=normalize_token_count(prompt_tokens),
+            completion_tokens=normalize_token_count(completion_tokens),
+            retry_count=normalize_token_count(retry_count),
+            latency_ms=normalize_token_count(latency_ms),
             is_demo=is_demo,
+            status=safe_status,
+            error_code=safe_error,
         )
 
     def record_model_response(
@@ -78,6 +131,31 @@ class LedgerService:
             lease=lease,
         )
 
+    def record_model_error(
+        self,
+        task_id: str,
+        stage: ModelStage,
+        *,
+        provider: str,
+        model: str,
+        error_code: str,
+        request_id: str | None,
+        lease: Any | None = None,
+    ) -> str:
+        return self.record_model_call(
+            task_id,
+            provider=provider,
+            model=model,
+            stage=stage.value,
+            route_reason="fixed_stage",
+            input_summary="",
+            request_id=request_id,
+            is_demo=False,
+            status="error",
+            error_code=error_code,
+            lease=lease,
+        )
+
     def record_tool_call(
         self,
         task_id: str,
@@ -102,22 +180,24 @@ class LedgerService:
         *,
         evidence_type: str,
         source: str,
-        content: str,
+        content: Any,
         confidence: float,
         metadata: dict[str, Any] | None = None,
+        file_ref: str | None = None,
         tool_call_id: str | None = None,
         lease: Any | None = None,
     ) -> str:
-        redacted_content = redact_mapping(content)
+        prepared = self._prepare_evidence(task_id, content, file_ref)
         return self.repository.add_evidence(
             lease=lease,
             task_id=task_id,
             tool_call_id=tool_call_id,
             evidence_type=evidence_type,
             source=source,
-            content=redacted_content,
-            sha256=hashlib.sha256(redacted_content.encode("utf-8")).hexdigest(),
+            content=prepared["content"],
+            sha256=prepared["sha256"],
             confidence=confidence,
+            file_ref=prepared["file_ref"],
             metadata_json=json.dumps(redact_mapping(metadata or {}), ensure_ascii=False),
         )
 
@@ -142,9 +222,10 @@ class LedgerService:
                 tool_call_id=tool_call_id,
                 evidence_type=item.get("evidence_type", "observation"),
                 source=item.get("source", tool_name),
-                content=str(item.get("content", "")),
+                content=item.get("content", ""),
                 confidence=float(item.get("confidence", 1.0)),
                 metadata=item.get("metadata", {}),
+                file_ref=item.get("file_ref"),
             )
         return tool_call_id
 
@@ -164,13 +245,20 @@ class LedgerService:
         for item in result.evidence:
             redacted = redact_mapping(item)
             metadata = redacted.get("metadata", {})
+            prepared = self._prepare_evidence(
+                lease.task_id,
+                redacted.get("content", ""),
+                item.get("file_ref"),
+            )
             safe_evidence.append(
                 {
                     "evidence_type": str(
                         redacted.get("evidence_type", "observation")
                     ),
                     "source": str(redacted.get("source", tool_name)),
-                    "content": str(redacted.get("content", "")),
+                    "content": prepared["content"],
+                    "sha256": prepared["sha256"],
+                    "file_ref": prepared["file_ref"],
                     "confidence": float(redacted.get("confidence", 1.0)),
                     "metadata": metadata if isinstance(metadata, dict) else {},
                 }
@@ -188,10 +276,59 @@ class LedgerService:
     def evidence_hashes(result: ToolResult) -> list[str]:
         return [
             hashlib.sha256(
-                str(redact_mapping(str(item.get("content", "")))).encode("utf-8")
+                json.dumps(
+                    redact_mapping(item.get("content", "")),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
             ).hexdigest()
             for item in result.evidence
         ]
+
+    def _prepare_evidence(
+        self, task_id: str, content: Any, file_ref: object
+    ) -> dict[str, str | None]:
+        safe_content = redact_mapping(content)
+        canonical = json.dumps(
+            safe_content,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        stored_content = (
+            safe_content if isinstance(safe_content, str) else canonical.decode("utf-8")
+        )
+        stored_ref: str | None = None
+        referenced_bytes = b""
+        if file_ref is not None:
+            if not isinstance(file_ref, str) or not file_ref:
+                raise ValueError("invalid evidence file reference")
+            if self.data_dir is None:
+                raise ValueError("evidence file requires a safe upload root")
+            upload_root = (self.data_dir / "tasks" / task_id / "uploads").resolve()
+            raw_path = Path(file_ref)
+            candidate = (
+                raw_path.resolve()
+                if raw_path.is_absolute()
+                else (upload_root / raw_path).resolve()
+            )
+            if not candidate.is_relative_to(upload_root):
+                raise ValueError("evidence file must stay within the task upload root")
+            if not candidate.is_file():
+                raise ValueError("evidence file does not exist")
+            size = candidate.stat().st_size
+            if size > self.evidence_file_max_bytes:
+                raise ValueError("evidence file exceeds size limit")
+            referenced_bytes = candidate.read_bytes()
+            stored_ref = candidate.relative_to(upload_root).as_posix()
+        return {
+            "content": str(stored_content),
+            "file_ref": stored_ref,
+            "sha256": hashlib.sha256(canonical + referenced_bytes).hexdigest(),
+        }
 
     def record_error(
         self,
@@ -202,6 +339,12 @@ class LedgerService:
         lease: Any,
     ) -> str:
         content = redact_mapping(f"{error_type}: {message}")
+        canonical = json.dumps(
+            content,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
         return self.repository.add_error_evidence(
             lease,
             task_id=task_id,
@@ -209,7 +352,7 @@ class LedgerService:
             evidence_type="runtime_error",
             source="agent_runner",
             content=content,
-            sha256=hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            sha256=hashlib.sha256(canonical).hexdigest(),
             confidence=1.0,
             metadata_json="{}",
         )
@@ -264,6 +407,8 @@ class LedgerService:
                     "completion_tokens": row.completion_tokens,
                     "retry_count": row.retry_count,
                     "latency_ms": row.latency_ms,
+                    "status": row.status,
+                    "error_code": row.error_code,
                     "is_demo": row.is_demo,
                 }
                 for row in rows["model_calls"]
@@ -290,7 +435,12 @@ class LedgerService:
                 for row in rows["evidences"]
             ],
             "reports": [
-                {"id": row.id, "content": row.content, "is_demo": row.is_demo}
+                {
+                    "id": row.id,
+                    "content": row.content,
+                    "evidence_ids": json.loads(row.evidence_ids_json),
+                    "is_demo": row.is_demo,
+                }
                 for row in rows["reports"]
             ],
             "approvals": approvals,

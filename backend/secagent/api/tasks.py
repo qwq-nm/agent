@@ -79,6 +79,7 @@ def task_service_for(request: Request, repository: TaskRepository) -> TaskServic
         lease_seconds=request.app.state.settings.job_lease_seconds,
         heartbeat_seconds=request.app.state.settings.job_heartbeat_seconds,
         max_auto_retries=request.app.state.settings.job_auto_retries,
+        task_timeout_seconds=request.app.state.settings.task_timeout_seconds,
     )
 
 
@@ -98,6 +99,14 @@ async def create_task(
 ) -> TaskRead:
     payload, upload = await parse_task_create(request)
     task = repository.create_task(payload, actor.id, commit=False)
+    settings = request.app.state.settings
+    repository.configure_task_budget(
+        task.id,
+        max_model_calls=settings.max_model_calls_per_task,
+        max_input_tokens=settings.max_input_tokens_per_task,
+        max_output_tokens=settings.max_output_tokens_per_task,
+        max_steps=settings.max_steps_per_task,
+    )
     if upload is not None:
         storage = storage_for(request)
         try:

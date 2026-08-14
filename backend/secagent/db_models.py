@@ -77,6 +77,13 @@ class TaskRow(Base):
     max_model_calls: Mapped[int] = mapped_column(Integer, default=8)
     max_input_tokens: Mapped[int] = mapped_column(Integer, default=120_000)
     max_output_tokens: Mapped[int] = mapped_column(Integer, default=24_000)
+    max_steps: Mapped[int] = mapped_column(Integer, default=20, server_default="20")
+    budget_deadline_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    orchestration_json: Mapped[str] = mapped_column(
+        Text, default="{}", server_default="{}"
+    )
     is_demo: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_utc

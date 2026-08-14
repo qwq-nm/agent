@@ -18,6 +18,9 @@ REQUIRED_COLUMNS = {
         "max_model_calls",
         "max_input_tokens",
         "max_output_tokens",
+        "max_steps",
+        "budget_deadline_at",
+        "orchestration_json",
         "updated_at",
     },
     "job_runs": {
@@ -191,3 +194,44 @@ def test_alembic_accepts_percent_encoded_database_url():
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_task8_migration_round_trips_from_task6_and_has_no_drift(tmp_path):
+    repository_root = Path(__file__).resolve().parents[3]
+    database_path = tmp_path / "migration.db"
+    environment = os.environ.copy()
+    environment["DATABASE_URL"] = f"sqlite:///{database_path.as_posix()}"
+
+    def alembic(*args: str):
+        return subprocess.run(
+            [sys.executable, "-m", "alembic", *args],
+            cwd=repository_root,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    assert alembic("upgrade", "20260815_02").returncode == 0
+    engine = make_engine(environment["DATABASE_URL"])
+    task6_columns = {column["name"] for column in inspect(engine).get_columns("tasks")}
+    assert "orchestration_json" not in task6_columns
+
+    upgraded = alembic("upgrade", "head")
+    assert upgraded.returncode == 0, upgraded.stderr
+    task8_columns = {column["name"] for column in inspect(engine).get_columns("tasks")}
+    assert {"max_steps", "budget_deadline_at", "orchestration_json"} <= task8_columns
+
+    downgraded = alembic("downgrade", "20260815_02")
+    assert downgraded.returncode == 0, downgraded.stderr
+    downgraded_columns = {
+        column["name"] for column in inspect(engine).get_columns("tasks")
+    }
+    assert {"max_steps", "budget_deadline_at", "orchestration_json"}.isdisjoint(
+        downgraded_columns
+    )
+
+    reupgraded = alembic("upgrade", "head")
+    assert reupgraded.returncode == 0, reupgraded.stderr
+    drift = alembic("check")
+    assert drift.returncode == 0, drift.stdout + drift.stderr

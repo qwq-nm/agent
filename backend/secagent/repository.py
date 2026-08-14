@@ -249,6 +249,29 @@ class TaskRepository:
         row = self.session.get(TaskRow, task_id, populate_existing=True)
         return self._read(row) if row else None
 
+    def configure_task_budget(
+        self,
+        task_id: str,
+        *,
+        max_model_calls: int,
+        max_input_tokens: int,
+        max_output_tokens: int,
+        max_steps: int,
+    ) -> None:
+        values = (max_model_calls, max_input_tokens, max_output_tokens, max_steps)
+        if any(value < 0 for value in values):
+            raise ValueError("task budget limits must be non-negative")
+        row = self.session.get(TaskRow, task_id)
+        if row is None:
+            raise KeyError(task_id)
+        (
+            row.max_model_calls,
+            row.max_input_tokens,
+            row.max_output_tokens,
+            row.max_steps,
+        ) = values
+        self.session.flush()
+
     def list_tasks(self) -> list[TaskRead]:
         rows = self.session.scalars(
             select(TaskRow).order_by(TaskRow.created_at.desc())
@@ -304,15 +327,26 @@ class TaskRepository:
             select(JobRunRow).where(JobRunRow.command_id == command_id)
         )
 
-    def add_job_run(self, task_id: str, command_id: str) -> JobRunRow:
+    def add_job_run(
+        self, task_id: str, command_id: str, *, attempt: int = 1
+    ) -> JobRunRow:
+        if attempt < 1:
+            raise ValueError("job attempt must be positive")
         row = JobRunRow(
             task_id=task_id,
             command_id=command_id,
+            attempt=attempt,
             status="pending_publish",
         )
         self.session.add(row)
         self.session.flush()
         return row
+
+    def current_task_attempt(self, task_id: str) -> int:
+        value = self.session.scalar(
+            select(func.max(JobRunRow.attempt)).where(JobRunRow.task_id == task_id)
+        )
+        return int(value or 0)
 
     def claim_job_republish(self, command_id: str) -> bool:
         claimed = self.session.execute(
@@ -580,6 +614,203 @@ class TaskRepository:
         self.session.commit()
         return self._read(row)
 
+    def load_orchestration_checkpoint(
+        self, task_id: str, *, lease: Any, fingerprint: str
+    ) -> dict[str, Any]:
+        """Return only checkpoints belonging to the fenced logical attempt."""
+        self.require_job_fence(lease, task_id)
+        row = self.session.get(TaskRow, task_id)
+        if row is None:
+            raise KeyError(task_id)
+        try:
+            checkpoint = json.loads(row.orchestration_json or "{}")
+        except (TypeError, json.JSONDecodeError):
+            return {}
+        if (
+            not isinstance(checkpoint, dict)
+            or checkpoint.get("attempt") != lease.attempt
+            or checkpoint.get("fingerprint") != fingerprint
+            or not isinstance(checkpoint.get("stages", {}), dict)
+        ):
+            return {}
+        valid_stages: dict[str, Any] = {}
+        for stage, value in checkpoint["stages"].items():
+            if not isinstance(value, dict) or value.get("status") != "success":
+                continue
+            call_id = value.get("model_call_id")
+            call = self.session.get(ModelCallRow, call_id) if call_id else None
+            if (
+                call is not None
+                and call.task_id == task_id
+                and call.stage == stage
+                and call.status == "completed"
+            ):
+                valid_stages[stage] = value
+        checkpoint["stages"] = valid_stages
+        return checkpoint
+
+    def save_orchestration_checkpoint(
+        self,
+        task_id: str,
+        *,
+        lease: Any,
+        fingerprint: str,
+        stage: str,
+        data: dict[str, Any],
+        model_call_id: str,
+    ) -> None:
+        self.require_job_fence(lease, task_id)
+        row = self.session.get(TaskRow, task_id)
+        if row is None:
+            self.session.rollback()
+            raise KeyError(task_id)
+        try:
+            checkpoint = json.loads(row.orchestration_json or "{}")
+        except (TypeError, json.JSONDecodeError):
+            checkpoint = {}
+        if (
+            not isinstance(checkpoint, dict)
+            or checkpoint.get("attempt") != lease.attempt
+            or checkpoint.get("fingerprint") != fingerprint
+        ):
+            checkpoint = {
+                "attempt": lease.attempt,
+                "fingerprint": fingerprint,
+                "stages": {},
+            }
+        stages = checkpoint.setdefault("stages", {})
+        model_call = self.session.get(ModelCallRow, model_call_id)
+        if (
+            model_call is None
+            or model_call.task_id != task_id
+            or model_call.stage != stage
+            or model_call.status != "completed"
+        ):
+            self.session.rollback()
+            raise ValueError("successful model call is required for checkpoint")
+        stages[stage] = {
+            "status": "success",
+            "model_call_id": model_call_id,
+            "data": data,
+        }
+        row.orchestration_json = json.dumps(
+            checkpoint,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        self.session.commit()
+
+    def set_current_step_index(
+        self, task_id: str, step_index: int, *, lease: Any
+    ) -> None:
+        self.require_job_fence(lease, task_id)
+        row = self.session.get(TaskRow, task_id)
+        if row is None:
+            self.session.rollback()
+            raise KeyError(task_id)
+        row.current_step_index = step_index
+        self.session.commit()
+
+    def get_step(self, task_id: str, step_index: int) -> TaskStepRow | None:
+        return self.session.scalar(
+            select(TaskStepRow).where(
+                TaskStepRow.task_id == task_id,
+                TaskStepRow.step_index == step_index,
+            )
+        )
+
+    def budget_state(
+        self,
+        task_id: str,
+        *,
+        lease: Any,
+        timeout_seconds: int,
+        now: datetime,
+    ) -> dict[str, Any]:
+        self.require_job_fence(lease, task_id)
+        row = self.session.get(TaskRow, task_id)
+        if row is None:
+            self.session.rollback()
+            raise KeyError(task_id)
+        if row.budget_deadline_at is None:
+            row.budget_deadline_at = now + timedelta(seconds=timeout_seconds)
+            self.session.commit()
+        deadline = row.budget_deadline_at
+        if deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=timezone.utc)
+        usage = self.session.execute(
+            select(
+                func.count(ModelCallRow.id),
+                func.coalesce(func.sum(ModelCallRow.prompt_tokens), 0),
+                func.coalesce(func.sum(ModelCallRow.completion_tokens), 0),
+            ).where(ModelCallRow.task_id == task_id)
+        ).one()
+        step_count = self.session.scalar(
+            select(func.count(TaskStepRow.id)).where(TaskStepRow.task_id == task_id)
+        )
+        return {
+            "max_calls": row.max_model_calls,
+            "max_input_tokens": row.max_input_tokens,
+            "max_output_tokens": row.max_output_tokens,
+            "max_steps": row.max_steps,
+            "deadline": deadline,
+            "calls": int(usage[0]),
+            "input_tokens": int(usage[1]),
+            "output_tokens": int(usage[2]),
+            "steps": int(step_count or 0),
+        }
+
+    def fail_budget_exhausted(
+        self,
+        task_id: str,
+        *,
+        lease: Any,
+        dimension: str,
+        active_step_id: str | None,
+    ) -> None:
+        if dimension not in {
+            "model_calls",
+            "input_tokens",
+            "output_tokens",
+            "steps",
+            "deadline",
+        }:
+            raise ValueError("invalid budget dimension")
+        job = self.require_job_fence(lease, task_id)
+        task = self.session.get(TaskRow, task_id)
+        if task is None:
+            self.session.rollback()
+            raise KeyError(task_id)
+        if active_step_id is not None:
+            step = self.session.scalar(
+                select(TaskStepRow).where(
+                    TaskStepRow.id == active_step_id,
+                    TaskStepRow.task_id == task_id,
+                )
+            )
+            if step is not None and step.status not in {"success", "failed"}:
+                step.status = "failed"
+                step.result_json = json.dumps(
+                    {"error_code": "budget_exceeded", "dimension": dimension},
+                    separators=(",", ":"),
+                )
+                step.updated_at = datetime.now(timezone.utc)
+        task.status = TaskStatus.FAILED.value
+        task.status_version += 1
+        job.status = "failed"
+        job.finished_at = datetime.now(timezone.utc)
+        job.lease_expires_at = None
+        from secagent.services.task_events import TaskEventService
+
+        TaskEventService(self.session).append(
+            task_id,
+            "task.budget_exhausted",
+            {"dimension": dimension},
+            commit=False,
+        )
+        self.session.commit()
+
     def delete_task(self, task_id: str) -> None:
         row = self.session.get(TaskRow, task_id)
         if row is not None:
@@ -783,12 +1014,19 @@ class TaskRepository:
                 )
             ).all()
         )
-        verified_hashes = {
-            evidence.sha256
-            for evidence in persisted_evidence
-            if evidence.sha256
-            == hashlib.sha256(evidence.content.encode("utf-8")).hexdigest()
-        }
+        verified_hashes = set()
+        for evidence in persisted_evidence:
+            legacy = hashlib.sha256(evidence.content.encode("utf-8")).hexdigest()
+            canonical = hashlib.sha256(
+                json.dumps(
+                    evidence.content,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            if evidence.file_ref is None and evidence.sha256 in {legacy, canonical}:
+                verified_hashes.add(evidence.sha256)
         if verified_hashes != expected_hashes:
             return None
         return stored
@@ -904,7 +1142,13 @@ class TaskRepository:
         evidence_hashes: list[str] = []
         for item in evidence:
             content = str(item["content"])
-            digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            digest = str(item.get("sha256", ""))
+            if (
+                len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)
+            ):
+                self.session.rollback()
+                raise ValueError("invalid canonical evidence hash")
             evidence_hashes.append(digest)
             evidence_row = self.session.scalar(
                 select(EvidenceRow).where(
@@ -922,14 +1166,14 @@ class TaskRepository:
                     content=content,
                     sha256=digest,
                     confidence=float(item["confidence"]),
+                    file_ref=item.get("file_ref"),
                     metadata_json=json.dumps(item["metadata"], ensure_ascii=False),
                 )
                 self.session.add(evidence_row)
                 self.session.flush()
             elif (
                 evidence_row.content != content
-                or hashlib.sha256(evidence_row.content.encode("utf-8")).hexdigest()
-                != digest
+                or evidence_row.file_ref != item.get("file_ref")
             ):
                 self.session.rollback()
                 raise ValueError("conflicting canonical evidence")
@@ -1021,7 +1265,18 @@ class TaskRepository:
         if (
             values.get("evidence_type") != "runtime_error"
             or source != "agent_runner"
-            or hashlib.sha256(content.encode("utf-8")).hexdigest() != digest
+            or digest
+            not in {
+                hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                hashlib.sha256(
+                    json.dumps(
+                        content,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+            }
         ):
             self.session.rollback()
             raise ValueError("invalid canonical runtime error")
@@ -1065,7 +1320,18 @@ class TaskRepository:
             or row.evidence_type != "runtime_error"
             or row.content != content
             or row.source != source
-            or hashlib.sha256(row.content.encode("utf-8")).hexdigest() != digest
+            or digest
+            not in {
+                hashlib.sha256(row.content.encode("utf-8")).hexdigest(),
+                hashlib.sha256(
+                    json.dumps(
+                        row.content,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+            }
         ):
             self.session.rollback()
             raise ValueError("conflicting canonical runtime error")
@@ -1078,6 +1344,7 @@ class TaskRepository:
         content: str,
         *,
         is_demo: bool,
+        evidence_ids: list[str] | None = None,
         lease: Any | None = None,
     ) -> str:
         if lease is not None:
@@ -1086,13 +1353,34 @@ class TaskRepository:
         if task is None:
             self.session.rollback()
             raise KeyError(task_id)
+        cited_ids = list(evidence_ids or [])
+        if len(cited_ids) != len(set(cited_ids)):
+            self.session.rollback()
+            raise ValueError("invalid evidence citation for current task")
+        existing_ids = set(
+            self.session.scalars(
+                select(EvidenceRow.id).where(
+                    EvidenceRow.task_id == task_id,
+                    EvidenceRow.id.in_(cited_ids),
+                )
+            ).all()
+        ) if cited_ids else set()
+        if existing_ids != set(cited_ids):
+            self.session.rollback()
+            raise ValueError("invalid evidence citation for current task")
         task.is_demo = is_demo
         row = self.session.scalar(select(ReportRow).where(ReportRow.task_id == task_id))
         if row is None:
-            row = ReportRow(task_id=task_id, content=content, is_demo=is_demo)
+            row = ReportRow(
+                task_id=task_id,
+                content=content,
+                evidence_ids_json=json.dumps(cited_ids, separators=(",", ":")),
+                is_demo=is_demo,
+            )
             self.session.add(row)
         else:
             row.content = content
+            row.evidence_ids_json = json.dumps(cited_ids, separators=(",", ":"))
             row.is_demo = is_demo
         self.session.commit()
         return row.id

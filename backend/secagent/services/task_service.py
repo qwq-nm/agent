@@ -64,6 +64,7 @@ class TaskService:
         lease_seconds: int = 90,
         heartbeat_seconds: int = 15,
         max_auto_retries: int = 1,
+        task_timeout_seconds: int = 300,
         heartbeat_session_factory=None,
     ) -> None:
         self.repository = repository
@@ -76,7 +77,7 @@ class TaskService:
             lease_seconds=lease_seconds,
             max_auto_retries=max_auto_retries,
         )
-        ledger = LedgerService(repository)
+        ledger = LedgerService(repository, data_dir=data_dir)
         self.runner = AgentRunner(
             repository=repository,
             ledger=ledger,
@@ -87,6 +88,7 @@ class TaskService:
             executor=Executor(registry, ledger),
             critic=Critic(router, ledger),
             reporter=Reporter(router, ledger),
+            timeout_seconds=task_timeout_seconds,
         )
 
     def run(
@@ -230,7 +232,18 @@ class TaskService:
                 raise ValueError("previous task execution is still settling")
             require_transition(task.status, TaskStatus.QUEUED)
             try:
-                self.repository.add_job_run(task_id, command_id)
+                current_attempt = self.repository.current_task_attempt(task_id)
+                attempt = (
+                    current_attempt + 1
+                    if action == "retry"
+                    else max(1, current_attempt)
+                )
+                if attempt == 1:
+                    self.repository.add_job_run(task_id, command_id)
+                else:
+                    self.repository.add_job_run(
+                        task_id, command_id, attempt=attempt
+                    )
                 updated = self.repository.transition_task_status(
                     task_id, task.status, TaskStatus.QUEUED, commit=False
                 )
@@ -484,7 +497,11 @@ class TaskService:
         )
         if approved:
             command_id = self._command_id(task_id, "approve", idempotency_key)
-            self.repository.add_job_run(task_id, command_id)
+            self.repository.add_job_run(
+                task_id,
+                command_id,
+                attempt=max(1, self.repository.current_task_attempt(task_id)),
+            )
             self.repository.commit()
             return self._enqueue(
                 task_id,

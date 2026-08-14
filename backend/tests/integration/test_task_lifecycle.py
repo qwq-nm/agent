@@ -347,3 +347,24 @@ def test_concurrent_same_key_approval_acceptance_replays_winner(
 
     assert [response.status_code for response in responses] == [202, 202]
     assert len(fake_queue.enqueued) == 1
+
+
+def test_retry_creates_a_new_logical_attempt(
+    analyst_client, repository, fake_queue
+) -> None:
+    task = analyst_client.post(
+        "/api/tasks",
+        json={"goal": "Retry failed work", "authorization_scope": "Owned data"},
+    ).json()
+    first = repository.add_job_run(task["id"], "failed-attempt-1")
+    first.status = "failed"
+    repository.set_task_status(task["id"], TaskStatus.FAILED_RETRYABLE)
+
+    response = analyst_client.post(
+        f"/api/tasks/{task['id']}/retry",
+        headers={"Idempotency-Key": "retry-attempt-2"},
+    )
+
+    assert response.status_code == 202
+    queued = repository.get_job_run(fake_queue.enqueued[0].command_id)
+    assert queued.attempt == 2

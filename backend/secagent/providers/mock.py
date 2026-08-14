@@ -57,6 +57,9 @@ class MockProvider:
                 "findings": payload["findings"],
                 "recommendations": payload["recommendations"],
                 "uncertainties": payload["errors"],
+                "evidence_ids": [
+                    finding["id"] for finding in payload["findings"]
+                ],
             }
         else:
             raise ValueError(f"unsupported mock schema: {title}")
