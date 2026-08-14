@@ -35,12 +35,12 @@ class Settings(BaseSettings):
     deepseek_api_key: str | None = None
     deepseek_api_key_file: Path | None = None
     deepseek_base_url: str = "https://api.deepseek.com/v1"
-    deepseek_model: str = "deepseek-chat"
+    deepseek_model: str = "deepseek-v4-pro"
 
     glm_api_key: str | None = None
     glm_api_key_file: Path | None = None
     glm_base_url: str = "https://open.bigmodel.cn/api/paas/v4"
-    glm_model: str = "glm-4-flash"
+    glm_model: str = "glm-5.2"
 
     max_model_calls_per_task: int = 8
     max_input_tokens_per_task: int = 120_000
