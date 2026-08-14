@@ -117,7 +117,7 @@ class AuthService:
 
     def logout(self, raw_refresh_token: str | None) -> None:
         if raw_refresh_token:
-            self.repository.revoke_refresh_session(
+            self.repository.revoke_refresh_lineage(
                 hash_refresh_token(raw_refresh_token), datetime.now(timezone.utc)
             )
             self.session.commit()
@@ -141,7 +141,12 @@ class AuthService:
         )
 
     def _key(self) -> str:
-        key = self.settings.jwt_key()
+        try:
+            key = self.settings.jwt_key()
+        except (OSError, ValueError) as exc:
+            raise AuthenticationConfigurationError(
+                "JWT signing key is unavailable"
+            ) from exc
         if key is None:
             raise AuthenticationConfigurationError("JWT signing key is not configured")
         return key

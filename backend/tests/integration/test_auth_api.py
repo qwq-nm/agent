@@ -1,12 +1,18 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from threading import Event
 
 import jwt
+import pytest
 from fastapi import Depends
+from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from secagent.auth.dependencies import AuthenticatedUser, current_user, require_admin
 from secagent.cli import main as cli_main
 from secagent.db_models import RefreshSessionRow, UserRow
+from secagent.repository import AuthRepository
+from secagent.services.auth_service import AuthenticationError, AuthService
 
 
 def test_login_sets_refresh_cookie(client, seeded_analyst):
@@ -80,6 +86,25 @@ def test_missing_signing_key_does_not_persist_refresh_session(
         assert session.scalar(select(RefreshSessionRow)) is None
 
 
+def test_unreadable_signing_key_file_returns_generic_503(
+    app, seeded_analyst, tmp_path
+):
+    missing_file = tmp_path / "private" / "signing-key"
+    app.state.settings.jwt_signing_key_file = missing_file
+
+    with TestClient(app, raise_server_exceptions=False) as non_raising_client:
+        response = non_raising_client.post(
+            "/api/auth/login",
+            json={"username": "alice", "password": "Correct-Horse-9"},
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Authentication unavailable"}
+    assert str(missing_file) not in response.text
+    with app.state.session_factory() as session:
+        assert session.scalar(select(RefreshSessionRow)) is None
+
+
 def test_refresh_rotates_and_replay_is_rejected(client, app, seeded_analyst):
     login = client.post(
         "/api/auth/login",
@@ -120,6 +145,83 @@ def test_logout_revokes_refresh_session_and_clears_cookie(client, app, seeded_an
     with app.state.session_factory() as session:
         stored = session.scalar(select(RefreshSessionRow))
         assert stored.revoked_at is not None
+
+
+def test_logout_with_rotated_token_revokes_its_current_successor(
+    client, app, seeded_analyst
+):
+    login = client.post(
+        "/api/auth/login",
+        json={"username": "alice", "password": "Correct-Horse-9"},
+    )
+    first_raw = login.cookies["refresh_token"]
+    refreshed = client.post("/api/auth/refresh")
+    second_raw = refreshed.cookies["refresh_token"]
+
+    client.cookies.clear()
+    client.cookies.set("refresh_token", first_raw, path="/api/auth")
+    assert client.post("/api/auth/logout").status_code == 204
+
+    client.cookies.set("refresh_token", second_raw, path="/api/auth")
+    assert client.post("/api/auth/refresh").status_code == 401
+    with app.state.session_factory() as session:
+        rows = session.scalars(select(RefreshSessionRow)).all()
+        assert len(rows) == 2
+        assert all(row.revoked_at is not None for row in rows)
+
+
+def test_logout_linearizes_after_an_in_flight_rotation(app, seeded_analyst):
+    with app.state.session_factory() as session:
+        first_raw = AuthService.from_session(
+            session, app.state.settings
+        ).login("alice", "Correct-Horse-9").refresh_token
+
+    rotation_claimed = Event()
+    allow_rotation_to_commit = Event()
+    logout_entered_repository = Event()
+
+    class PausedRotationRepository(AuthRepository):
+        def add_refresh_session(self, user_id, token_hash, expires_at):
+            rotation_claimed.set()
+            assert allow_rotation_to_commit.wait(timeout=5)
+            return super().add_refresh_session(user_id, token_hash, expires_at)
+
+    class AnnouncedLogoutRepository(AuthRepository):
+        def revoke_refresh_lineage(self, token_hash, now):
+            logout_entered_repository.set()
+            return super().revoke_refresh_lineage(token_hash, now)
+
+    def rotate():
+        with app.state.session_factory() as session:
+            service = AuthService(
+                session,
+                app.state.settings,
+                PausedRotationRepository(session),
+            )
+            return service.refresh(first_raw).refresh_token
+
+    def logout():
+        with app.state.session_factory() as session:
+            service = AuthService(
+                session,
+                app.state.settings,
+                AnnouncedLogoutRepository(session),
+            )
+            service.logout(first_raw)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        rotation_future = executor.submit(rotate)
+        assert rotation_claimed.wait(timeout=5)
+        logout_future = executor.submit(logout)
+        assert logout_entered_repository.wait(timeout=5)
+        allow_rotation_to_commit.set()
+        second_raw = rotation_future.result(timeout=5)
+        logout_future.result(timeout=5)
+
+    with app.state.session_factory() as session:
+        service = AuthService.from_session(session, app.state.settings)
+        with pytest.raises(AuthenticationError):
+            service.refresh(second_raw)
 
 
 def test_current_user_and_require_admin_dependencies(app, admin_client, analyst_client):

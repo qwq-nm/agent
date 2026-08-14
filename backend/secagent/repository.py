@@ -2,7 +2,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import case, select, update
 from sqlalchemy.orm import Session
 
 from secagent.db_models import (
@@ -81,16 +81,38 @@ class AuthRepository:
         self.session.flush()
         return replacement, user
 
-    def revoke_refresh_session(self, token_hash: str, now: datetime) -> bool:
-        result = self.session.execute(
-            update(RefreshSessionRow)
-            .where(
-                RefreshSessionRow.token_hash == token_hash,
-                RefreshSessionRow.revoked_at.is_(None),
-            )
-            .values(revoked_at=now)
+    def revoke_refresh_lineage(self, token_hash: str, now: datetime) -> bool:
+        """Revoke a refresh token and every committed replacement atomically.
+
+        Updating even an already-revoked row acquires the same database row lock
+        used by rotation. The winner therefore establishes the order; logout
+        either revokes before rotation can claim the row, or observes and follows
+        the replacement committed by rotation.
+        """
+        revoked_at = case(
+            (RefreshSessionRow.revoked_at.is_(None), now),
+            else_=RefreshSessionRow.revoked_at,
         )
-        return result.rowcount == 1
+        current = self.session.execute(
+            update(RefreshSessionRow)
+            .where(RefreshSessionRow.token_hash == token_hash)
+            .values(revoked_at=revoked_at)
+            .returning(RefreshSessionRow.id, RefreshSessionRow.replaced_by_id)
+        ).one_or_none()
+        found = current is not None
+        visited: set[str] = set()
+
+        while current is not None and current.replaced_by_id is not None:
+            if current.id in visited:
+                break
+            visited.add(current.id)
+            current = self.session.execute(
+                update(RefreshSessionRow)
+                .where(RefreshSessionRow.id == current.replaced_by_id)
+                .values(revoked_at=revoked_at)
+                .returning(RefreshSessionRow.id, RefreshSessionRow.replaced_by_id)
+            ).one_or_none()
+        return found
 
 
 class TaskRepository:
