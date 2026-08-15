@@ -19,6 +19,7 @@ from secagent.auth.stream_tickets import (
 from secagent.config import Settings, get_settings
 from secagent.db import make_session_factory
 from secagent.providers import build_providers
+from secagent.providers.runtime import ProviderRuntimeFactory
 from secagent.providers.router import ModelRouter
 from secagent.queue.base import JobQueue
 from secagent.queue.celery_queue import CeleryJobQueue
@@ -65,6 +66,7 @@ def create_app(
     install_error_handlers(app)
     app.state.settings = resolved_settings
     app.state.session_factory = session_factory
+    app.state.provider_runtime_factory = ProviderRuntimeFactory(resolved_settings)
     app.state.job_queue = job_queue or CeleryJobQueue()
     replay_store = (
         FakeTicketReplayStore()
@@ -75,7 +77,12 @@ def create_app(
         resolved_settings.jwt_key(), replay_store
     )
     app.state.model_router = ModelRouter(
-        build_providers(app.state.settings), mode=app.state.settings.model_mode
+        build_providers(
+            app.state.settings,
+            allow_missing_live=True,
+        ),
+        mode=app.state.settings.model_mode,
+        allow_missing=app.state.settings.model_mode == "live",
     )
     allowed_hosts = {
         host.strip()

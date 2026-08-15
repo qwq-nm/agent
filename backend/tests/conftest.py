@@ -41,9 +41,10 @@ def run_queued_job(app, fake_queue):
                 job.task_id,
                 job.command_id,
                 app.state.session_factory,
-                app.state.model_router,
+                None,
                 app.state.tool_registry,
                 app.state.settings.data_dir,
+                settings=app.state.settings,
             )
         )
 

@@ -1,3 +1,5 @@
+from collections.abc import Mapping
+
 import httpx
 
 from secagent.config import Settings
@@ -16,11 +18,21 @@ def build_providers(
     settings: Settings,
     *,
     client: httpx.AsyncClient | None = None,
+    provider_keys: Mapping[str, str | None] | None = None,
+    allow_missing_live: bool = False,
 ) -> dict[str, ModelProvider]:
     providers: dict[str, ModelProvider] = {"mock": MockProvider()}
-    deepseek_key = settings.deepseek_key()
-    glm_key = settings.glm_key()
-    if settings.model_mode == "live":
+    keys = (
+        provider_keys
+        if provider_keys is not None
+        else {
+            "deepseek": settings.deepseek_key(),
+            "glm": settings.glm_key(),
+        }
+    )
+    deepseek_key = keys.get("deepseek")
+    glm_key = keys.get("glm")
+    if settings.model_mode == "live" and not allow_missing_live:
         for name, key in (("deepseek", deepseek_key), ("glm", glm_key)):
             if not key:
                 raise ProviderUnavailable(

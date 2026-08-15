@@ -6,6 +6,9 @@ class CheckProvider:
     name = "deepseek"
     model = "deepseek-v4-pro"
 
+    def __init__(self) -> None:
+        self.client = TrackingClient()
+
     async def complete(self, request):
         del request
         return ModelResponse(
@@ -17,6 +20,14 @@ class CheckProvider:
             prompt_tokens=12,
             completion_tokens=8,
         )
+
+
+class TrackingClient:
+    def __init__(self) -> None:
+        self.is_closed = False
+
+    async def aclose(self) -> None:
+        self.is_closed = True
 
 
 def test_live_is_process_only(client):
@@ -48,8 +59,15 @@ def test_admin_worker_summary_is_safe_and_analysts_are_denied(
     assert analyst_client.get("/api/admin/workers").status_code == 403
 
 
-def test_admin_provider_check_returns_safe_runtime_metadata(admin_client, app):
-    app.state.model_router = ModelRouter({"deepseek": CheckProvider()}, mode="auto")
+def test_admin_provider_check_returns_safe_runtime_metadata(
+    admin_client, app, monkeypatch
+) -> None:
+    provider = CheckProvider()
+    monkeypatch.setattr(
+        app.state.provider_runtime_factory,
+        "build",
+        lambda _session: ModelRouter({"deepseek": provider}, mode="auto"),
+    )
 
     response = admin_client.post("/api/models/check", json={"provider": "deepseek"})
 
@@ -64,3 +82,4 @@ def test_admin_provider_check_returns_safe_runtime_metadata(admin_client, app):
         "latency_ms": 120,
         "error_code": None,
     }
+    assert provider.client.is_closed is True

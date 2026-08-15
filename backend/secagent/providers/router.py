@@ -18,12 +18,18 @@ FIXED_PROVIDER = {
 class ModelRouter:
     defaults = FIXED_PROVIDER
 
-    def __init__(self, providers: dict[str, ModelProvider], mode: str = "auto") -> None:
+    def __init__(
+        self,
+        providers: dict[str, ModelProvider],
+        mode: str = "auto",
+        *,
+        allow_missing: bool = False,
+    ) -> None:
         if mode not in {"auto", "live", "mock"}:
             raise ValueError(f"unsupported model mode: {mode}")
         self.providers = providers
         self.mode = mode
-        if mode == "live":
+        if mode == "live" and not allow_missing:
             for name in dict.fromkeys(FIXED_PROVIDER.values()):
                 self._require_provider(name)
         elif mode == "mock":

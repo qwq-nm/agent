@@ -10,10 +10,10 @@ from celery.signals import worker_process_shutdown
 from sqlalchemy.orm import Session, sessionmaker
 
 from secagent.agents.executor import DemoEvidenceTool
-from secagent.config import get_settings
+from secagent.config import Settings, get_settings
 from secagent.db import make_session_factory
-from secagent.providers import build_providers
 from secagent.providers.router import ModelRouter
+from secagent.providers.runtime import ProviderRuntimeFactory
 from secagent.queue.celery_app import celery
 from secagent.queue.celery_queue import CeleryJobQueue
 from secagent.repository import TaskRepository
@@ -38,7 +38,6 @@ from secagent.security.url_guard import UrlGuard
 @dataclass
 class _WorkerRuntime:
     runner: asyncio.Runner
-    router: ModelRouter
     registry: ToolRegistry
     run_lock: RLock
 
@@ -48,7 +47,6 @@ class _WorkerRuntime:
 
     def close(self) -> None:
         with self.run_lock:
-            self.runner.run(self.router.aclose())
             self.runner.close()
 
 
@@ -82,7 +80,7 @@ async def execute_queued_task(
     task_id: str,
     command_id: str,
     session_factory: sessionmaker[Session],
-    router: ModelRouter,
+    router: ModelRouter | None,
     registry: ToolRegistry,
     data_dir: Path,
     *,
@@ -91,23 +89,32 @@ async def execute_queued_task(
     heartbeat_seconds: int = 15,
     max_auto_retries: int = 1,
     task_timeout_seconds: int = 300,
+    settings: Settings | None = None,
 ) -> None:
     with session_factory() as session:
-        service = TaskService(
-            TaskRepository(session),
-            router,
-            registry,
-            data_dir,
-            CeleryJobQueue(),
-            lease_seconds=lease_seconds,
-            heartbeat_seconds=heartbeat_seconds,
-            max_auto_retries=max_auto_retries,
-            task_timeout_seconds=task_timeout_seconds,
-            heartbeat_session_factory=session_factory,
-        )
-        await service.execute_queued(
-            task_id, command_id, worker_id or f"worker-{uuid4()}"
-        )
+        task_router = router
+        if task_router is None:
+            if settings is None:
+                raise ValueError("settings are required when router is omitted")
+            task_router = ProviderRuntimeFactory(settings).build(session)
+        try:
+            service = TaskService(
+                TaskRepository(session),
+                task_router,
+                registry,
+                data_dir,
+                CeleryJobQueue(),
+                lease_seconds=lease_seconds,
+                heartbeat_seconds=heartbeat_seconds,
+                max_auto_retries=max_auto_retries,
+                task_timeout_seconds=task_timeout_seconds,
+                heartbeat_session_factory=session_factory,
+            )
+            await service.execute_queued(
+                task_id, command_id, worker_id or f"worker-{uuid4()}"
+            )
+        finally:
+            await task_router.aclose()
 
 
 def _get_worker_runtime(settings) -> _WorkerRuntime:
@@ -121,9 +128,6 @@ def _get_worker_runtime(settings) -> _WorkerRuntime:
             }
             _runtime = _WorkerRuntime(
                 runner=asyncio.Runner(),
-                router=ModelRouter(
-                    build_providers(settings), mode=settings.model_mode
-                ),
                 registry=build_worker_registry(allowed_hosts),
                 run_lock=RLock(),
             )
@@ -162,7 +166,7 @@ def run_task(task_id: str, command_id: str) -> None:
             task_id,
             command_id,
             make_session_factory(settings.database_url),
-            runtime.router,
+            None,
             runtime.registry,
             settings.data_dir,
             worker_id=getattr(run_task.request, "id", None),
@@ -170,5 +174,6 @@ def run_task(task_id: str, command_id: str) -> None:
             heartbeat_seconds=settings.job_heartbeat_seconds,
             max_auto_retries=settings.job_auto_retries,
             task_timeout_seconds=settings.task_timeout_seconds,
+            settings=settings,
         ),
     )

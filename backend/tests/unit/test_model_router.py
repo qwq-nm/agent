@@ -172,6 +172,19 @@ async def test_build_providers_reads_secret_files(tmp_path) -> None:
     await ModelRouter(providers, mode="live").aclose()
 
 
+def test_explicit_provider_key_snapshot_does_not_fall_back_to_settings() -> None:
+    providers = build_providers(
+        Settings(
+            model_mode="auto",
+            deepseek_api_key="environment-deepseek-key",
+            glm_api_key="environment-glm-key",
+        ),
+        provider_keys={},
+    )
+
+    assert set(providers) == {"mock"}
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [("deepseek_model", "gpt-5"), ("glm_model", "GPT-4o")],
@@ -227,7 +240,7 @@ def test_app_lifespan_closes_shared_provider_client(tmp_path) -> None:
     assert provider.client.is_closed is True
 
 
-def test_sync_worker_runtime_reuses_and_closes_one_provider_pool(tmp_path) -> None:
+def test_sync_worker_runtime_reuses_runner_and_registry(tmp_path) -> None:
     _shutdown_worker_runtime()
     settings = Settings(
         database_url=f"sqlite:///{tmp_path / 'worker.db'}",
@@ -238,15 +251,11 @@ def test_sync_worker_runtime_reuses_and_closes_one_provider_pool(tmp_path) -> No
 
     first = _get_worker_runtime(settings)
     second = _get_worker_runtime(settings)
-    client = first.router.providers["deepseek"].client
-
     assert first is second
     assert first.runner is second.runner
-    assert client is first.router.providers["glm"].client
-    assert client.is_closed is False
+    assert first.registry is second.registry
 
     _shutdown_worker_runtime()
-    assert client.is_closed is True
 
 
 def test_worker_runtime_is_thread_safe_and_shutdown_runs_once(
@@ -259,18 +268,18 @@ def test_worker_runtime_is_thread_safe_and_shutdown_runs_once(
         deepseek_api_key="ds-key",
         glm_api_key="glm-key",
     )
-    original_build = worker_module.build_providers
+    original_registry = worker_module.build_worker_registry
     build_count = 0
     build_count_lock = threading.Lock()
 
-    def slow_build(settings):
+    def slow_build(allowed_hosts):
         nonlocal build_count
         with build_count_lock:
             build_count += 1
         time.sleep(0.05)
-        return original_build(settings)
+        return original_registry(allowed_hosts)
 
-    monkeypatch.setattr(worker_module, "build_providers", slow_build)
+    monkeypatch.setattr(worker_module, "build_worker_registry", slow_build)
     start = threading.Barrier(2)
     runtimes = []
     results = []
@@ -299,21 +308,18 @@ def test_worker_runtime_is_thread_safe_and_shutdown_runs_once(
     assert sorted(results) == [0, 1]
     assert build_count == 1
     assert len({id(runtime) for runtime in runtimes}) == 1
-    client_ids = {
-        id(runtime.router.providers["deepseek"].client) for runtime in runtimes
-    }
-    assert len(client_ids) == 1
+    assert len({id(runtime.registry) for runtime in runtimes}) == 1
 
     runtime = runtimes[0]
-    original_close = runtime.router.aclose
+    original_close = runtime.close
     close_count = 0
 
-    async def counted_close() -> None:
+    def counted_close() -> None:
         nonlocal close_count
         close_count += 1
-        await original_close()
+        original_close()
 
-    runtime.router.aclose = counted_close
+    runtime.close = counted_close
     stop = threading.Barrier(2)
 
     def shutdown() -> None:
@@ -327,9 +333,6 @@ def test_worker_runtime_is_thread_safe_and_shutdown_runs_once(
         thread.join()
 
     assert close_count == 1
-    assert runtime.router.providers["deepseek"].client.is_closed is True
-
-
 def test_worker_shutdown_waits_for_inflight_runtime_call(tmp_path) -> None:
     _shutdown_worker_runtime()
     settings = Settings(
