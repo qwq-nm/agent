@@ -151,7 +151,7 @@ class _MixedCriticDeepSeekStub(_ReplanningDeepSeekStub):
                 provider=self.name,
                 model=self.model,
                 data={
-                    "is_complete": not incomplete,
+                    "is_complete": True,
                     "confidence": 0.3 if incomplete else 0.9,
                     "reason": "Need another observation" if incomplete else "sufficient",
                     "missing_evidence": (

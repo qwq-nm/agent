@@ -55,10 +55,14 @@ class Critic:
             for item in decision.missing_evidence
             if item.kind is MissingEvidenceKind.FACTUAL
         ]
-        if missing_evidence != decision.missing_evidence:
+        is_complete = not missing_evidence
+        if (
+            missing_evidence != decision.missing_evidence
+            or is_complete != decision.is_complete
+        ):
             decision = decision.model_copy(
                 update={
-                    "is_complete": decision.is_complete or not missing_evidence,
+                    "is_complete": is_complete,
                     "missing_evidence": missing_evidence,
                 }
             )

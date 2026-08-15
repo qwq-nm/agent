@@ -252,6 +252,44 @@ def test_reset_step_invalidates_prior_approval(repository) -> None:
     assert repository.session.get(ApprovalRow, approval_id).status == "superseded"
 
 
+def test_failed_step_retry_with_same_params_invalidates_prior_approval(
+    repository,
+) -> None:
+    task = repository.create_task(
+        TaskCreate(
+            goal="Retry the same authorized request",
+            authorization_scope="Only the configured target host",
+        )
+    )
+    step = PlanStep(
+        name="Fetch target",
+        purpose="Collect an authorized observation",
+        tool_name="http_fetch",
+        params={"url": "https://target.test/"},
+        risk_level=RiskLevel.MEDIUM,
+        need_human_confirm=True,
+    )
+    key = repository.step_idempotency_key(task.id, 1, step)
+    step_id = repository.add_step(task.id, 1, step, idempotency_key=key)
+    approval_id = repository.add_approval(
+        task.id,
+        step_id=step_id,
+        tool_name=step.tool_name,
+        risk_level=step.risk_level.value,
+        params_summary='{"url": "https://target.test/"}',
+    )
+    repository.decide_latest_approval(
+        task.id, approved=True, reason="Approve one attempt"
+    )
+    repository.update_step(step_id, "failed")
+
+    assert repository.add_step(task.id, 1, step, idempotency_key=key) == step_id
+    assert not repository.is_tool_approved(
+        task.id, step.tool_name, step_id=step_id
+    )
+    assert repository.session.get(ApprovalRow, approval_id).status == "superseded"
+
+
 def test_old_step_attempt_evidence_cannot_complete_new_attempt(repository) -> None:
     task = repository.create_task(
         TaskCreate(goal="Attempt-bound scan", authorization_scope="Owned source")
