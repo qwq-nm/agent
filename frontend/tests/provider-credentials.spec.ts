@@ -136,13 +136,16 @@ it('allows a GLM save while a DeepSeek save is pending', async () => {
   await flushPromises()
 })
 
-it('opens an accessible focused clear dialog and closes it with Escape', async () => {
+it('traps dialog focus and restores it to the invoking clear button', async () => {
   const wrapper = mount(SystemView, { attachTo: document.body })
   await flushPromises()
+  const opener = wrapper.get('[data-action="clear-provider-deepseek"]')
+  const openerElement = opener.element as HTMLButtonElement
 
-  await wrapper.get('[data-action="clear-provider-deepseek"]').trigger('click')
+  openerElement.focus()
+  await opener.trigger('click')
   await flushPromises()
-  const dialog = wrapper.get('[data-form="clear-provider"]')
+  let dialog = wrapper.get('[data-form="clear-provider"]')
   const title = wrapper.get('#clear-provider-title')
 
   expect(dialog.attributes('role')).toBe('dialog')
@@ -151,8 +154,45 @@ it('opens an accessible focused clear dialog and closes it with Escape', async (
   expect(title.text()).toContain('清除 Provider 密钥')
   expect(dialog.element.contains(document.activeElement)).toBe(true)
 
+  let controls = dialog.findAll<HTMLButtonElement>('button:not([disabled])')
+  const firstControl = controls[0]
+  const lastControl = controls[controls.length - 1]
+  lastControl.element.focus()
+  await lastControl.trigger('keydown', { key: 'Tab' })
+  expect(document.activeElement).toBe(firstControl.element)
+
+  firstControl.element.focus()
+  await firstControl.trigger('keydown', { key: 'Tab', shiftKey: true })
+  expect(document.activeElement).toBe(lastControl.element)
+
   await dialog.trigger('keydown', { key: 'Escape' })
+  await flushPromises()
   expect(wrapper.find('[data-form="clear-provider"]').exists()).toBe(false)
+  expect(document.activeElement).toBe(openerElement)
+
+  await opener.trigger('click')
+  await flushPromises()
+  dialog = wrapper.get('[data-form="clear-provider"]')
+  await dialog.get('.dialog-actions button[type="button"]').trigger('click')
+  await flushPromises()
+  expect(wrapper.find('[data-form="clear-provider"]').exists()).toBe(false)
+  expect(document.activeElement).toBe(openerElement)
+
+  api.listProviderCredentials.mockResolvedValueOnce([
+    { provider: 'deepseek', configured: false, key_hint: null, updated_at: '2026-08-15T04:00:00Z' },
+    { provider: 'glm', configured: false, key_hint: null, updated_at: null },
+  ])
+  await opener.trigger('click')
+  await flushPromises()
+  dialog = wrapper.get('[data-form="clear-provider"]')
+  controls = dialog.findAll<HTMLButtonElement>('button:not([disabled])')
+  expect(controls.length).toBeGreaterThan(1)
+  await dialog.trigger('submit')
+  await flushPromises()
+  expect(api.clearProviderCredential).toHaveBeenCalledWith('deepseek')
+  expect(wrapper.find('[data-form="clear-provider"]').exists()).toBe(false)
+  expect(document.activeElement).toBe(openerElement)
+
   wrapper.unmount()
 })
 

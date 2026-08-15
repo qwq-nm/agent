@@ -54,6 +54,7 @@ button, input, textarea, select { font: inherit; }
 .ghost-button:hover:not(:disabled) { color: white; border-color: rgba(53,216,230,.5); background: rgba(53,216,230,.1); }
 .ghost-button.danger { color: var(--danger); border-color: rgba(255,116,133,.25); }
 .ghost-button:disabled, .icon-button:disabled { opacity: .5; cursor: wait; }
+.icon-button[aria-disabled="true"] { opacity: .5; cursor: not-allowed; }
 .icon-button { display: grid; place-items: center; width: 32px; height: 32px; padding: 0; color: var(--muted); background: transparent; border: 1px solid var(--line); border-radius: 7px; cursor: pointer; font-size: 20px; line-height: 1; }
 .icon-button:hover { color: white; border-color: var(--cyan); }
 .panel-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding: 20px 22px; border-bottom: 1px solid var(--line); }

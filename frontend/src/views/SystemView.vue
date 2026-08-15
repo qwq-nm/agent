@@ -14,7 +14,9 @@ const credentials = ref<ProviderCredential[]>([])
 const providerKeys = ref<Record<ProviderName, string>>({ deepseek: '', glm: '' })
 const credentialBusy = ref<Record<ProviderName, boolean>>({ deepseek: false, glm: false })
 const pendingClearProvider = ref<ProviderName | null>(null)
+const clearDialog = ref<HTMLFormElement | null>(null)
 const clearDialogCloseButton = ref<HTMLButtonElement | null>(null)
+const clearDialogInvoker = ref<HTMLButtonElement | null>(null)
 const error = ref('')
 const providers: ProviderName[] = ['deepseek', 'glm']
 
@@ -59,15 +61,38 @@ async function saveProviderCredential(provider: ProviderName) {
   }
 }
 
-async function requestClearProviderCredential(provider: ProviderName) {
-  if (credentialBusy.value[provider]) return
+async function requestClearProviderCredential(provider: ProviderName, event: MouseEvent) {
+  if (credentialBusy.value[provider] || !credential(provider).configured) return
+  clearDialogInvoker.value = event.currentTarget instanceof HTMLButtonElement ? event.currentTarget : null
   pendingClearProvider.value = provider
   await nextTick()
   clearDialogCloseButton.value?.focus()
 }
 
-function cancelClearProviderCredential() {
+async function closeClearProviderDialog() {
+  const invoker = clearDialogInvoker.value
   pendingClearProvider.value = null
+  await nextTick()
+  invoker?.focus()
+  clearDialogInvoker.value = null
+}
+
+function trapClearDialogFocus(event: KeyboardEvent) {
+  const controls = Array.from(clearDialog.value?.querySelectorAll<HTMLElement>('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])') ?? [])
+  if (!controls.length) return
+  const first = controls[0]
+  const last = controls[controls.length - 1]
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault()
+    first.focus()
+  }
+}
+
+async function cancelClearProviderCredential() {
+  await closeClearProviderDialog()
 }
 
 async function clearProviderCredential() {
@@ -75,15 +100,17 @@ async function clearProviderCredential() {
   if (!provider || credentialBusy.value[provider]) return
   credentialBusy.value[provider] = true
   error.value = ''
+  let cleared = false
   try {
     await api.clearProviderCredential(provider)
     await refreshCredentials()
-    pendingClearProvider.value = null
+    cleared = true
   } catch (value) {
     error.value = value instanceof Error ? value.message : 'Provider 密钥清除失败'
   } finally {
     providerKeys.value[provider] = ''
     credentialBusy.value[provider] = false
+    if (cleared) await closeClearProviderDialog()
   }
 }
 
@@ -130,14 +157,14 @@ onMounted(load)
           <label class="credential-key"><span class="sr-only">{{ provider }} API Key</span><input v-model="providerKeys[provider]" :name="`provider-key-${provider}`" type="password" autocomplete="new-password" :disabled="credentialBusy[provider]"></label>
           <div class="credential-actions">
             <button class="icon-button" :data-action="`save-provider-${provider}`" type="button" :disabled="credentialBusy[provider] || !providerKeys[provider]" :aria-label="`${provider} 保存密钥`" :title="`${provider} 保存密钥`" @click="saveProviderCredential(provider)"><DocumentChecked /></button>
-            <button class="icon-button danger" :data-action="`clear-provider-${provider}`" type="button" :disabled="credentialBusy[provider] || !credential(provider).configured" :aria-label="`${provider} 清除密钥`" :title="`${provider} 清除密钥`" @click="requestClearProviderCredential(provider)"><Delete /></button>
+            <button class="icon-button danger" :data-action="`clear-provider-${provider}`" type="button" :disabled="credentialBusy[provider]" :aria-disabled="!credential(provider).configured || undefined" :aria-label="`${provider} 清除密钥`" :title="`${provider} 清除密钥`" @click="requestClearProviderCredential(provider, $event)"><Delete /></button>
           </div>
         </article>
       </div>
     </section>
     <section class="panel readiness-panel"><h2>依赖检查</h2><div v-for="(value, key) in readiness.checks" :key="key"><span>{{ key }}</span><b :data-status="value">{{ value }}</b></div></section>
     <div v-if="pendingClearProvider" class="dialog-backdrop" role="presentation">
-      <form class="admin-dialog panel" data-form="clear-provider" role="dialog" aria-modal="true" aria-labelledby="clear-provider-title" @keydown.esc="cancelClearProviderCredential" @submit.prevent="clearProviderCredential">
+      <form ref="clearDialog" class="admin-dialog panel" data-form="clear-provider" role="dialog" aria-modal="true" aria-labelledby="clear-provider-title" @keydown.esc.prevent="cancelClearProviderCredential" @keydown.tab="trapClearDialogFocus" @submit.prevent="clearProviderCredential">
         <header class="panel-title"><div><p class="eyebrow">DISRUPTIVE CHANGE</p><h2 id="clear-provider-title">清除 Provider 密钥</h2></div><button ref="clearDialogCloseButton" type="button" class="icon-button" aria-label="关闭" title="关闭" @click="cancelClearProviderCredential"><Close /></button></header>
         <div class="admin-dialog-body"><p class="dialog-context">将清除 {{ pendingClearProvider }} 的已保存密钥。</p></div>
         <footer class="dialog-actions"><button type="button" class="ghost-button" @click="cancelClearProviderCredential">取消</button><button class="ghost-button danger" data-action="confirm-clear-provider" type="submit" :disabled="credentialBusy[pendingClearProvider]">确认清除</button></footer>
