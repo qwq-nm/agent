@@ -55,6 +55,16 @@ class HttpRequest(BaseTool):
         self.timeout_seconds = timeout_seconds
 
     async def run(self, params: dict, context: ToolContext) -> ToolResult:
+        try:
+            return await self._run_request(params, context)
+        except httpx.TimeoutException:
+            return self._request_failure(params, "http_timeout")
+        except httpx.RequestError:
+            return self._request_failure(params, "http_transport_error")
+
+    async def _run_request(
+        self, params: dict, context: ToolContext
+    ) -> ToolResult:
         del context
         current = self._require_url(params.get("url"))
         method = self._method(params.get("method", "GET"))
@@ -139,6 +149,28 @@ class HttpRequest(BaseTool):
                         ],
                         warnings=warnings,
                     )
+
+    @staticmethod
+    def _request_failure(params: dict, error_code: str) -> ToolResult:
+        safe_url = redact_text(str(params.get("url", "")), include_generic_key=True)
+        return ToolResult(
+            success=False,
+            summary="HTTP 请求未获得可分析的响应",
+            error=error_code,
+            evidence=[
+                {
+                    "evidence_type": "http_observation",
+                    "source": safe_url,
+                    "content": f"HTTP request failed before response: {error_code}",
+                    "confidence": 1.0,
+                    "metadata": {
+                        "final_url": safe_url,
+                        "error_code": error_code,
+                    },
+                }
+            ],
+            warnings=["目标未返回可分析的 HTTP 响应"],
+        )
 
     async def _read_response(
         self, response: httpx.Response

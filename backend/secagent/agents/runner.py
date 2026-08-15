@@ -23,6 +23,7 @@ from secagent.domain import (
     RiskLevel,
     TaskRead,
     TaskRunResult,
+    TaskScene,
     TaskStatus,
     ToolResult,
 )
@@ -265,6 +266,9 @@ class AgentRunner:
                     )
                     self._update_runtime(step.tool_name, result, runtime)
                     if not result.success:
+                        if parsed.scene is TaskScene.WEB_ANALYSIS:
+                            active_step_id = None
+                            break
                         raise RuntimeError(result.error or result.summary)
                     active_step_id = None
 

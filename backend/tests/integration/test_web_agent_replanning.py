@@ -125,6 +125,38 @@ class _ObservationTool(BaseTool):
         )
 
 
+class _FailThenObserveTool(_ObservationTool):
+    async def run(self, params: dict, context: ToolContext) -> ToolResult:
+        probe = params["probe"]
+        self.calls.append(probe)
+        if len(self.calls) == 1:
+            return ToolResult(
+                success=False,
+                summary="HTTP request did not receive a response",
+                error="http_transport_error",
+                evidence=[
+                    {
+                        "evidence_type": "http_observation",
+                        "source": "https://target.test/",
+                        "content": "HTTP request failed: http_transport_error",
+                        "confidence": 1.0,
+                    }
+                ],
+            )
+        return ToolResult(
+            success=True,
+            summary=f"observed {probe}",
+            evidence=[
+                {
+                    "evidence_type": "http_observation",
+                    "source": f"https://target.test/{probe}",
+                    "content": f"observed {probe}",
+                    "confidence": 1.0,
+                }
+            ],
+        )
+
+
 def test_web_agent_replans_from_redacted_observations_and_completes(
     analyst_client, app, fake_queue
 ) -> None:
@@ -180,6 +212,49 @@ def test_web_agent_replans_from_redacted_observations_and_completes(
     with app.state.session_factory() as session:
         checkpoint = json.loads(session.get(TaskRow, task["id"]).orchestration_json)
     assert checkpoint["stages"]["plan"]["data"]["replan_round"] == 1
+
+
+def test_web_agent_replans_after_controlled_tool_failure(
+    analyst_client, app, fake_queue
+) -> None:
+    deepseek = _ReplanningDeepSeekStub()
+    app.state.model_router = ModelRouter(
+        {"glm": _GlmStub(), "deepseek": deepseek}, mode="live"
+    )
+    observation_tool = _FailThenObserveTool()
+    app.state.tool_registry._tools[observation_tool.name] = observation_tool
+    task = analyst_client.post(
+        "/api/tasks",
+        json={
+            "goal": "Recover from a temporary authorized target failure",
+            "authorization_scope": "Only the configured target host",
+            "scene_hint": "web_analysis",
+            "target_url": "https://target.test/",
+        },
+    ).json()
+    analyst_client.post(
+        f"/api/tasks/{task['id']}/run",
+        headers={"Idempotency-Key": "web-tool-failure-replan-001"},
+    )
+    job = fake_queue.enqueued[0]
+
+    asyncio.run(
+        execute_queued_task(
+            job.task_id,
+            job.command_id,
+            app.state.session_factory,
+            app.state.model_router,
+            app.state.tool_registry,
+            app.state.settings.data_dir,
+            max_replans=1,
+        )
+    )
+
+    assert observation_tool.calls == ["round-1", "round-2"]
+    assert "http_transport_error" in json.dumps(deepseek.plan_inputs[1])
+    detail = analyst_client.get(f"/api/tasks/{task['id']}").json()
+    assert detail["status"] == "completed"
+    assert [step["status"] for step in detail["steps"]] == ["failed", "success"]
 
 
 def test_web_agent_stops_replanning_at_configured_bound(

@@ -116,6 +116,30 @@ async def test_http_request_bounds_response_body_preview(tmp_path) -> None:
     assert "响应体已截断" in result.warnings
 
 
+@pytest.mark.asyncio
+async def test_http_request_returns_redacted_transport_failure(tmp_path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.RemoteProtocolError(
+            "server exposed token=transport-secret",
+            request=request,
+        )
+
+    tool = HttpRequest(
+        UrlGuard({"target.test"}, resolver=lambda host: ["192.0.2.10"]),
+        transport=httpx.MockTransport(handler),
+    )
+
+    result = await tool.run(
+        {"url": "https://target.test/secret.php"},
+        ToolContext("task-1", "web_analysis", tmp_path),
+    )
+
+    assert result.success is False
+    assert result.error == "http_transport_error"
+    assert result.evidence[0]["metadata"]["error_code"] == "http_transport_error"
+    assert "transport-secret" not in result.model_dump_json()
+
+
 def test_http_request_params_drop_raw_body_before_persistence() -> None:
     safe = redact_mapping(
         {
