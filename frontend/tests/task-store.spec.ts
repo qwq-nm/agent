@@ -43,5 +43,25 @@ it('does not open a stream when logout wins the initial detail race', async () =
   resolveTask({ id: 't1', status: 'running' } as never)
   await watching
   expect(source.instances()).toHaveLength(0)
+  expect(store.detail).toBeUndefined()
   source.restore()
+})
+
+it('keeps the newer task detail when an older initial request resolves last', async () => {
+  let resolveFirst!: (value: never) => void
+  vi.mocked(api.getTask)
+    .mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve }) as never)
+    .mockResolvedValueOnce({ id: 't2', status: 'completed' } as never)
+  const store = useTasksStore()
+  const first = store.watchTask('t1')
+  await store.watchTask('t2')
+  resolveFirst({ id: 't1', status: 'running' } as never)
+  await first
+  expect(store.detail?.id).toBe('t2')
+})
+
+it('counts queued tasks as active work', () => {
+  const store = useTasksStore()
+  store.tasks = [{ id: 'queued', status: 'queued' }, { id: 'completed', status: 'completed' }] as never
+  expect(store.activeCount).toBe(1)
 })

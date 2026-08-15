@@ -37,6 +37,7 @@
 .evidence-card header b { color: var(--green); }
 .evidence-card code { display: block; margin: 9px 0; color: var(--cyan); font-size: 10px; }
 .evidence-card p { margin: 0; color: #c7d5e5; font-size: 11px; line-height: 1.55; overflow-wrap: anywhere; }
+.evidence-card .evidence-hash { margin-top: 9px; color: var(--muted); user-select: all; overflow-wrap: anywhere; }
 .route-card header strong { color: var(--cyan); }
 .route-card header span { color: #f4c77d; }
 .route-card p { margin: 9px 0 4px; font-size: 11px; }

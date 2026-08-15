@@ -18,6 +18,7 @@ it('shows model route, tool, source, and confidence without hiding demo state', 
     source: 'access.log:42',
     content: 'GET /admin',
     confidence: 0.86,
+    evidence_hash: 'a'.repeat(64),
   }
   const timeline = mount(StepTimeline, {
     props: { steps: [step], isDemo: true },
@@ -27,4 +28,5 @@ it('shows model route, tool, source, and confidence without hiding demo state', 
   expect(timeline.text()).toContain('DeepSeek')
   expect(panel.text()).toContain('access.log:42')
   expect(panel.text()).toContain('0.86')
+  expect(panel.text()).toContain('a'.repeat(64))
 })

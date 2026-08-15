@@ -10,6 +10,7 @@ defineProps<{ evidences: Evidence[] }>()
       <header><span>{{ item.evidence_type }}</span><b>{{ item.confidence.toFixed(2) }}</b></header>
       <code>{{ item.source }}</code>
       <p>{{ item.content }}</p>
+      <code v-if="item.evidence_hash" class="evidence-hash" title="Evidence SHA-256">SHA-256: {{ item.evidence_hash }}</code>
     </article>
   </div>
 </template>

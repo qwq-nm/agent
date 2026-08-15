@@ -21,7 +21,7 @@ export const useTasksStore = defineStore('tasks', () => {
   const activeCount = computed(
     () =>
       tasks.value.filter((task) =>
-        ['created', 'parsed', 'planned', 'running', 'waiting_human', 'paused'].includes(
+        ['created', 'queued', 'parsed', 'planned', 'running', 'waiting_human', 'paused'].includes(
           task.status,
         ),
       ).length,
@@ -49,10 +49,10 @@ export const useTasksStore = defineStore('tasks', () => {
 
   window.addEventListener('secagent:auth-cleared', stopWatching)
 
-  async function refreshDetail(id: string) {
+  async function refreshDetail(id: string, generation = watchGeneration) {
     const request = ++detailRequest
     const result = await api.getTask(id)
-    if (request === detailRequest && (!watchedTaskId || watchedTaskId === id)) detail.value = result
+    if (request === detailRequest && generation === watchGeneration && watchedTaskId === id) detail.value = result
     return result
   }
 
@@ -62,7 +62,7 @@ export const useTasksStore = defineStore('tasks', () => {
       refreshQueued = true
       return refreshInFlight
     }
-    refreshInFlight = refreshDetail(id).finally(() => { refreshInFlight = undefined })
+    refreshInFlight = refreshDetail(id, generation).finally(() => { refreshInFlight = undefined })
     const result = await refreshInFlight
     if (generation !== watchGeneration || watchedTaskId !== id) return result
     if (terminalStatuses.has(result?.status || '')) {
@@ -80,7 +80,7 @@ export const useTasksStore = defineStore('tasks', () => {
     stopWatching()
     watchedTaskId = id
     const generation = watchGeneration
-    const result = await refreshDetail(id)
+    const result = await refreshDetail(id, generation)
     if (generation !== watchGeneration || watchedTaskId !== id || terminalStatuses.has(result.status)) return result
     stream = useTaskEvents(id, async () => { await refreshFromEvent(id, generation) })
     return result

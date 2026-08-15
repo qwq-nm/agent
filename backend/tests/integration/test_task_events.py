@@ -12,6 +12,7 @@ from secagent.auth.stream_tickets import (
     StreamTicketService,
 )
 from secagent.services.task_events import TaskEventService
+from secagent.db_models import EvidenceRow
 
 
 def test_event_payload_is_recursively_redacted_and_bounded(repository) -> None:
@@ -234,3 +235,26 @@ def test_task_detail_includes_worker_runtime(alice_client, repository) -> None:
     assert detail["job_attempt"] == 3
     assert detail["worker_id"] == "worker-1"
     assert detail["worker_heartbeat_at"] == "2026-08-15T00:00:00Z"
+
+
+def test_task_detail_includes_evidence_hash(alice_client, repository) -> None:
+    task = alice_client.post(
+        "/api/tasks",
+        json={"goal": "Show evidence hash", "authorization_scope": "Owned task only"},
+    ).json()
+    evidence = EvidenceRow(
+        task_id=task["id"],
+        evidence_type="raw_line",
+        source="access.log:42",
+        content="GET /admin",
+        sha256="a" * 64,
+        confidence=0.9,
+        metadata_json="{}",
+    )
+    repository.session.add(evidence)
+    repository.commit()
+
+    detail = alice_client.get(f"/api/tasks/{task['id']}").json()
+
+    serialized = next(item for item in detail["evidences"] if item["id"] == evidence.id)
+    assert serialized["evidence_hash"] == "a" * 64

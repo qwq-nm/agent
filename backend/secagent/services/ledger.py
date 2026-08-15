@@ -440,6 +440,7 @@ class LedgerService:
                     "source": row.source,
                     "content": row.content,
                     "confidence": row.confidence,
+                    "evidence_hash": row.sha256,
                     "metadata": json.loads(row.metadata_json),
                 }
                 for row in rows["evidences"]
