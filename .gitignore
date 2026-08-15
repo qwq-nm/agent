@@ -9,6 +9,8 @@ data/
 node_modules/
 dist/
 .env
+secrets/*.txt
+!secrets/*.txt.example
 .venv/
 *.db
 *.sqlite*

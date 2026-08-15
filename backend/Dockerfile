@@ -6,6 +6,8 @@ WORKDIR /app
 
 COPY pyproject.toml ./
 COPY backend ./backend
+COPY alembic.ini ./alembic.ini
+COPY migrations ./migrations
 RUN pip install --no-cache-dir .
 RUN useradd --create-home --uid 10001 secagent \
     && mkdir -p /data \

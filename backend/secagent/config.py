@@ -1,6 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from secagent.config_secrets import read_secret
@@ -45,6 +46,13 @@ class Settings(BaseSettings):
     max_model_calls_per_task: int = 8
     max_input_tokens_per_task: int = 120_000
     max_output_tokens_per_task: int = 24_000
+
+    @field_validator("worker_concurrency")
+    @classmethod
+    def validate_worker_concurrency(cls, value: int) -> int:
+        if not 1 <= value <= 3:
+            raise ValueError("worker_concurrency must be between 1 and 3")
+        return value
 
     def deepseek_key(self) -> str | None:
         return read_secret(self.deepseek_api_key, self.deepseek_api_key_file)

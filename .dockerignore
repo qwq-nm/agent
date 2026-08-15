@@ -9,3 +9,5 @@ data
 playwright-report
 test-results
 .env
+secrets/*.txt
+!secrets/*.txt.example

@@ -7,8 +7,10 @@
 - `MODEL_MODE`：`mock`、`auto` 或 `live`；`SECAGENT_PORT` 是宿主机前端端口，默认 `18080`。
 - `DEEPSEEK_API_KEY/BASE_URL/MODEL`：DeepSeek OpenAI-compatible 接口。
 - `GLM_API_KEY/BASE_URL/MODEL`：智谱 GLM OpenAI-compatible 接口。
-- `DATABASE_URL`：Docker 默认 `sqlite:////data/secagent.db`。
-- `DATA_DIR`：任务工作区、上传材料和 SQLite 所在根目录。
+- `DATABASE_URL`：开发 Compose 默认指向 `postgres:16`。
+- `REDIS_URL`：开发 Compose 默认指向 `redis:7`。
+- `DATA_DIR`：任务工作区、上传材料所在根目录。
+- `WORKER_CONCURRENCY`：Worker 并发，Settings 强制范围为 1-3。
 - `UPLOAD_MAX_BYTES`：单文件大小上限。
 - `ARCHIVE_MAX_FILES/ARCHIVE_MAX_BYTES`：ZIP 文件数和展开总量上限。
 - `WEB_ALLOWED_HOSTS`：逗号分隔的精确主机名白名单，只用于明确授权的私网演示主机。
@@ -18,16 +20,28 @@
 
 ```powershell
 Copy-Item .env.example .env
-python scripts\build_demo_archives.py
 docker compose config
 docker compose up --build -d
 docker compose ps
-Invoke-RestMethod http://127.0.0.1:18080/api/health
+Invoke-RestMethod http://127.0.0.1:18080/api/health/live
+Invoke-RestMethod http://127.0.0.1:18080/api/health/ready
 Invoke-RestMethod http://127.0.0.1:18080/api/models/status
 Invoke-RestMethod http://127.0.0.1:18080/api/tools
 ```
 
-后端健康检查成功后前端才启动。`web-demo` 不映射到宿主机端口，只能从 Compose 内部网络访问。
+开发栈显式使用 `MODEL_MODE=mock`，API 启动前执行 Alembic 迁移；PostgreSQL 和 Redis 健康后 API 才启动，Worker 和前端等待 API readiness。`web-demo` 不映射到宿主机端口，只能从 Compose 内部网络访问。
+
+生产覆盖使用三个只读 Secret。先在 Windows 主机创建文件（内容只保存在本机）：
+
+```powershell
+Copy-Item secrets\deepseek_api_key.txt.example secrets\deepseek_api_key.txt
+Copy-Item secrets\glm_api_key.txt.example secrets\glm_api_key.txt
+Copy-Item secrets\jwt_signing_key.txt.example secrets\jwt_signing_key.txt
+docker compose -f docker-compose.yml -f docker-compose.prod.yml config
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build -d
+```
+
+生产覆盖强制 `MODEL_MODE=live`、`COOKIE_SECURE=true` 和最多 3 个 Worker 并发；不会在 readiness 中调用付费 Provider，只验证两个 Provider 配置和 JWT Secret 存在。
 
 ## 数据卷备份与恢复
 
@@ -35,16 +49,16 @@ Invoke-RestMethod http://127.0.0.1:18080/api/tools
 
 ```powershell
 docker volume ls | Select-String secagent
-docker compose stop backend
+docker compose stop api worker
 docker run --rm -v secagent-x_secagent-data:/data -v ${PWD}:/backup alpine tar czf /backup/secagent-data.tgz -C /data .
-docker compose start backend
+docker compose start api worker
 ```
 
 恢复前先停止后端，并将备份解压回同一命名卷。卷名可能带 Compose 项目前缀，请以 `docker volume ls` 的实际结果为准。恢复操作会覆盖目标数据，执行前应另做一份当前卷备份。
 
 ## SQLite 迁移到 PostgreSQL
 
-迁移脚本默认是 dry-run，只读取旧 SQLite 并输出 JSON 统计，不会写入目标库。目标 PostgreSQL 必须先完成当前 Alembic schema，且 `--owner-username` 指定的用户必须已经存在；旧任务及其证据会归属到该用户。
+旧版 MVP 的 SQLite 数据需要按部署窗口单独迁移；当前 Compose 拓扑直接使用 PostgreSQL，启动 API 会执行 Alembic migration。
 
 ```powershell
 $env:TARGET_DATABASE_URL = "postgresql+psycopg://<user>:<password>@<host>/<database>"
@@ -75,7 +89,8 @@ python scripts\migrate_sqlite_to_postgres.py `
 ## 日志与故障定位
 
 ```powershell
-docker compose logs --tail 200 backend
+docker compose logs --tail 200 api
+docker compose logs --tail 200 worker
 docker compose logs --tail 200 frontend
 docker compose logs --tail 100 web-demo
 ```

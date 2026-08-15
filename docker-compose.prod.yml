@@ -1,0 +1,33 @@
+services:
+  api:
+    environment:
+      MODEL_MODE: live
+      COOKIE_SECURE: "true"
+      WORKER_CONCURRENCY: 3
+      DEEPSEEK_API_KEY_FILE: /run/secrets/deepseek_api_key
+      GLM_API_KEY_FILE: /run/secrets/glm_api_key
+      JWT_SIGNING_KEY_FILE: /run/secrets/jwt_signing_key
+    secrets:
+      - deepseek_api_key
+      - glm_api_key
+      - jwt_signing_key
+
+  worker:
+    environment:
+      MODEL_MODE: live
+      WORKER_CONCURRENCY: 3
+      DEEPSEEK_API_KEY_FILE: /run/secrets/deepseek_api_key
+      GLM_API_KEY_FILE: /run/secrets/glm_api_key
+      JWT_SIGNING_KEY_FILE: /run/secrets/jwt_signing_key
+    secrets:
+      - deepseek_api_key
+      - glm_api_key
+      - jwt_signing_key
+
+secrets:
+  deepseek_api_key:
+    file: ./secrets/deepseek_api_key.txt
+  glm_api_key:
+    file: ./secrets/glm_api_key.txt
+  jwt_signing_key:
+    file: ./secrets/jwt_signing_key.txt

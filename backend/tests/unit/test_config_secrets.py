@@ -103,6 +103,11 @@ def test_settings_uses_required_production_defaults(monkeypatch: pytest.MonkeyPa
     assert settings.max_output_tokens_per_task == 24_000
 
 
+def test_worker_concurrency_cannot_exceed_three():
+    with pytest.raises(ValueError, match="worker_concurrency must be between 1 and 3"):
+        Settings(worker_concurrency=4)
+
+
 def test_docker_compose_provider_defaults_match_settings() -> None:
     repository_root = Path(__file__).resolve().parents[3]
     compose = (repository_root / "docker-compose.yml").read_text(encoding="utf-8")
