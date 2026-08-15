@@ -14,6 +14,7 @@ from secagent.repository import TaskRepository
 from secagent.security.redaction import redact_audit_details
 from secagent.security.provider_credentials import (
     CredentialEncryptionConfigurationError,
+    ProviderCredentialCipher,
     normalize_api_key,
 )
 from secagent.services.auth_service import (
@@ -108,12 +109,17 @@ def _credential_storage_error() -> CredentialStorageUnavailable:
     return CredentialStorageUnavailable()
 
 
+def _require_credential_storage(settings: object) -> None:
+    ProviderCredentialCipher.from_settings(settings)
+
+
 @router.get("/provider-credentials", response_model=list[ProviderCredentialRead])
 def list_provider_credentials(
     request: Request, actor: AdminDep
 ) -> list[ProviderCredentialRead]:
     del actor
     try:
+        _require_credential_storage(request.app.state.settings)
         with request.app.state.session_factory() as session:
             statuses = ProviderCredentialStore(
                 session, request.app.state.settings
@@ -133,6 +139,7 @@ def save_provider_credential(
     actor: AdminDep,
 ) -> ProviderCredentialRead:
     try:
+        _require_credential_storage(request.app.state.settings)
         with request.app.state.session_factory() as session:
             status = ProviderCredentialStore(session, request.app.state.settings).save(
                 provider, payload.api_key, actor.id
@@ -149,6 +156,7 @@ def clear_provider_credential(
     provider: ProviderName, request: Request, actor: AdminDep
 ) -> ProviderCredentialRead:
     try:
+        _require_credential_storage(request.app.state.settings)
         with request.app.state.session_factory() as session:
             status = ProviderCredentialStore(session, request.app.state.settings).clear(
                 provider, actor.id
