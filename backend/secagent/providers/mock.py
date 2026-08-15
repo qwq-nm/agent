@@ -49,7 +49,11 @@ class MockProvider:
                 "is_complete": has_evidence,
                 "confidence": 0.9 if has_evidence else 0.0,
                 "reason": "存在可追溯工具证据" if has_evidence else "缺少工具证据",
-                "missing_evidence": [] if has_evidence else ["工具证据"],
+                "missing_evidence": (
+                    []
+                    if has_evidence
+                    else [{"kind": "factual", "description": "工具证据"}]
+                ),
             }
         elif title == "ReportSections":
             data = {

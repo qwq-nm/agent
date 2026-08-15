@@ -6,7 +6,7 @@ from threading import Event
 
 import pytest
 
-from secagent.db_models import JobRunRow, TaskStepRow
+from secagent.db_models import ApprovalRow, JobRunRow, TaskStepRow
 from secagent.domain import TaskCreate, TaskStatus
 from secagent.services.job_service import JobService
 from secagent.services.task_events import TaskEventService
@@ -196,6 +196,60 @@ def test_step_is_reused_only_after_success_with_evidence_hash(repository) -> Non
         confidence=1.0,
     )
     assert repository.completed_step_result(task.id, key)["result"]["summary"] == "done"
+
+
+def test_reset_step_invalidates_prior_approval(repository) -> None:
+    task = repository.create_task(
+        TaskCreate(
+            goal="Retry an authorized request",
+            authorization_scope="Only the configured target host",
+        )
+    )
+    first = PlanStep(
+        name="Fetch first path",
+        purpose="Collect an authorized observation",
+        tool_name="http_fetch",
+        params={"url": "https://target.test/first"},
+        risk_level=RiskLevel.MEDIUM,
+        need_human_confirm=True,
+    )
+    first_key = repository.step_idempotency_key(task.id, 1, first)
+    step_id = repository.add_step(
+        task.id, 1, first, idempotency_key=first_key
+    )
+    approval_id = repository.add_approval(
+        task.id,
+        step_id=step_id,
+        tool_name=first.tool_name,
+        risk_level=first.risk_level.value,
+        params_summary='{"url": "https://target.test/first"}',
+    )
+    repository.decide_latest_approval(
+        task.id, approved=True, reason="Approve only the first path"
+    )
+    assert repository.is_tool_approved(
+        task.id, first.tool_name, step_id=step_id
+    )
+
+    changed = first.model_copy(
+        update={
+            "name": "Fetch second path",
+            "params": {"url": "https://target.test/second"},
+        }
+    )
+    changed_key = repository.step_idempotency_key(task.id, 1, changed)
+    assert changed_key != first_key
+    assert (
+        repository.add_step(
+            task.id, 1, changed, idempotency_key=changed_key
+        )
+        == step_id
+    )
+
+    assert not repository.is_tool_approved(
+        task.id, changed.tool_name, step_id=step_id
+    )
+    assert repository.session.get(ApprovalRow, approval_id).status == "superseded"
 
 
 def test_old_step_attempt_evidence_cannot_complete_new_attempt(repository) -> None:

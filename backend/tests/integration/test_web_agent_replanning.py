@@ -68,7 +68,16 @@ class _ReplanningDeepSeekStub:
                 "is_complete": complete,
                 "confidence": 0.9 if complete else 0.2,
                 "reason": "sufficient" if complete else "need another probe",
-                "missing_evidence": [] if complete else ["second observation"],
+                "missing_evidence": (
+                    []
+                    if complete
+                    else [
+                        {
+                            "kind": "factual",
+                            "description": "second observation",
+                        }
+                    ]
+                ),
             }
         else:
             raise AssertionError(f"unexpected DeepSeek schema: {title}")
@@ -93,7 +102,9 @@ class _NeverCompleteDeepSeekStub(_ReplanningDeepSeekStub):
                     "is_complete": False,
                     "confidence": 0.1,
                     "reason": "still incomplete",
-                    "missing_evidence": ["more evidence"],
+                    "missing_evidence": [
+                        {"kind": "factual", "description": "more evidence"}
+                    ],
                 },
                 latency_ms=0,
                 prompt_tokens=5,
@@ -113,7 +124,50 @@ class _ReportOnlyCriticDeepSeekStub(_ReplanningDeepSeekStub):
                     "is_complete": False,
                     "confidence": 0.8,
                     "reason": "The final report still needs to be generated",
-                    "missing_evidence": ["Generate the final report"],
+                    "missing_evidence": [
+                        {
+                            "kind": "report_generation",
+                            "description": "Need final report",
+                        },
+                        {
+                            "kind": "report_generation",
+                            "description": "尚需最终报告",
+                        },
+                    ],
+                },
+                latency_ms=0,
+                prompt_tokens=5,
+                completion_tokens=3,
+            )
+        return await super().complete(request)
+
+
+class _MixedCriticDeepSeekStub(_ReplanningDeepSeekStub):
+    async def complete(self, request) -> ModelResponse:
+        if request.response_schema.get("title") == "CriticDecision":
+            self.critic_calls += 1
+            incomplete = self.critic_calls == 1
+            return ModelResponse(
+                provider=self.name,
+                model=self.model,
+                data={
+                    "is_complete": not incomplete,
+                    "confidence": 0.3 if incomplete else 0.9,
+                    "reason": "Need another observation" if incomplete else "sufficient",
+                    "missing_evidence": (
+                        [
+                            {
+                                "kind": "report_generation",
+                                "description": "Need final report",
+                            },
+                            {
+                                "kind": "factual",
+                                "description": "second observation",
+                            },
+                        ]
+                        if incomplete
+                        else []
+                    ),
                 },
                 latency_ms=0,
                 prompt_tokens=5,
@@ -189,6 +243,8 @@ class _FailThenObserveHttpTool(_ObservationTool):
 
 
 class _NonTransportFailureTool(_ObservationTool):
+    name = "http_fetch"
+
     async def run(self, params: dict, context: ToolContext) -> ToolResult:
         probe = params["probe"]
         self.calls.append(probe)
@@ -228,7 +284,12 @@ class _ChangedParamsDeepSeekStub:
                 "is_complete": False,
                 "confidence": 0.1,
                 "reason": "another path is required",
-                "missing_evidence": ["second path observation"],
+                "missing_evidence": [
+                    {
+                        "kind": "factual",
+                        "description": "second path observation",
+                    }
+                ],
             }
         else:
             raise AssertionError(f"unexpected DeepSeek schema: {title}")
@@ -372,6 +433,50 @@ def test_report_generation_only_missing_evidence_is_complete(
     assert len(deepseek.plan_inputs) == 1
 
 
+def test_report_generation_items_are_removed_but_factual_gaps_replan(
+    analyst_client, app, fake_queue
+) -> None:
+    deepseek = _MixedCriticDeepSeekStub()
+    app.state.model_router = ModelRouter(
+        {"glm": _GlmStub(), "deepseek": deepseek}, mode="live"
+    )
+    observation_tool = _ObservationTool()
+    app.state.tool_registry._tools[observation_tool.name] = observation_tool
+    task = analyst_client.post(
+        "/api/tasks",
+        json={
+            "goal": "Collect two authorized target observations",
+            "authorization_scope": "Only the configured target host",
+            "scene_hint": "web_analysis",
+            "target_url": "https://target.test/",
+        },
+    ).json()
+    analyst_client.post(
+        f"/api/tasks/{task['id']}/run",
+        headers={"Idempotency-Key": "web-mixed-critic-001"},
+    )
+    job = fake_queue.enqueued[0]
+
+    asyncio.run(
+        execute_queued_task(
+            job.task_id,
+            job.command_id,
+            app.state.session_factory,
+            app.state.model_router,
+            app.state.tool_registry,
+            app.state.settings.data_dir,
+            max_replans=1,
+        )
+    )
+
+    detail = analyst_client.get(f"/api/tasks/{task['id']}").json()
+    assert detail["status"] == "completed"
+    assert observation_tool.calls == ["round-1", "round-2"]
+    replan_input = json.dumps(deepseek.plan_inputs[1], ensure_ascii=False)
+    assert "second observation" in replan_input
+    assert "Need final report" not in replan_input
+
+
 def test_web_agent_replans_after_controlled_tool_failure(
     analyst_client, app, fake_queue
 ) -> None:
@@ -418,7 +523,7 @@ def test_web_agent_replans_after_controlled_tool_failure(
 def test_web_agent_does_not_replan_non_transport_tool_failure(
     analyst_client, app, fake_queue
 ) -> None:
-    deepseek = _ReplanningDeepSeekStub()
+    deepseek = _ReplanningDeepSeekStub(tool_name="http_fetch")
     app.state.model_router = ModelRouter(
         {"glm": _GlmStub(), "deepseek": deepseek}, mode="live"
     )

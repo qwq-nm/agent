@@ -313,7 +313,7 @@ class AgentRunner:
                         "data": checkpoint_critic,
                     }
                 else:
-                    critic = CriticDecision.model_validate(critic_data)
+                    critic = self._critic_from_checkpoint(critic_data)
                 if critic.is_complete:
                     break
                 if replan_round >= self.max_replans:
@@ -473,6 +473,19 @@ class AgentRunner:
             return None
         data = value.get("data")
         return data if isinstance(data, dict) else None
+
+    @staticmethod
+    def _critic_from_checkpoint(data: dict[str, Any]) -> CriticDecision:
+        normalized = dict(data)
+        missing = normalized.get("missing_evidence")
+        if isinstance(missing, list):
+            normalized["missing_evidence"] = [
+                {"kind": "factual", "description": item}
+                if isinstance(item, str)
+                else item
+                for item in missing
+            ]
+        return CriticDecision.model_validate(normalized)
 
     def _load_plan_checkpoint(
         self, data: dict[str, Any]

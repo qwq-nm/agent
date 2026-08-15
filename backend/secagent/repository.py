@@ -1128,6 +1128,15 @@ class TaskRepository:
                 and self.completed_step_result(task_id, key) is not None
             ):
                 return existing.id
+            self.session.execute(
+                update(ApprovalRow)
+                .where(
+                    ApprovalRow.task_id == task_id,
+                    ApprovalRow.step_id == existing.id,
+                    ApprovalRow.status.in_(("pending", "approved")),
+                )
+                .values(status="superseded")
+            )
             existing.idempotency_key = key
             existing.attempt += 1
             existing.name = step.name

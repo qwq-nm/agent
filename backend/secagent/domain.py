@@ -149,11 +149,21 @@ class ParsedTask(BaseModel):
     expected_outputs: list[str] = Field(default_factory=list)
 
 
+class MissingEvidenceKind(StrEnum):
+    FACTUAL = "factual"
+    REPORT_GENERATION = "report_generation"
+
+
+class MissingEvidenceItem(BaseModel):
+    kind: MissingEvidenceKind
+    description: str = Field(min_length=1)
+
+
 class CriticDecision(BaseModel):
     is_complete: bool
     confidence: float = Field(ge=0, le=1)
     reason: str
-    missing_evidence: list[str] = Field(default_factory=list)
+    missing_evidence: list[MissingEvidenceItem] = Field(default_factory=list)
 
 
 class TaskRunResult(BaseModel):
