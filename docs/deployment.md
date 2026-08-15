@@ -5,7 +5,9 @@
 从 `.env.example` 复制为 `.env`。`.env` 已被 Git 忽略，不得提交真实密钥。
 
 - `MODEL_MODE`：`mock`、`auto` 或 `live`；`SECAGENT_PORT` 是宿主机前端端口，默认 `18080`。
-- `DEEPSEEK_API_KEY/BASE_URL/MODEL`：DeepSeek OpenAI-compatible 接口。
+- `DEEPSEEK_API_KEY/BASE_URL/MODEL`：DeepSeek 路由使用的 OpenAI-compatible 接口。
+- `DEEPSEEK_API_STYLE`：`auto`、`deepseek` 或 `opencode-go`；OpenCode Go 使用 `reasoning_effort`，官方 DeepSeek 使用 `thinking`。
+- `DEEPSEEK_REASONING_EFFORT`：OpenCode Go 推理强度，默认 `high`。
 - `GLM_API_KEY/BASE_URL/MODEL`：智谱 GLM OpenAI-compatible 接口。
 - `PROVIDER_CREDENTIAL_ENCRYPTION_KEY/PROVIDER_CREDENTIAL_ENCRYPTION_KEY_FILE`：用于加密数据库中的 Provider 凭据；部署时必须提供，文件设置优先于环境变量。
 - `DATABASE_URL`：开发 Compose 默认指向 `postgres:16`。
@@ -15,7 +17,20 @@
 - `UPLOAD_MAX_BYTES`：单文件大小上限。
 - `ARCHIVE_MAX_FILES/ARCHIVE_MAX_BYTES`：ZIP 文件数和展开总量上限。
 - `WEB_ALLOWED_HOSTS`：逗号分隔的精确主机名白名单，只用于明确授权的私网演示主机。
-- `MAX_STEPS_PER_TASK/MAX_REPLANS/TASK_TIMEOUT_SECONDS`：操作员预算参数；当前 MVP 使用单计划闭环，保留这些值用于后续调度强化。
+- `MAX_STEPS_PER_TASK/MAX_REPLANS/TASK_TIMEOUT_SECONDS`：Agent 的步骤、补充规划轮次和总执行时限。
+
+OpenCode Go 的推荐最小配置如下。真实 API key 通过管理员网页表单录入，不要放入文档或提交的配置文件：
+
+```env
+MODEL_MODE=live
+DEEPSEEK_BASE_URL=https://opencode.ai/zen/go/v1
+DEEPSEEK_MODEL=deepseek-v4-flash
+DEEPSEEK_API_STYLE=opencode-go
+DEEPSEEK_REASONING_EFFORT=high
+WEB_ALLOWED_HOSTS=web-demo,node4.anna.nssctf.cn
+```
+
+`WEB_ALLOWED_HOSTS` 只写精确主机名，不带 scheme、路径或端口。明确授权的私网演示主机可通过白名单访问；其他主机仍必须解析为全局可路由地址。HTTP 请求仅允许 GET/POST/HEAD/OPTIONS，所有请求均按 `medium` 风险进入现有人工审批流程，且每个重定向目标都会重新检查。
 
 ## 启动与健康检查
 
@@ -34,7 +49,7 @@ Invoke-RestMethod http://127.0.0.1:18080/api/tools
 
 `secrets\provider_credential_encryption_key.txt` 是本地生成且被 Git 忽略的文件；必须在第一次 `docker compose up` 前创建，基础 Compose 会以只读方式将它挂载到 API 和 Worker 的同一路径。不要把值写入 `.env`、示例文件或提交记录。
 
-开发栈显式使用 `MODEL_MODE=mock`，API 启动前执行 Alembic 迁移；PostgreSQL 和 Redis 健康后 API 才启动，Worker 和前端等待 API liveness。`web-demo` 不映射到宿主机端口，只能从 Compose 内部网络访问。`/api/health/live` 只表示进程存活；在 `MODEL_MODE=live` 下，即使两个数据库 Provider 凭据尚未保存，控制台、Worker 和前端也会启动，而 `/api/health/ready` 会返回 not-ready 且 `model_configuration` 为 failed。
+开发栈默认使用 `MODEL_MODE=mock`，也可通过 `.env` 切换到 `live`；API 启动前执行 Alembic 迁移，PostgreSQL 和 Redis 健康后 API 才启动，Worker 和前端等待 API liveness。`web-demo` 不映射到宿主机端口，只能从 Compose 内部网络访问。`/api/health/live` 只表示进程存活；在 `MODEL_MODE=live` 下，即使两个数据库 Provider 凭据尚未保存，控制台、Worker 和前端也会启动，而 `/api/health/ready` 会返回 not-ready 且 `model_configuration` 为 failed。
 
 生产覆盖使用四个只读 Docker Secret，其中加密主密钥与本地使用同名的 `provider_credential_encryption_key` Secret。先在 Windows 主机创建文件（内容只保存在本机）：
 

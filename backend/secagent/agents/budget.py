@@ -51,8 +51,12 @@ class TaskBudget:
         self.now = now
 
     def check_deadline(self) -> None:
-        if _require_aware(self.now()) >= self.deadline:
+        if self.remaining_seconds() <= 0:
             raise BudgetExceeded("deadline")
+
+    def remaining_seconds(self) -> float:
+        remaining = self.deadline - _require_aware(self.now())
+        return max(0.0, remaining.total_seconds())
 
     def check_model_call(self) -> None:
         if self.calls >= self.max_calls:

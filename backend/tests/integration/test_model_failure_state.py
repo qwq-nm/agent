@@ -253,6 +253,35 @@ def test_checkpoint_rejects_model_call_from_another_logical_attempt(
     assert repository.session.get(ModelCallRow, current_call_id).attempt == 2
 
 
+def test_fenced_checkpoint_and_budget_reads_release_their_transactions(
+    repository, fake_queue
+) -> None:
+    task = repository.create_task(
+        TaskCreate(goal="Release fenced reads", authorization_scope="Owned data")
+    )
+    repository.set_task_status(task.id, TaskStatus.QUEUED)
+    job = repository.add_job_run(task.id, "fenced-read-001")
+    job.status = "queued"
+    repository.commit()
+    lease = JobService(repository, fake_queue).claim(
+        task.id, job.command_id, "worker-fenced-read"
+    )
+    assert lease is not None
+
+    repository.budget_state(
+        task.id,
+        lease=lease,
+        timeout_seconds=30,
+        now=datetime.now(timezone.utc),
+    )
+    assert repository.session.in_transaction() is False
+
+    assert repository.load_orchestration_checkpoint(
+        task.id, lease=lease, fingerprint="f" * 64
+    ) == {}
+    assert repository.session.in_transaction() is False
+
+
 def test_budget_exhaustion_is_a_terminal_atomic_event(
     analyst_client, app, fake_queue
 ) -> None:

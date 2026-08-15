@@ -686,6 +686,7 @@ class TaskRepository:
         try:
             checkpoint = json.loads(row.orchestration_json or "{}")
         except (TypeError, json.JSONDecodeError):
+            self.session.commit()
             return {}
         if (
             not isinstance(checkpoint, dict)
@@ -693,6 +694,7 @@ class TaskRepository:
             or checkpoint.get("fingerprint") != fingerprint
             or not isinstance(checkpoint.get("stages", {}), dict)
         ):
+            self.session.commit()
             return {}
         valid_stages: dict[str, Any] = {}
         for stage, value in checkpoint["stages"].items():
@@ -709,6 +711,7 @@ class TaskRepository:
             ):
                 valid_stages[stage] = value
         checkpoint["stages"] = valid_stages
+        self.session.commit()
         return checkpoint
 
     def save_orchestration_checkpoint(
@@ -812,7 +815,7 @@ class TaskRepository:
         step_count = self.session.scalar(
             select(func.count(TaskStepRow.id)).where(TaskStepRow.task_id == task_id)
         )
-        return {
+        state = {
             "max_calls": row.max_model_calls,
             "max_input_tokens": row.max_input_tokens,
             "max_output_tokens": row.max_output_tokens,
@@ -823,6 +826,8 @@ class TaskRepository:
             "output_tokens": int(usage[2]),
             "steps": int(step_count or 0),
         }
+        self.session.commit()
+        return state
 
     def fail_budget_exhausted(
         self,

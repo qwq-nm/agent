@@ -8,7 +8,7 @@ SecAgent-X 是一个具备自主决策能力、但受明确安全边界约束的
 - `auto`、`live`、`mock` 三种模型模式；Mock 结果始终标为“演示结果”。
 - 日志链：格式识别、结构化解析、`WEB-SCAN-002` 攻击模式、时间线。
 - 源码链：只读静态扫描、危险执行函数、硬编码密钥、危险配置；绝不导入或执行上传代码。
-- Web 链：只允许 HTTP(S) GET、逐跳重定向复检、SSRF 私网阻断、响应头观察、表单只读提取。
+- Web Agent：支持受控 GET/POST/HEAD/OPTIONS、逐跳重定向复检、请求/响应限长与脱敏；中风险请求必须人工审批，证据不足时最多按 `MAX_REPLANS` 补充规划。
 - PostgreSQL 任务状态、工具/模型调用、审批、证据和 Markdown 报告；Redis/Celery 负责排队和 Worker 执行。
 - Vue 3 控制台：任务创建、决策时间线、证据账本、人工审批、报告和系统状态。
 
@@ -67,6 +67,19 @@ docker compose down
 
 真实模式下，管理员应在浏览器控制台的 Provider 凭据表单中录入 GLM 和 DeepSeek key；它们会加密保存到数据库中。未提交的 `.env` 或文件 Secret 中的 `GLM_API_KEY`、`DEEPSEEK_API_KEY` 仍可作为向后兼容的回退。`MODEL_MODE=live` 在两个数据库凭据保存前会保持 readiness not-ready，但 liveness 仍可让控制台、Worker 和前端启动。`secrets\provider_credential_encryption_key.txt` 是 Git 忽略的本地生成文件，Docker 启动前必须存在。除本地测试外，请通过 HTTPS 访问控制台。项目不使用 GPT。
 
+OpenCode Go 作为 DeepSeek 路由的 OpenAI-compatible 后端时，可在 `.env` 中配置：
+
+```env
+MODEL_MODE=live
+DEEPSEEK_BASE_URL=https://opencode.ai/zen/go/v1
+DEEPSEEK_MODEL=deepseek-v4-flash
+DEEPSEEK_API_STYLE=opencode-go
+DEEPSEEK_REASONING_EFFORT=high
+WEB_ALLOWED_HOSTS=web-demo,node4.anna.nssctf.cn
+```
+
+API key 仍通过管理员网页表单录入并加密保存；不要把真实 key 写进 `.env.example`、文档、日志或提交记录。`WEB_ALLOWED_HOSTS` 必须使用逗号分隔的精确授权主机名，端口写在任务 URL 中，不写入该列表。
+
 迁移完成后可运行 `docker compose exec api python -m secagent.cli create-admin --username admin`，并在两次提示中输入 `admin` 来创建本地 `admin/admin`。这是演示初始账号，首次登录后必须更改密码，绝不能用于生产。
 
 ## 测试
@@ -104,7 +117,9 @@ powershell -ExecutionPolicy Bypass -File scripts\offline_acceptance.ps1
 - `high` 和 `forbidden` 风险动作在 MVP 中直接拒绝；`medium` 必须人工审批。
 - 上传文件进入任务独立目录；ZIP 有文件数、展开大小、符号链接和路径穿越检查。
 - 源码审计只读取文本，不安装依赖、不导入模块、不运行代码。
-- Web 工具只发起 GET，不提交表单；每次跳转前重新校验目标地址。
+- Web 工具仅允许 GET/POST/HEAD/OPTIONS；每次跳转前重新校验目标地址，请求体、认证头、Cookie 和敏感响应片段不会原样进入证据账本。
+- 模型声明的风险级别不可信，实际审批策略始终取自后端工具注册表；当前 HTTP 工具为 `medium`，执行前必须人工批准。
+- critic 判定证据不足时可带着脱敏观察重新规划，但总轮次、步骤、模型调用、Token 和任务时限都有硬上限。
 - 模型输出必须通过 Pydantic 结构校验，不能绕过 RiskGate 或直接执行工具。
 - Mock 是演示数据，不应当作为真实安全结论；真实环境仍需安全人员复核。
 

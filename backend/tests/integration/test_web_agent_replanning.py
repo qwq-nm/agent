@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 
 import pytest
 
@@ -23,6 +24,12 @@ class _GlmStub:
         return response.model_copy(
             update={"provider": self.name, "model": self.model}
         )
+
+
+class _SlowGlmStub(_GlmStub):
+    async def complete(self, request) -> ModelResponse:
+        await asyncio.sleep(3)
+        return await super().complete(request)
 
 
 class _ReplanningDeepSeekStub:
@@ -260,3 +267,48 @@ def test_web_agent_uses_registered_tool_risk_over_model_risk(
     assert detail["status"] == "waiting_human"
     assert detail["pending_approval"]["risk_level"] == "medium"
     assert deepseek.critic_calls == 0
+
+
+def test_model_call_cannot_outlive_task_deadline(
+    analyst_client, app, fake_queue
+) -> None:
+    app.state.model_router = ModelRouter(
+        {
+            "glm": _SlowGlmStub(),
+            "deepseek": _ReplanningDeepSeekStub(),
+        },
+        mode="live",
+    )
+    task = analyst_client.post(
+        "/api/tasks",
+        json={
+            "goal": "Bound a slow authorized web task",
+            "authorization_scope": "Only the configured target host",
+            "scene_hint": "web_analysis",
+            "target_url": "https://target.test/",
+        },
+    ).json()
+    analyst_client.post(
+        f"/api/tasks/{task['id']}/run",
+        headers={"Idempotency-Key": "web-model-deadline-001"},
+    )
+    job = fake_queue.enqueued[0]
+
+    started = time.perf_counter()
+    asyncio.run(
+        execute_queued_task(
+            job.task_id,
+            job.command_id,
+            app.state.session_factory,
+            app.state.model_router,
+            app.state.tool_registry,
+            app.state.settings.data_dir,
+            task_timeout_seconds=1,
+        )
+    )
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 2
+    detail = analyst_client.get(f"/api/tasks/{task['id']}").json()
+    assert detail["status"] == "failed"
+    assert detail["model_calls"] == []

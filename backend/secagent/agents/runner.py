@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -412,7 +413,11 @@ class AgentRunner:
         budget.check_deadline()
         budget.check_model_call()
         try:
-            value, response = await operation()
+            value, response = await asyncio.wait_for(
+                operation(), timeout=budget.remaining_seconds()
+            )
+        except TimeoutError as exc:
+            raise BudgetExceeded("deadline") from exc
         except ProviderFailure as exc:
             router = getattr(
                 {
