@@ -42,6 +42,32 @@ docker compose start backend
 
 恢复前先停止后端，并将备份解压回同一命名卷。卷名可能带 Compose 项目前缀，请以 `docker volume ls` 的实际结果为准。恢复操作会覆盖目标数据，执行前应另做一份当前卷备份。
 
+## SQLite 迁移到 PostgreSQL
+
+迁移脚本默认是 dry-run，只读取旧 SQLite 并输出 JSON 统计，不会写入目标库。目标 PostgreSQL 必须先完成当前 Alembic schema，且 `--owner-username` 指定的用户必须已经存在；旧任务及其证据会归属到该用户。
+
+```powershell
+$env:TARGET_DATABASE_URL = "postgresql+psycopg://<user>:<password>@<host>/<database>"
+python scripts\migrate_sqlite_to_postgres.py `
+  --source "sqlite:////data/secagent.db" `
+  --target $env:TARGET_DATABASE_URL `
+  --owner-username migration-owner
+```
+
+确认 dry-run 的每张表 source/target 统计、插入数、跳过数和 evidence hash 校验结果后，增加 `--apply` 才会在一个事务中写入：
+
+```powershell
+python scripts\migrate_sqlite_to_postgres.py `
+  --source "sqlite:////data/secagent.db" `
+  --target $env:TARGET_DATABASE_URL `
+  --owner-username migration-owner `
+  --apply
+```
+
+迁移前同时备份 SQLite 数据卷和 PostgreSQL 目标库，例如使用 `pg_dump` 保存目标快照。脚本会按任务、步骤、模型调用、工具调用、证据、审批、报告的依赖顺序写入；缺失证据 hash 会按内容计算 SHA-256，已有 hash 必须匹配。任何关系、计数或 hash 校验失败都会使事务回滚并返回非零退出码。重复执行 `--apply` 会按主键和内容校验并跳过已导入行，不产生重复记录。
+
+失败后先保留命令输出和数据库备份；目标事务失败时无需手工清理。若需要恢复已提交的迁移，停止应用连接后从迁移前的 PostgreSQL 备份恢复，再按上面的 dry-run 流程重新核对。不要把带密码的数据库 URL 写入脚本、日志或提交记录；脚本 JSON 输出不包含数据库 URL、证据内容或 API key。
+
 ## 中断任务恢复
 
 后端启动时会把上次异常退出时仍为 `running` 的任务改为 `failed_retryable`。操作员在任务详情核对证据和授权范围后点击“重试”；终态任务不会自动重跑。
