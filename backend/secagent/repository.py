@@ -992,10 +992,13 @@ class TaskRepository:
         self.session.refresh(decided)
         return decided
 
-    def is_tool_approved(self, task_id: str, tool_name: str) -> bool:
+    def is_tool_approved(
+        self, task_id: str, tool_name: str, *, step_id: str
+    ) -> bool:
         row = self.session.scalar(
             select(ApprovalRow).where(
                 ApprovalRow.task_id == task_id,
+                ApprovalRow.step_id == step_id,
                 ApprovalRow.tool_name == tool_name,
                 ApprovalRow.status == "approved",
             )

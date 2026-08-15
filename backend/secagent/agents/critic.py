@@ -1,4 +1,5 @@
 import json
+import re
 
 from secagent.domain import (
     CriticDecision,
@@ -14,6 +15,43 @@ from secagent.services.ledger import LedgerService
 MAX_OBSERVATIONS = 12
 MAX_OBSERVATION_CONTENT_CHARS = 1024
 MAX_OBSERVATION_SOURCE_CHARS = 256
+
+_FACTUAL_EVIDENCE_TERMS = (
+    "evidence",
+    "fact",
+    "finding",
+    "observation",
+    "data",
+    "证据",
+    "事实",
+    "发现",
+    "观察",
+    "数据",
+)
+_REPORT_ONLY_PATTERNS = (
+    re.compile(
+        r"\b(?:generate|write|draft|create|produce|render|finalize|compile)\b"
+        r".{0,32}\breport\b"
+    ),
+    re.compile(
+        r"\breport\b.{0,32}"
+        r"\b(?:generation|generated|writing|written|drafting|drafted|"
+        r"creation|created|missing|absent)\b"
+    ),
+    re.compile(r"(?:生成|撰写|编写|输出|创建|完成|整理).{0,8}报告"),
+    re.compile(r"报告.{0,8}(?:尚未|未|待)(?:生成|撰写|编写|输出|创建|完成|整理)"),
+    re.compile(r"缺少.{0,4}报告"),
+)
+
+
+def _is_report_generation_only(item: str) -> bool:
+    text = " ".join(item.casefold().split())
+    if any(term in text for term in _FACTUAL_EVIDENCE_TERMS):
+        return False
+    canonical = re.sub(r"[^\w\u4e00-\u9fff]+", " ", text).strip()
+    if canonical in {"report", "final report", "报告", "最终报告"}:
+        return True
+    return any(pattern.search(text) for pattern in _REPORT_ONLY_PATTERNS)
 
 
 class Critic:
@@ -45,7 +83,20 @@ class Critic:
                 response_schema=CriticDecision.model_json_schema(),
             ),
         )
-        return CriticDecision.model_validate(response.data), response
+        decision = CriticDecision.model_validate(response.data)
+        missing_evidence = [
+            item
+            for item in decision.missing_evidence
+            if not _is_report_generation_only(item)
+        ]
+        if missing_evidence != decision.missing_evidence:
+            decision = decision.model_copy(
+                update={
+                    "is_complete": decision.is_complete or not missing_evidence,
+                    "missing_evidence": missing_evidence,
+                }
+            )
+        return decision, response
 
     def observation_summary(
         self,

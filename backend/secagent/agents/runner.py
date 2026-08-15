@@ -217,7 +217,7 @@ class AgentRunner:
                         task_id, index, lease=lease
                     )
                     approved = self.repository.is_tool_approved(
-                        task_id, step.tool_name
+                        task_id, step.tool_name, step_id=step_id
                     )
                     decision = self.risk_gate.check(
                         tool.risk_level, approved=approved
@@ -254,19 +254,30 @@ class AgentRunner:
                             is_demo=self._is_demo(task_id),
                         )
                     budget.check_deadline()
-                    result = await self.executor.execute(
-                        task_id=task_id,
-                        step_id=step_id,
-                        tool_name=step.tool_name,
-                        params=params,
-                        context=ToolContext(
-                            task_id, parsed.scene.value, workspace
-                        ),
-                        lease=lease,
-                    )
+                    try:
+                        result = await asyncio.wait_for(
+                            self.executor.execute(
+                                task_id=task_id,
+                                step_id=step_id,
+                                tool_name=step.tool_name,
+                                params=params,
+                                context=ToolContext(
+                                    task_id, parsed.scene.value, workspace
+                                ),
+                                lease=lease,
+                            ),
+                            timeout=budget.remaining_seconds(),
+                        )
+                    except TimeoutError as exc:
+                        raise BudgetExceeded("deadline") from exc
                     self._update_runtime(step.tool_name, result, runtime)
                     if not result.success:
-                        if parsed.scene is TaskScene.WEB_ANALYSIS:
+                        if (
+                            parsed.scene is TaskScene.WEB_ANALYSIS
+                            and step.tool_name == "http_fetch"
+                            and result.error
+                            in {"http_timeout", "http_transport_error"}
+                        ):
                             active_step_id = None
                             break
                         raise RuntimeError(result.error or result.summary)
