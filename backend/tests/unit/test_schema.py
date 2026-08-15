@@ -61,6 +61,15 @@ REQUIRED_COLUMNS = {
         "details_json",
         "created_at",
     },
+    "provider_credentials": {
+        "provider",
+        "encrypted_api_key",
+        "key_hint",
+        "state",
+        "updated_by",
+        "created_at",
+        "updated_at",
+    },
 }
 
 
@@ -87,6 +96,7 @@ def test_team_schema_has_required_tables(tmp_path):
         "approvals",
         "reports",
         "audit_events",
+        "provider_credentials",
     } <= tables
 
 
@@ -132,6 +142,14 @@ def test_team_schema_enforces_ownership_and_task_lifecycle_foreign_keys(tmp_path
         and fk["referred_table"] == "users"
         and fk["options"].get("ondelete") == "RESTRICT"
         for fk in audit_actor
+    )
+
+    credential_actor = inspector.get_foreign_keys("provider_credentials")
+    assert any(
+        fk["constrained_columns"] == ["updated_by"]
+        and fk["referred_table"] == "users"
+        and fk["options"].get("ondelete") == "RESTRICT"
+        for fk in credential_actor
     )
 
     bindings = inspector.get_foreign_keys("tool_call_evidences")

@@ -37,6 +37,26 @@ class UserRow(Base):
     )
 
 
+class ProviderCredentialRow(Base):
+    __tablename__ = "provider_credentials"
+
+    provider: Mapped[str] = mapped_column(String(32), primary_key=True)
+    encrypted_api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    key_hint: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    state: Mapped[str] = mapped_column(
+        String(16), default="configured", server_default="configured"
+    )
+    updated_by: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, onupdate=now_utc
+    )
+
+
 class RefreshSessionRow(Base):
     __tablename__ = "refresh_sessions"
 
