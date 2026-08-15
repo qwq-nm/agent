@@ -1,23 +1,31 @@
 import json
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import func, select
 
-from secagent.api.errors import ApiError
+from secagent.api.errors import ApiError, CredentialStorageUnavailable
 from secagent.auth.dependencies import AuthenticatedUser, auth_service, require_admin
 from secagent.db_models import JobRunRow
 from secagent.domain import UserRole
 from secagent.repository import TaskRepository
 from secagent.security.redaction import redact_audit_details
+from secagent.security.provider_credentials import (
+    CredentialEncryptionConfigurationError,
+    normalize_api_key,
+)
 from secagent.services.auth_service import (
     AuthService,
     LastActiveAdminError,
     UserAlreadyExistsError,
     UserLimitReachedError,
     UserNotFoundError,
+)
+from secagent.services.provider_credentials import (
+    ProviderCredentialStatus,
+    ProviderCredentialStore,
 )
 
 
@@ -64,6 +72,90 @@ class AuditEventRead(BaseModel):
     outcome: str
     details: dict
     created_at: datetime
+
+
+ProviderName = Literal["deepseek", "glm"]
+
+
+class ProviderCredentialWrite(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    api_key: str = Field(min_length=1, max_length=512)
+
+    @model_validator(mode="after")
+    def validate_api_key(self) -> "ProviderCredentialWrite":
+        self.api_key = normalize_api_key(self.api_key)
+        return self
+
+
+class ProviderCredentialRead(BaseModel):
+    provider: ProviderName
+    configured: bool
+    key_hint: str | None
+    updated_at: datetime | None
+
+
+def _credential_read(status: ProviderCredentialStatus) -> ProviderCredentialRead:
+    return ProviderCredentialRead(
+        provider=status.provider,
+        configured=status.configured,
+        key_hint=status.key_hint,
+        updated_at=status.updated_at,
+    )
+
+
+def _credential_storage_error() -> CredentialStorageUnavailable:
+    return CredentialStorageUnavailable()
+
+
+@router.get("/provider-credentials", response_model=list[ProviderCredentialRead])
+def list_provider_credentials(
+    request: Request, actor: AdminDep
+) -> list[ProviderCredentialRead]:
+    del actor
+    try:
+        with request.app.state.session_factory() as session:
+            statuses = ProviderCredentialStore(
+                session, request.app.state.settings
+            ).list_status()
+    except (CredentialEncryptionConfigurationError, OSError, ValueError):
+        raise _credential_storage_error() from None
+    return [_credential_read(status) for status in statuses]
+
+
+@router.put(
+    "/provider-credentials/{provider}", response_model=ProviderCredentialRead
+)
+def save_provider_credential(
+    provider: ProviderName,
+    payload: ProviderCredentialWrite,
+    request: Request,
+    actor: AdminDep,
+) -> ProviderCredentialRead:
+    try:
+        with request.app.state.session_factory() as session:
+            status = ProviderCredentialStore(session, request.app.state.settings).save(
+                provider, payload.api_key, actor.id
+            )
+    except (CredentialEncryptionConfigurationError, OSError, ValueError):
+        raise _credential_storage_error() from None
+    return _credential_read(status)
+
+
+@router.delete(
+    "/provider-credentials/{provider}", response_model=ProviderCredentialRead
+)
+def clear_provider_credential(
+    provider: ProviderName, request: Request, actor: AdminDep
+) -> ProviderCredentialRead:
+    try:
+        with request.app.state.session_factory() as session:
+            status = ProviderCredentialStore(session, request.app.state.settings).clear(
+                provider, actor.id
+            )
+    except (CredentialEncryptionConfigurationError, OSError, ValueError):
+        raise _credential_storage_error() from None
+    return _credential_read(status)
 
 
 @router.get("/users", response_model=list[AdminUserRead])

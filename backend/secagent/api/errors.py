@@ -32,6 +32,15 @@ class QueueUnavailable(ApiError):
         super().__init__(503, "service_unavailable", "Task queue is unavailable")
 
 
+class CredentialStorageUnavailable(ApiError):
+    def __init__(self) -> None:
+        super().__init__(
+            503,
+            "credential_storage_unavailable",
+            "Provider credential storage is unavailable",
+        )
+
+
 _STATUS_CODES = {
     400: "bad_request",
     401: "unauthorized",
