@@ -15,6 +15,15 @@ export type RouteMode = 'auto' | 'manual'
 
 export type UserRole = 'admin' | 'analyst'
 
+export type ProviderName = 'deepseek' | 'glm'
+
+export interface ProviderCredential {
+  provider: ProviderName
+  configured: boolean
+  key_hint?: string | null
+  updated_at?: string | null
+}
+
 export interface AuthUser {
   id: string
   username: string

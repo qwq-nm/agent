@@ -6,6 +6,9 @@ const api = vi.hoisted(() => ({
   readiness: vi.fn(),
   modelStatus: vi.fn(),
   providerCheck: vi.fn(),
+  listProviderCredentials: vi.fn(),
+  saveProviderCredential: vi.fn(),
+  clearProviderCredential: vi.fn(),
   toolStatus: vi.fn(),
   listUsers: vi.fn(),
   createUser: vi.fn(),
@@ -39,6 +42,10 @@ beforeEach(() => {
     latency_ms: 120,
     error_code: null,
   })
+  api.listProviderCredentials.mockResolvedValue([
+    { provider: 'deepseek', configured: true, key_hint: '...abcd', updated_at: '2026-08-15T02:00:00Z' },
+    { provider: 'glm', configured: false, key_hint: null, updated_at: null },
+  ])
   api.toolStatus.mockResolvedValue([])
   api.listUsers.mockResolvedValue([
     { id: 'u1', username: 'alice', role: 'admin', is_active: true },

@@ -4,6 +4,8 @@ import type {
   HealthStatus,
   ModelStatus,
   ProviderCheck,
+  ProviderCredential,
+  ProviderName,
   ReadinessStatus,
   Task,
   TaskCreate,
@@ -43,6 +45,16 @@ export const api = {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ provider }),
   }),
+  listProviderCredentials: () => request<ProviderCredential[]>('/api/admin/provider-credentials'),
+  saveProviderCredential: (provider: ProviderName, apiKey: string) =>
+    request<ProviderCredential>(`/api/admin/provider-credentials/${provider}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ api_key: apiKey }),
+    }),
+  clearProviderCredential: async (provider: ProviderName): Promise<void> => {
+    await request<ProviderCredential>(`/api/admin/provider-credentials/${provider}`, { method: 'DELETE' })
+  },
   listUsers: () => request<AdminUser[]>('/api/admin/users'),
   createUser: (payload: { username: string; password: string; role: 'admin' | 'analyst' }) =>
     request<AdminUser>('/api/admin/users', {
