@@ -3,8 +3,8 @@
 ## Scope
 
 - Plan: `docs/superpowers/plans/2026-08-15-web-task-agent.md`
-- Feature range: `fd0d495..737d48f`
-- Final review-fix range: `e3195f8..737d48f`
+- Feature range: `fd0d495..8ca425a`
+- Final review-fix range: `e3195f8..8ca425a`
 - Runtime: FastAPI, Celery/Redis, PostgreSQL, OpenCode Go DeepSeek route,
   GLM parse/report route, and the existing evidence ledger.
 
@@ -51,19 +51,21 @@ The first review found four issues in the live-loop implementation:
 3. Every failed Web tool result could trigger replanning.
 4. Report-only critic guidance was prompt-only.
 
-Commit `737d48f` addresses all four with focused integration regressions. A
-follow-up independent review was requested against `e3195f8..737d48f`.
+Commit `737d48f` addressed the first four findings. Follow-up review then found
+mutable step-row approval reuse and contradictory critic completion handling;
+commits `db6c846` and `8ca425a` fixed both. The final independent review found
+no Critical, Important, or actionable Minor findings.
 
 ## Verification
 
-- Focused Web Agent integration file: 9 passed.
-- Full backend: 267 passed, 91.08% coverage (required minimum 85%).
+- Focused recovery/Web Agent/critic contract set: 25 passed.
+- Full backend: 273 passed, 91.11% coverage (required minimum 85%).
 - Frontend: 9 files and 41 tests passed.
 - Frontend production build: TypeScript check and Vite build passed.
 - Compose: API, PostgreSQL, and Redis healthy; worker ready; frontend and demo
   target running.
 - Probes: `/api/health/live` returned 200 and `/api/health/ready` returned 200.
-- Live internal task `85a51002-36f0-4b4a-9308-1082cf648800` completed after one
+- Live internal task `c4cc7d25-c8b9-4af8-839f-112fcc4c4d52` completed after one
   approval with 4 model calls, 4 tool calls, 6 evidences, and 1 report.
 - `git diff --check` passed for the final review fixes.
 
