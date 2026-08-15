@@ -39,6 +39,7 @@ class _ReplanningDeepSeekStub:
     def __init__(self) -> None:
         self.plan_inputs: list[dict] = []
         self.critic_calls = 0
+        self.critic_system_prompts: list[str] = []
 
     async def complete(self, request) -> ModelResponse:
         title = request.response_schema.get("title")
@@ -60,6 +61,7 @@ class _ReplanningDeepSeekStub:
             }
         elif title == "CriticDecision":
             self.critic_calls += 1
+            self.critic_system_prompts.append(request.system)
             complete = self.critic_calls == 2
             data = {
                 "is_complete": complete,
@@ -195,6 +197,10 @@ def test_web_agent_replans_from_redacted_observations_and_completes(
 
     assert observation_tool.calls == ["round-1", "round-2"]
     assert len(deepseek.plan_inputs) == 2
+    assert all(
+        "报告本身不得列为缺失证据" in prompt
+        for prompt in deepseek.critic_system_prompts
+    )
     second_plan = deepseek.plan_inputs[1]
     assert second_plan["replan_round"] == 1
     assert "round-1" in json.dumps(second_plan["observations"])

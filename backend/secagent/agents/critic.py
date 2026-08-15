@@ -28,7 +28,12 @@ class Critic:
         response = await self.router.complete(
             ModelStage.CRITIC,
             ModelRequest(
-                system="仅根据证据账本判断任务是否完成。",
+                system=(
+                    "你正在报告生成前复核证据。仅判断现有事实证据是否足以回答"
+                    "用户目标并生成报告，而不是判断报告是否已经存在。"
+                    "报告本身不得列为缺失证据；missing_evidence 只能包含可通过"
+                    "白名单工具补充的事实或观察。"
+                ),
                 user=json.dumps(
                     {
                         "goal": parsed.goal,
