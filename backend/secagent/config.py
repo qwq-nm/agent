@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     cookie_secure: bool = False
     jwt_signing_key: str | None = None
     jwt_signing_key_file: Path | None = None
+    provider_credential_encryption_key: str | None = None
+    provider_credential_encryption_key_file: Path | None = None
     data_dir: Path = Path("data")
     model_mode: str = "auto"
     model_timeout_seconds: float = 30.0
@@ -62,6 +64,12 @@ class Settings(BaseSettings):
 
     def jwt_key(self) -> str | None:
         return read_secret(self.jwt_signing_key, self.jwt_signing_key_file)
+
+    def provider_credential_key(self) -> str | None:
+        return read_secret(
+            self.provider_credential_encryption_key,
+            self.provider_credential_encryption_key_file,
+        )
 
 
 @lru_cache

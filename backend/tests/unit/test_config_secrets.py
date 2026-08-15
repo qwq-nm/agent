@@ -59,11 +59,13 @@ def test_settings_secret_accessors_treat_blank_values_as_unconfigured():
         deepseek_api_key="  ",
         glm_api_key="\t",
         jwt_signing_key="\n",
+        provider_credential_encryption_key=" ",
     )
 
     assert settings.deepseek_key() is None
     assert settings.glm_key() is None
     assert settings.jwt_key() is None
+    assert settings.provider_credential_key() is None
 
 
 def test_settings_uses_required_production_defaults(monkeypatch: pytest.MonkeyPatch):
