@@ -25,13 +25,14 @@ from secagent.tools.log_tools import (
     TimelineBuilder,
 )
 from secagent.tools.registry import ToolRegistry
+from secagent.tools.http_request import HttpRequest
 from secagent.tools.source_tools import (
     ConfigChecker,
     ProjectDetector,
     SecretScanner,
     SourceScanner,
 )
-from secagent.tools.web_tools import FormExtract, HeaderCheck, HttpFetch, UrlGuardTool
+from secagent.tools.web_tools import FormExtract, HeaderCheck, UrlGuardTool
 from secagent.security.url_guard import UrlGuard
 
 
@@ -69,7 +70,7 @@ def build_worker_registry(allowed_hosts: set[str]) -> ToolRegistry:
             SecretScanner(),
             ConfigChecker(),
             UrlGuardTool(guard),
-            HttpFetch(guard),
+            HttpRequest(guard),
             HeaderCheck(),
             FormExtract(),
         ]

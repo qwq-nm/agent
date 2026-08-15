@@ -17,6 +17,7 @@ SENSITIVE_KEYS = {
     "token",
     "traceback",
 }
+EXACT_SENSITIVE_KEYS = {"body", "request_body"}
 SECRET_PATTERN = re.compile(
     r"(?:\b(?:sk|api)[-_][A-Za-z0-9_-]{4,}\b|"
     r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b|"
@@ -130,7 +131,9 @@ def _normalized_key(key: str) -> tuple[str, str]:
 
 
 def _contains_sensitive_key(normalized_key: str, compact_key: str) -> bool:
-    return any(
+    return normalized_key in EXACT_SENSITIVE_KEYS or compact_key in {
+        value.replace("_", "") for value in EXACT_SENSITIVE_KEYS
+    } or any(
         sensitive in normalized_key or sensitive.replace("_", "") in compact_key
         for sensitive in SENSITIVE_KEYS
     )

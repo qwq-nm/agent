@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
 from secagent.domain import TaskScene
+from secagent.tools.http_request import HttpRequest
 
 
 @dataclass(frozen=True)
@@ -33,7 +34,7 @@ SCENES = {
     ),
     TaskScene.WEB_ANALYSIS: ScenePolicy(
         TaskScene.WEB_ANALYSIS,
-        ("url_guard", "http_fetch", "header_check", "form_extract"),
+        ("url_guard", HttpRequest.name, "header_check", "form_extract"),
         ("http_observation",),
     ),
 }

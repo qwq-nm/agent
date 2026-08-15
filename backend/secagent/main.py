@@ -39,7 +39,8 @@ from secagent.tools.source_tools import (
     SecretScanner,
     SourceScanner,
 )
-from secagent.tools.web_tools import FormExtract, HeaderCheck, HttpFetch, UrlGuardTool
+from secagent.tools.http_request import HttpRequest
+from secagent.tools.web_tools import FormExtract, HeaderCheck, UrlGuardTool
 
 
 def create_app(
@@ -102,7 +103,7 @@ def create_app(
             SecretScanner(),
             ConfigChecker(),
             UrlGuardTool(url_guard),
-            HttpFetch(url_guard),
+            HttpRequest(url_guard),
             HeaderCheck(),
             FormExtract(),
         ]

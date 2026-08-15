@@ -1,11 +1,9 @@
 from html.parser import HTMLParser
-from urllib.parse import urljoin
-
-import httpx
 
 from secagent.domain import RiskLevel, ToolResult
-from secagent.security.url_guard import BlockedUrl, UrlGuard
+from secagent.security.url_guard import UrlGuard
 from secagent.tools.base import BaseTool, ToolContext
+from secagent.tools.http_request import HttpRequest
 
 
 class UrlGuardTool(BaseTool):
@@ -34,77 +32,8 @@ class UrlGuardTool(BaseTool):
         )
 
 
-class HttpFetch(BaseTool):
-    name = "http_fetch"
-    scene = "web_analysis"
-    risk_level = RiskLevel.MEDIUM
-    idempotent = True
-
-    def __init__(
-        self,
-        guard: UrlGuard,
-        transport=None,
-        max_redirects: int = 3,
-        max_body_bytes: int = 1_000_000,
-    ) -> None:
-        self.guard = guard
-        self.transport = transport
-        self.max_redirects = max_redirects
-        self.max_body_bytes = max_body_bytes
-
-    async def run(self, params: dict, context: ToolContext) -> ToolResult:
-        current = params["url"]
-        async with httpx.AsyncClient(
-            transport=self.transport,
-            follow_redirects=False,
-            timeout=10.0,
-        ) as client:
-            for _ in range(self.max_redirects + 1):
-                self.guard.check(current)
-                response = await client.get(
-                    current,
-                    headers={"User-Agent": "SecAgent-X/0.1 Passive Analyzer"},
-                )
-                if response.is_redirect:
-                    location = response.headers.get("location")
-                    if not location:
-                        raise BlockedUrl("blocked redirect without location")
-                    current = urljoin(current, location)
-                    continue
-                body = response.content[: self.max_body_bytes]
-                headers = dict(response.headers)
-                body_preview = body.decode(
-                    response.encoding or "utf-8", errors="replace"
-                )
-                header_names = ", ".join(sorted(headers))
-                observation = {
-                    "final_url": current,
-                    "status_code": response.status_code,
-                    "headers": headers,
-                    "body_preview": body_preview,
-                }
-                return ToolResult(
-                    success=True,
-                    summary=f"HTTP {response.status_code}",
-                    evidence=[
-                        {
-                            "evidence_type": "http_observation",
-                            "source": current,
-                            "content": (
-                                f"HTTP {response.status_code} {current}; "
-                                f"headers={header_names}"
-                            ),
-                            "confidence": 1.0,
-                            "metadata": observation,
-                        }
-                    ],
-                    warnings=(
-                        ["响应体已截断"]
-                        if len(response.content) > len(body)
-                        else []
-                    ),
-                )
-        raise BlockedUrl("blocked redirect limit exceeded")
+class HttpFetch(HttpRequest):
+    """Backward-compatible name for the guarded HTTP request tool."""
 
 
 class HeaderCheck(BaseTool):
