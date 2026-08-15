@@ -21,6 +21,8 @@ cd F:\codex\secagent-x
 py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 Copy-Item .env.example .env
+$key = & .\.venv\Scripts\python.exe -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+Set-Content -NoNewline secrets\provider_credential_encryption_key.txt $key
 $env:MODEL_MODE="mock"
 .\.venv\Scripts\python.exe -m uvicorn secagent.main:app --reload --port 8000
 ```
@@ -40,6 +42,8 @@ npm run dev
 ```powershell
 cd F:\codex\secagent-x
 Copy-Item .env.example .env
+$key = & .\.venv\Scripts\python.exe -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+Set-Content -NoNewline secrets\provider_credential_encryption_key.txt $key
 python scripts\build_demo_archives.py
 docker compose up --build -d
 docker compose ps
@@ -61,7 +65,9 @@ docker compose down
 | `auto` | 按阶段优先 GLM/DeepSeek；已配置模型不可用时尝试另一模型，最后降级到显式 Mock。 |
 | `live` | 只使用已配置的真实 GLM/DeepSeek；失败时不降级到 Mock。 |
 
-真实模式需在未提交的 `.env` 中设置 `GLM_API_KEY`、`DEEPSEEK_API_KEY`。项目不使用 GPT。
+真实模式下，管理员应在浏览器控制台的 Provider 凭据表单中录入 GLM 和 DeepSeek key；它们会加密保存到数据库中。未提交的 `.env` 或文件 Secret 中的 `GLM_API_KEY`、`DEEPSEEK_API_KEY` 仍可作为向后兼容的回退。`MODEL_MODE=live` 在两个数据库凭据保存前会保持 readiness not-ready，但 liveness 仍可让控制台、Worker 和前端启动。`secrets\provider_credential_encryption_key.txt` 是 Git 忽略的本地生成文件，Docker 启动前必须存在。除本地测试外，请通过 HTTPS 访问控制台。项目不使用 GPT。
+
+迁移完成后可运行 `docker compose exec api python -m secagent.cli create-admin --username admin`，并在两次提示中输入 `admin` 来创建本地 `admin/admin`。这是演示初始账号，首次登录后必须更改密码，绝不能用于生产。
 
 ## 测试
 

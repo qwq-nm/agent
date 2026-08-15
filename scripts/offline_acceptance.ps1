@@ -7,6 +7,9 @@ if (-not (Test-Path -LiteralPath $python)) {
 }
 
 $baseTemp = Join-Path $env:TEMP "secagent-x-offline-$PID"
+& $python -m pytest backend/tests/unit/test_config_secrets.py -v --basetemp $baseTemp
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
 & $python -m pytest backend/tests --cov=secagent --cov-report=term-missing --cov-fail-under=85 --basetemp $baseTemp
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

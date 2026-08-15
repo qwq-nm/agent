@@ -35,19 +35,22 @@ services:
       DATA_DIR: /data
       MODEL_MODE: mock
       JWT_SIGNING_KEY: ${JWT_SIGNING_KEY:-local-development-signing-key-change-me}
+      PROVIDER_CREDENTIAL_ENCRYPTION_KEY: ${PROVIDER_CREDENTIAL_ENCRYPTION_KEY:-}
+      PROVIDER_CREDENTIAL_ENCRYPTION_KEY_FILE: /run/secrets/provider_credential_encryption_key
       WORKER_CONCURRENCY: 3
       WEB_ALLOWED_HOSTS: ${WEB_ALLOWED_HOSTS:-web-demo}
       DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-pro}
       GLM_MODEL: ${GLM_MODEL:-glm-5.2}
     volumes:
       - secagent-data:/data
+      - ./secrets/provider_credential_encryption_key.txt:/run/secrets/provider_credential_encryption_key:ro
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health/ready')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health/live')"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -65,9 +68,12 @@ services:
       DATA_DIR: /data
       MODEL_MODE: mock
       JWT_SIGNING_KEY: ${JWT_SIGNING_KEY:-local-development-signing-key-change-me}
+      PROVIDER_CREDENTIAL_ENCRYPTION_KEY: ${PROVIDER_CREDENTIAL_ENCRYPTION_KEY:-}
+      PROVIDER_CREDENTIAL_ENCRYPTION_KEY_FILE: /run/secrets/provider_credential_encryption_key
       WORKER_CONCURRENCY: 3
     volumes:
       - secagent-data:/data
+      - ./secrets/provider_credential_encryption_key.txt:/run/secrets/provider_credential_encryption_key:ro
     depends_on:
       api:
         condition: service_healthy

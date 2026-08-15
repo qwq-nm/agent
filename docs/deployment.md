@@ -7,6 +7,7 @@
 - `MODEL_MODE`：`mock`、`auto` 或 `live`；`SECAGENT_PORT` 是宿主机前端端口，默认 `18080`。
 - `DEEPSEEK_API_KEY/BASE_URL/MODEL`：DeepSeek OpenAI-compatible 接口。
 - `GLM_API_KEY/BASE_URL/MODEL`：智谱 GLM OpenAI-compatible 接口。
+- `PROVIDER_CREDENTIAL_ENCRYPTION_KEY/PROVIDER_CREDENTIAL_ENCRYPTION_KEY_FILE`：用于加密数据库中的 Provider 凭据；部署时必须提供，文件设置优先于环境变量。
 - `DATABASE_URL`：开发 Compose 默认指向 `postgres:16`。
 - `REDIS_URL`：开发 Compose 默认指向 `redis:7`。
 - `DATA_DIR`：任务工作区、上传材料所在根目录。
@@ -20,6 +21,8 @@
 
 ```powershell
 Copy-Item .env.example .env
+$key = & .\.venv\Scripts\python.exe -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+Set-Content -NoNewline secrets\provider_credential_encryption_key.txt $key
 docker compose config
 docker compose up --build -d
 docker compose ps
@@ -29,19 +32,33 @@ Invoke-RestMethod http://127.0.0.1:18080/api/models/status
 Invoke-RestMethod http://127.0.0.1:18080/api/tools
 ```
 
-开发栈显式使用 `MODEL_MODE=mock`，API 启动前执行 Alembic 迁移；PostgreSQL 和 Redis 健康后 API 才启动，Worker 和前端等待 API readiness。`web-demo` 不映射到宿主机端口，只能从 Compose 内部网络访问。
+`secrets\provider_credential_encryption_key.txt` 是本地生成且被 Git 忽略的文件；必须在第一次 `docker compose up` 前创建，基础 Compose 会以只读方式将它挂载到 API 和 Worker 的同一路径。不要把值写入 `.env`、示例文件或提交记录。
 
-生产覆盖使用三个只读 Secret。先在 Windows 主机创建文件（内容只保存在本机）：
+开发栈显式使用 `MODEL_MODE=mock`，API 启动前执行 Alembic 迁移；PostgreSQL 和 Redis 健康后 API 才启动，Worker 和前端等待 API liveness。`web-demo` 不映射到宿主机端口，只能从 Compose 内部网络访问。`/api/health/live` 只表示进程存活；在 `MODEL_MODE=live` 下，即使两个数据库 Provider 凭据尚未保存，控制台、Worker 和前端也会启动，而 `/api/health/ready` 会返回 not-ready 且 `model_configuration` 为 failed。
+
+生产覆盖使用四个只读 Docker Secret，其中加密主密钥与本地使用同名的 `provider_credential_encryption_key` Secret。先在 Windows 主机创建文件（内容只保存在本机）：
 
 ```powershell
 Copy-Item secrets\deepseek_api_key.txt.example secrets\deepseek_api_key.txt
 Copy-Item secrets\glm_api_key.txt.example secrets\glm_api_key.txt
 Copy-Item secrets\jwt_signing_key.txt.example secrets\jwt_signing_key.txt
+$key = & .\.venv\Scripts\python.exe -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+Set-Content -NoNewline secrets\provider_credential_encryption_key.txt $key
 docker compose -f docker-compose.yml -f docker-compose.prod.yml config
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build -d
 ```
 
-生产覆盖强制 `MODEL_MODE=live`、`COOKIE_SECURE=true` 和最多 3 个 Worker 并发；不会在 readiness 中调用付费 Provider，只验证两个 Provider 配置和 JWT Secret 存在。
+生产覆盖强制 `MODEL_MODE=live`、`COOKIE_SECURE=true` 和最多 3 个 Worker 并发；不会在 readiness 中调用付费 Provider，只验证两个 Provider 配置和 JWT Secret 存在。DeepSeek/GLM 环境变量和文件 Secret 仍是向后兼容的回退方式；正常的 Provider key 录入路径是管理员登录控制台后的浏览器表单，密钥会加密保存在数据库中。除本地测试外，必须通过 HTTPS 部署控制台以保护管理员会话和录入的凭据。
+
+## 管理员初始化
+
+API 完成迁移后，创建本地演示管理员：
+
+```powershell
+docker compose exec api python -m secagent.cli create-admin --username admin
+```
+
+在两次密码提示中输入 `admin`，即可创建 `admin/admin`。这只用于本地演示，首次登录后必须立即更改该密码；不要在共享或生产环境使用这个密码。
 
 ## 数据卷备份与恢复
 

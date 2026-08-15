@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 
 $files = git ls-files --cached --others --exclude-standard -z
 $found = @()
-$assignment = '(?im)^\s*(DEEPSEEK_API_KEY|GLM_API_KEY|JWT_SIGNING_KEY)[ \t]*[:=][ \t]*["'']?([^\r\n\s"''$<>{}]+)'
+$assignment = '(?m)^\s*(DEEPSEEK_API_KEY|GLM_API_KEY|JWT_SIGNING_KEY|PROVIDER_CREDENTIAL_ENCRYPTION_KEY)[ \t]*[:=][ \t]*["'']?([^\r\n\s"''$<>{}]+)'
 $token = '(?i)\bsk-(?!demo-not-real-)[A-Za-z0-9_-]{12,}\b'
 
 foreach ($path in ($files -split "`0")) {

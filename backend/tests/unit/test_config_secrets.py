@@ -118,3 +118,50 @@ def test_docker_compose_provider_defaults_match_settings() -> None:
     assert "GLM_MODEL: ${GLM_MODEL:-glm-5.2}" in compose
     assert "deepseek-chat" not in compose
     assert "glm-4-flash" not in compose
+
+
+def test_base_compose_mounts_provider_credential_key_for_api_and_worker() -> None:
+    repository_root = Path(__file__).resolve().parents[3]
+    compose = (repository_root / "docker-compose.yml").read_text(encoding="utf-8")
+
+    expected_mount = (
+        "./secrets/provider_credential_encryption_key.txt:"
+        "/run/secrets/provider_credential_encryption_key:ro"
+    )
+
+    assert compose.count(
+        "PROVIDER_CREDENTIAL_ENCRYPTION_KEY_FILE: "
+        "/run/secrets/provider_credential_encryption_key"
+    ) == 2
+    assert compose.count(expected_mount) == 2
+    assert "/api/health/live" in compose
+    assert "/api/health/ready" not in compose
+
+
+def test_production_compose_mounts_same_provider_credential_secret_for_api_and_worker() -> None:
+    repository_root = Path(__file__).resolve().parents[3]
+    compose = (repository_root / "docker-compose.prod.yml").read_text(encoding="utf-8")
+
+    expected_secret = """- source: provider_credential_encryption_key
+        target: /run/secrets/provider_credential_encryption_key
+        mode: 0444"""
+
+    assert compose.count(
+        "PROVIDER_CREDENTIAL_ENCRYPTION_KEY_FILE: "
+        "/run/secrets/provider_credential_encryption_key"
+    ) == 2
+    assert compose.count(expected_secret) == 2
+    assert "provider_credential_encryption_key:\n    file: ./secrets/provider_credential_encryption_key.txt" in compose
+    assert compose.count("volumes: !override\n      - secagent-data:/data") == 2
+
+
+def test_secret_scan_covers_provider_credential_encryption_key_and_skips_examples() -> None:
+    repository_root = Path(__file__).resolve().parents[3]
+    scan_script = (repository_root / "scripts" / "check_no_secrets.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "PROVIDER_CREDENTIAL_ENCRYPTION_KEY" in scan_script
+    assert "$assignment = '(?m)^\\s*(" in scan_script
+    assert "\\.txt\\.example$" in scan_script
+    assert "backend[\\\\/]tests" in scan_script
