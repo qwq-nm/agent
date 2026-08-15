@@ -102,4 +102,14 @@ docker compose logs --tail 100 web-demo
 
 ## 升级与回滚
 
-升级前备份 `secagent-data`，执行 `docker compose build --pull`，再运行完整测试矩阵。回滚时使用之前的镜像/代码版本并恢复兼容的数据卷备份。当前 MVP 使用 `create_all` 管理初始表结构，生产升级到多版本 schema 前应引入 Alembic 迁移。
+升级前备份 PostgreSQL、Redis 和证据卷，执行 `docker compose build --pull`，再运行离线验收与部署环境检查。回滚时使用之前的镜像/代码版本并恢复兼容的数据卷备份。当前服务启动前由 Alembic 管理 schema；`create_all` 仅用于 SQLite 测试 fixture。
+
+## 离线验收
+
+在没有 Docker daemon 或真实模型密钥的开发机上，运行以下命令验证后端覆盖率、前端测试/构建和 Secret 扫描：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\offline_acceptance.ps1
+```
+
+该命令不会启动容器或调用 Provider。Docker Compose 健康状态、Worker 异常恢复和 live Provider 冒烟需在部署环境中单独执行。

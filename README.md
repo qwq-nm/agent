@@ -9,7 +9,7 @@ SecAgent-X 是一个具备自主决策能力、但受明确安全边界约束的
 - 日志链：格式识别、结构化解析、`WEB-SCAN-002` 攻击模式、时间线。
 - 源码链：只读静态扫描、危险执行函数、硬编码密钥、危险配置；绝不导入或执行上传代码。
 - Web 链：只允许 HTTP(S) GET、逐跳重定向复检、SSRF 私网阻断、响应头观察、表单只读提取。
-- SQLite 任务状态、工具/模型调用、审批、证据和 Markdown 报告。
+- PostgreSQL 任务状态、工具/模型调用、审批、证据和 Markdown 报告；Redis/Celery 负责排队和 Worker 执行。
 - Vue 3 控制台：任务创建、决策时间线、证据账本、人工审批、报告和系统状态。
 
 ## Windows 本地开发
@@ -66,8 +66,8 @@ docker compose down
 ## 测试
 
 ```powershell
-# 后端与 80% 覆盖率门槛
-.\.venv\Scripts\python.exe -m pytest --cov=secagent --cov-report=term-missing --cov-fail-under=80
+# 后端与 85% 覆盖率门槛
+.\.venv\Scripts\python.exe -m pytest --cov=secagent --cov-report=term-missing --cov-fail-under=85
 
 # 前端组件测试、类型检查与构建
 cd frontend
@@ -84,7 +84,13 @@ npm ci
 npm run build:fixtures
 npx playwright install chromium
 npm run test:e2e
+
+# 最小离线验收：后端、前端构建和 Secret 扫描
+cd ..
+powershell -ExecutionPolicy Bypass -File scripts\offline_acceptance.ps1
 ```
+
+`offline_acceptance.ps1` 不调用真实模型，也不要求 API key。Docker daemon、Worker 恢复演练和付费 Provider 验收属于部署环境检查，需在 Docker 启动且本机已配置未提交 Secret 后单独执行。
 
 ## 安全限制
 
