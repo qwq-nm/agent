@@ -1,111 +1,84 @@
-# Task 4 Report: Task Ownership, RBAC, User Administration, and Audit
+# Web Task Agent Task 4 Report
 
-## Scope and baseline
+## Scope
 
-- Baseline: `6e92e5a`
-- Implemented only Task 4 concerns: task ownership/RBAC, administrator user management, append-only application audit records, common error envelopes, and approval expiry.
-- Reused the existing `owner_id`, `audit_events`, and `approvals.expires_at` schema. No migration was required.
-- Preserved refresh rotation and logout-lineage behavior while adding user-first locking for concurrent password/disable revocation.
+- Plan: `docs/superpowers/plans/2026-08-15-web-task-agent.md`
+- Feature range: `fd0d495..737d48f`
+- Final review-fix range: `e3195f8..737d48f`
+- Runtime: FastAPI, Celery/Redis, PostgreSQL, OpenCode Go DeepSeek route,
+  GLM parse/report route, and the existing evidence ledger.
 
-## Design delivered
+Task 4 documents the OpenCode Go deployment settings and verifies that the
+bounded Web Agent works through the real Compose stack. No API key was printed
+or written to this report; live credentials remain encrypted in PostgreSQL.
 
-- Every task API requires a real Bearer-authenticated user.
-- Analysts create, list, read, report on, and mutate only their own tasks. Administrators can access all tasks.
-- `TaskRepository.get_authorized()` and `list_authorized()` are the authorization boundary. Known cross-owner access returns 403 and records `task.access_denied`; missing IDs return 404.
-- `/api/admin/users` supports admin-only list/create/update. PATCH accepts only `is_active` and/or a replacement password. The tenth-user team cap is enforced transactionally.
-- Disabling a user or replacing a password revokes all active refresh sessions in the same transaction. Active administrator rows are locked in a stable order, and the last active administrator cannot be disabled.
-- Refresh rotation resolves and locks the user before claiming the refresh token, giving user changes and rotation a consistent user-to-session lock order while preserving logout lineage revocation.
-- Audit writes are insert-only through `AuditService.record()`. Details are recursively field-redacted; secret-shaped strings, unsupported objects, resource IDs, and IP fields are sanitized before persistence.
-- Task create/lifecycle/approval state and their audit event commit atomically. Long-running task execution records `task.run: started` before the runner executes.
-- Approval decisions atomically consume one pending row and conditionally move a task out of `waiting_human`, preventing approve/reject and approve/cancel races.
-- New approvals expire after 24 hours. Legacy rows with null `expires_at` use `created_at + 24h`. Expired decisions return 409, record `approval.expired`, and leave the task `waiting_human`.
-- All error responses use exactly `{error:{code,message,fields,trace_id}}`; framework 404/405, validation errors, auth errors, conflicts, and generic 500 responses use the same contract. Raw exception/provider content is not returned.
+## Delivered behavior
 
-## RED evidence
+- `deepseek` can use the OpenCode Go Chat Completions-compatible endpoint while
+  retaining the existing provider name and PLAN/CRITIC stage routing.
+- `http_fetch` performs bounded authorized HTTP requests, revalidates redirects,
+  limits request/response bodies, and persists redacted observations.
+- Web tasks can replan from persisted, redacted observations up to `max_replans`.
+- Model and tool calls are bounded by the task's remaining deadline.
+- Only `http_fetch` transport/timeout failures are eligible for controlled
+  replanning; other failed tool results use the normal failure path.
+- Medium-risk approvals are scoped to the exact task step, so a replan that
+  changes parameters requires a new approval.
+- Critic output that identifies only downstream report generation as missing is
+  normalized complete; factual evidence gaps remain intact.
 
-The following failures were observed before their corresponding production changes:
+## RED/GREEN evidence
 
-- RBAC: unauthenticated task list returned 200; cross-owner read returned 200; task responses lacked `owner_id`; analyst lists included other owners.
-- Admin routes: all `/api/admin/*` requests returned 404; duplicate, last-admin, patch validation, and refresh-revocation cases failed.
-- Audit: module initially absent; then denied access, login failure, task actions, provider checks, and expiry events were absent.
-- Errors: responses used `detail` or plain text, unexpected failures were not JSON, and framework 404/405 bypassed the custom contract.
-- Approval expiry: an expired approval was accepted and moved the task out of `waiting_human`.
-- Hardening RED cases: malformed JSON produced 500; arbitrary audit objects/tuples leaked serialized content; missing pending approval returned 404; the eleventh user was accepted; refresh rotation did not lock the user; failed-login identifiers were stored raw; concurrent approval/task transitions were not protected; legacy null expiry returned a generic conflict.
+- Replanned HTTP parameters initially reused an old same-tool approval and ran
+  the second URL. After the fix, the task returns to `waiting_human` and only the
+  originally approved URL executes.
+- A three-second fake tool initially exceeded a one-second task timeout. After
+  the fix, execution is cancelled within the task budget and the task records a
+  deadline budget failure.
+- A non-transport Web tool failure initially entered the critic/replan loop.
+  After the fix, it raises its original error without a critic or second plan;
+  `http_fetch/http_transport_error` still replans and completes.
+- A critic response whose only missing item was `Generate the final report`
+  initially exhausted `max_replans=0`. After normalization, the same task enters
+  Reporter and completes.
 
-## GREEN implementation and regression coverage
+## Independent review fixes
 
-- Added integration coverage in `test_rbac.py`, `test_admin_users.py`, `test_audit_events.py`, and `test_error_contract.py`.
-- Existing task, scene, system, and authentication tests continue to use real login flows; no authentication dependency overrides were added.
-- Added real database concurrency coverage for single-consumption approval decisions and single-winner transitions out of `waiting_human`.
-- Re-ran refresh rotation/replay, logout successor revocation, and in-flight rotation/logout tests after changing lock order.
-- Updated legacy auth error assertions only to account for per-request trace IDs and the new common envelope.
+The first review found four issues in the live-loop implementation:
+
+1. Approval checks were scoped only by task and tool name.
+2. Tool execution could outlive the task deadline.
+3. Every failed Web tool result could trigger replanning.
+4. Report-only critic guidance was prompt-only.
+
+Commit `737d48f` addresses all four with focused integration regressions. A
+follow-up independent review was requested against `e3195f8..737d48f`.
 
 ## Verification
 
-- Task 4 required set: 30 passed.
-- Backend full suite before the final legacy-expiry parameterization: 84 passed; the parameterized legacy case adds one additional passing case.
-- Coverage run: 84 passed, total backend coverage 93% (Task 4 production modules range from 81% to 97%).
-- `python -m compileall -q backend/secagent`: passed.
-- `git diff --check`: passed.
-- No repository linter executable/configuration was available; no package was installed solely for linting.
-- Normal test runs show one pre-existing Starlette/httpx deprecation warning. The coverage run additionally surfaced SQLite connection ResourceWarnings during garbage collection; these are test-engine lifecycle warnings, not failed assertions.
+- Focused Web Agent integration file: 9 passed.
+- Full backend: 267 passed, 91.08% coverage (required minimum 85%).
+- Frontend: 9 files and 41 tests passed.
+- Frontend production build: TypeScript check and Vite build passed.
+- Compose: API, PostgreSQL, and Redis healthy; worker ready; frontend and demo
+  target running.
+- Probes: `/api/health/live` returned 200 and `/api/health/ready` returned 200.
+- Live internal task `85a51002-36f0-4b4a-9308-1082cf648800` completed after one
+  approval with 4 model calls, 4 tool calls, 6 evidences, and 1 report.
+- `git diff --check` passed for the final review fixes.
 
-## Independent review and self-review
+## External target observation
 
-- Independent review initially found approval decision races, refresh/user lock inversion, split state/audit commits, malformed JSON handling, and attacker-controlled login audit IDs.
-- The implementation was revised with conditional SQL updates, consistent lock order, atomic transaction boundaries, bounded/hash-based login identifiers, and regression tests.
-- Follow-up review found the approve/cancel race and legacy null expiry; both were addressed with conditional task transitions and `created_at + 24h` fallback semantics.
-- Secret scan by inspection confirms no password, JWT, cookie, API key, raw external response, or stack content is intentionally persisted or returned by the new audit/error paths.
+The supplied external CTF endpoint resolved and accepted TCP connections, but
+repeated HTTP attempts returned an empty response/transport error. The live task
+performed bounded attempts and replans, then ended `failed_retryable` at
+`MAX_REPLANS`. This validates failure bounds but cannot establish the remote
+challenge's expected answer while the endpoint returns no HTTP response.
 
-## Residual risks and decisions
+## Known warnings
 
-- The brief explicitly requires 403 for a known cross-owner task and 404 for a missing task. This distinction reveals existence to an authenticated analyst; it is retained to match the specified contract and is covered by tests.
-- Concurrency regression tests run on SQLite. The SQL uses conditional updates/row locking compatible with PostgreSQL, but PostgreSQL-backed concurrency tests remain desirable in CI.
-- Audit append-only behavior is enforced at the application/API boundary: there are no audit update/delete service methods or routes. Database administrators necessarily retain direct database authority.
-- The warning-only Starlette/httpx compatibility issue is outside Task 4 and should be handled in dependency maintenance.
-
-## Main-review security fixes
-
-- Tightened audit persistence with an audit-only recursive policy for generic `key`, body/response-body, exception, client-IP/IP, and identifier aliases. The general ledger redactor remains less destructive so ordinary business-key fields retain their value.
-- Extended recursive string scrubbing for labeled credentials, including quoted values and values nested in mappings or sequences.
-- Approval reasons are scrubbed and limited to 1000 characters at the repository persistence boundary. Ledger snapshots scrub again so legacy rows cannot expose credential-shaped text, while ordinary explanatory text remains intact.
-
-### Fix RED/GREEN evidence
-
-- Audit RED: the new persistence regression failed because a generic `key` value was stored verbatim. GREEN: the strict-alias and existing recursive-redaction cases passed together (2 passed).
-- Approval RED: the API/DB regression showed the full reason stored verbatim, and the repository-boundary regression stored 2016 characters. GREEN: both regressions passed (2 passed).
-- Quoted-secret RED: a quoted password containing spaces left a suffix in the persisted reason. GREEN: the regression passed after quoted values were scrubbed as one unit.
-- Focused audit file: 15 passed before the final quoted-secret refinement; the final verification below reruns the complete required sets.
-
-### Fix self-review and risk notes
-
-- The strict generic `key` policy is intentionally scoped to append-only audit details; normal `redact_mapping()` consumers are unchanged for ordinary business data.
-- Sanitization occurs before the approval update statement, so raw user-controlled reasons never enter the database through the repository. Snapshot-time scrubbing is defense in depth for pre-existing rows.
-- Pattern-based redaction cannot classify every possible opaque secret. Field-level audit redaction is deliberately conservative, and arbitrary unsupported objects remain non-serializable placeholders.
-
-### Fix verification
-
-- Task 4 required set: 35 passed.
-- Backend full suite: 88 passed.
-- Both runs emitted only the existing Starlette/httpx deprecation warning.
-- `python -m compileall -q backend/secagent`: passed.
-- `git diff --check`: passed.
-
-## Second main-review redaction fix
-
-- Verified that quoted field labels in JSON/log text bypassed the first labeled-secret expression because the closing quote appeared between the label and `:`/`=`.
-- Added real persistence regressions for both `AuditService` and approval API-to-database-to-ledger flows. They cover double-quoted and single-quoted labels, optional whitespace, colon/equal separators, and backslash-escaped JSON fragments. A non-sensitive password-policy/API-key sentence remains unchanged.
-- RED: both persistence regressions failed with every quoted/escaped value still present.
-- GREEN: both focused regressions passed after accepting optional quoted label boundaries and preserving normal, single-quoted, double-quoted, or escaped value delimiters around the replacement marker.
-- The expression uses delimiter-bounded character classes and fixed alternatives rather than wildcard or nested repetition, limiting over-consumption and avoiding catastrophic backtracking structure. The approval reason's 1000-character pre-scrub and post-scrub bounds remain enforced.
-- Related audit suite: 17 passed. Task 4 required set: 37 passed. Backend full suite: 90 passed. All runs emitted only the existing Starlette/httpx deprecation warning.
-- `python -m compileall -q backend/secagent` and `git diff --check`: passed for the second fix.
-
-## Third main-review escaped-value fix
-
-- Reproduced the remaining leak when a log-escaped quoted credential value itself contained escaped quotes. The prior value regex stopped at the first inner quote and left the middle and suffix intact; the single-quoted form had the same behavior.
-- RED: the real audit persistence test and approval API-to-database-to-ledger test both failed with inner sentinel text and an unterminated value tail still present.
-- Replaced quoted-value regex matching with a delimiter scanner. Ordinary quoted values close only after an even run of preceding backslashes. In a one-layer escaped wrapper, the equivalent decoded rule closes on backslash runs congruent to one modulo four, so inner escaped quotes are consumed while structural closing quotes terminate the value.
-- The scanner advances monotonically, uses no wildcard/nested regex repetition, and truncates the remaining text after an unterminated sensitive quoted value. Non-sensitive prose remains unchanged and the approval reason is still bounded to 1000 characters before and after scrubbing.
-- GREEN: new focused regressions 2 passed; audit suite 17 passed; Task 4 required set 37 passed; backend full suite 90 passed. Only the existing Starlette/httpx deprecation warning was emitted.
-- `python -m compileall -q backend/secagent` and `git diff --check`: passed for the third fix.
+- Full backend tests emit the existing Starlette TestClient/httpx deprecation
+  warning.
+- Test-only SQLite engines emit connection `ResourceWarning` messages during
+  garbage collection. They do not fail assertions or affect the PostgreSQL
+  Compose run.
