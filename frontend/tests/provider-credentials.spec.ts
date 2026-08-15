@@ -60,10 +60,27 @@ it('saves a typed provider key then clears the local input and refreshes statuse
   expect(wrapper.text()).not.toContain('sk-test-secret-complete')
 })
 
+it('clears the local input and displays a safe error when save fails', async () => {
+  api.saveProviderCredential.mockRejectedValueOnce(new Error('Credential storage is unavailable'))
+  const wrapper = mount(SystemView)
+  await flushPromises()
+  const input = wrapper.get('input[name="provider-key-deepseek"]')
+
+  await input.setValue('sk-failed-save-secret')
+  await wrapper.get('[data-action="save-provider-deepseek"]').trigger('click')
+  await flushPromises()
+
+  expect((input.element as HTMLInputElement).value).toBe('')
+  expect(wrapper.text()).toContain('Credential storage is unavailable')
+  expect(wrapper.text()).not.toContain('sk-failed-save-secret')
+})
+
 it('confirms before clearing a provider key and refreshes statuses', async () => {
   const wrapper = mount(SystemView)
   await flushPromises()
+  const input = wrapper.get('input[name="provider-key-deepseek"]')
 
+  await input.setValue('sk-unsaved-replacement')
   await wrapper.get('[data-action="clear-provider-deepseek"]').trigger('click')
   expect(wrapper.get('[data-form="clear-provider"]').exists()).toBe(true)
   expect(api.clearProviderCredential).not.toHaveBeenCalled()
@@ -72,6 +89,71 @@ it('confirms before clearing a provider key and refreshes statuses', async () =>
 
   expect(api.clearProviderCredential).toHaveBeenCalledWith('deepseek')
   expect(api.listProviderCredentials).toHaveBeenCalledTimes(2)
+  expect((input.element as HTMLInputElement).value).toBe('')
+})
+
+it('clears the local input and displays a safe error when clear fails', async () => {
+  api.clearProviderCredential.mockRejectedValueOnce(new Error('Provider credential clear was rejected'))
+  const wrapper = mount(SystemView)
+  await flushPromises()
+  const input = wrapper.get('input[name="provider-key-deepseek"]')
+
+  await input.setValue('sk-failed-clear-secret')
+  await wrapper.get('[data-action="clear-provider-deepseek"]').trigger('click')
+  await wrapper.get('[data-form="clear-provider"]').trigger('submit')
+  await flushPromises()
+
+  expect((input.element as HTMLInputElement).value).toBe('')
+  expect(wrapper.text()).toContain('Provider credential clear was rejected')
+  expect(wrapper.text()).not.toContain('sk-failed-clear-secret')
+})
+
+it('allows a GLM save while a DeepSeek save is pending', async () => {
+  let resolveDeepseek!: () => void
+  const deepseekSave = new Promise<{ provider: 'deepseek'; configured: true }>((resolve) => {
+    resolveDeepseek = () => resolve({ provider: 'deepseek', configured: true })
+  })
+  api.saveProviderCredential.mockImplementation((provider: string) => {
+    if (provider === 'deepseek') return deepseekSave
+    return Promise.resolve({ provider: 'glm', configured: true })
+  })
+  const wrapper = mount(SystemView)
+  await flushPromises()
+
+  await wrapper.get('input[name="provider-key-deepseek"]').setValue('deepseek-pending-key')
+  await wrapper.get('input[name="provider-key-glm"]').setValue('glm-concurrent-key')
+  await wrapper.get('[data-action="save-provider-deepseek"]').trigger('click')
+
+  expect(wrapper.get('[data-action="save-provider-deepseek"]').attributes('disabled')).toBeDefined()
+  expect(wrapper.get('[data-action="save-provider-glm"]').attributes('disabled')).toBeUndefined()
+  await wrapper.get('[data-action="save-provider-glm"]').trigger('click')
+  await flushPromises()
+
+  expect(api.saveProviderCredential).toHaveBeenCalledWith('deepseek', 'deepseek-pending-key')
+  expect(api.saveProviderCredential).toHaveBeenCalledWith('glm', 'glm-concurrent-key')
+
+  resolveDeepseek()
+  await flushPromises()
+})
+
+it('opens an accessible focused clear dialog and closes it with Escape', async () => {
+  const wrapper = mount(SystemView, { attachTo: document.body })
+  await flushPromises()
+
+  await wrapper.get('[data-action="clear-provider-deepseek"]').trigger('click')
+  await flushPromises()
+  const dialog = wrapper.get('[data-form="clear-provider"]')
+  const title = wrapper.get('#clear-provider-title')
+
+  expect(dialog.attributes('role')).toBe('dialog')
+  expect(dialog.attributes('aria-modal')).toBe('true')
+  expect(dialog.attributes('aria-labelledby')).toBe('clear-provider-title')
+  expect(title.text()).toContain('清除 Provider 密钥')
+  expect(dialog.element.contains(document.activeElement)).toBe(true)
+
+  await dialog.trigger('keydown', { key: 'Escape' })
+  expect(wrapper.find('[data-form="clear-provider"]').exists()).toBe(false)
+  wrapper.unmount()
 })
 
 it('preserves provider connectivity checks and their safe metadata', async () => {
