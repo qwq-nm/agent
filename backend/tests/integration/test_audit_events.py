@@ -619,3 +619,32 @@ def test_admin_audit_filters_cursor_and_actor_name(
     )
     assert older.status_code == 200
     assert all(event["id"] < cursor for event in older.json())
+
+
+def test_admin_audit_response_redacts_secrets_before_browser_delivery(
+    admin_client, app, seeded_admin
+):
+    with app.state.session_factory() as session:
+        session.add(
+            AuditEventRow(
+                actor_id=seeded_admin.id,
+                action="provider.check",
+                resource_type="provider",
+                resource_id="deepseek",
+                outcome="failure",
+                details_json='{"api_key":"sk-never-send","nested":{"token":"jwt-never-send"}}',
+            )
+        )
+        session.commit()
+
+    response = admin_client.get(
+        "/api/admin/audit-events", params={"action": "provider.check"}
+    )
+
+    assert response.status_code == 200
+    body = response.text
+    assert "sk-never-send" not in body
+    assert "jwt-never-send" not in body
+    details = response.json()[0]["details"]
+    assert details["api_key"] == "***REDACTED***"
+    assert details["nested"]["token"] == "***REDACTED***"

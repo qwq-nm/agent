@@ -11,6 +11,7 @@ from secagent.auth.dependencies import AuthenticatedUser, auth_service, require_
 from secagent.db_models import JobRunRow
 from secagent.domain import UserRole
 from secagent.repository import TaskRepository
+from secagent.security.redaction import redact_audit_details
 from secagent.services.auth_service import (
     AuthService,
     LastActiveAdminError,
@@ -211,7 +212,7 @@ def list_audit_events(
             resource_type=row.resource_type,
             resource_id=row.resource_id,
             outcome=row.outcome,
-            details=json.loads(row.details_json),
+            details=redact_audit_details(json.loads(row.details_json)),
             created_at=row.created_at,
         )
         for row in rows
