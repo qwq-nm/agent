@@ -80,6 +80,7 @@ def task_service_for(request: Request, repository: TaskRepository) -> TaskServic
         heartbeat_seconds=request.app.state.settings.job_heartbeat_seconds,
         max_auto_retries=request.app.state.settings.job_auto_retries,
         task_timeout_seconds=request.app.state.settings.task_timeout_seconds,
+        max_replans=request.app.state.settings.max_replans,
     )
 
 

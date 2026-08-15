@@ -19,6 +19,7 @@ from secagent.domain import (
     ModelStage,
     ParsedTask,
     PlanStep,
+    RiskLevel,
     TaskRead,
     TaskRunResult,
     TaskStatus,
@@ -27,6 +28,7 @@ from secagent.domain import (
 from secagent.providers.base import ProviderFailure
 from secagent.providers.router import FIXED_PROVIDER
 from secagent.repository import StaleJobLease, TaskRepository
+from secagent.security.redaction import redact_mapping
 from secagent.services.job_service import JobLease
 from secagent.services.ledger import LedgerService
 from secagent.services.task_events import TaskEventService
@@ -60,8 +62,11 @@ class AgentRunner:
         reporter: Reporter,
         *,
         timeout_seconds: int = 300,
+        max_replans: int = 2,
         now: Callable[[], datetime] = utcnow,
     ) -> None:
+        if max_replans < 0:
+            raise ValueError("max_replans must be non-negative")
         self.repository = repository
         self.ledger = ledger
         self.risk_gate = risk_gate
@@ -72,6 +77,7 @@ class AgentRunner:
         self.critic = critic
         self.reporter = reporter
         self.timeout_seconds = timeout_seconds
+        self.max_replans = max_replans
         self.now = now
 
     async def run(
@@ -140,127 +146,194 @@ class AgentRunner:
                     lambda: self.planner.plan(task, parsed),
                 )
                 plan = outcome.value
-                serialized_plan = [step.model_dump(mode="json") for step in plan]
+                replan_round = 0
+                step_start_index = 1
+                checkpoint_plan = self._plan_checkpoint(
+                    plan, replan_round, step_start_index
+                )
                 self.repository.save_orchestration_checkpoint(
                     task_id,
                     lease=lease,
                     fingerprint=fingerprint,
                     stage=ModelStage.PLAN.value,
-                    data={"steps": serialized_plan},
+                    data=checkpoint_plan,
                     model_call_id=outcome.model_call_id,
                 )
                 stages[ModelStage.PLAN.value] = {
                     "status": "success",
-                    "data": {"steps": serialized_plan},
+                    "data": checkpoint_plan,
                 }
             else:
-                raw_steps = (
-                    plan_data.get("steps") if isinstance(plan_data, dict) else None
+                plan, replan_round, step_start_index = self._load_plan_checkpoint(
+                    plan_data
                 )
-                if not isinstance(raw_steps, list):
-                    raise ValueError("invalid persisted plan checkpoint")
-                plan = [PlanStep.model_validate(step) for step in raw_steps]
 
-            runtime: dict[str, Any] = {}
-            for index, step in enumerate(plan, start=1):
-                self._ensure_running(task_id, lease_is_active)
-                params = self._resolve_params(step.params, workspace, runtime)
-                idempotency_key = self.repository.step_idempotency_key(
-                    task_id, index, step
-                )
-                cached = self.repository.completed_step_result(task_id, idempotency_key)
-                if cached is not None:
-                    result = ToolResult.model_validate(cached["result"])
-                    self._update_runtime(step.tool_name, result, runtime)
-                    continue
-
-                existing = self.repository.get_step(task_id, index)
-                if (
-                    existing is not None
-                    and existing.idempotency_key == idempotency_key
-                    and existing.status == "pending"
-                ):
-                    step_id = existing.id
-                else:
-                    if existing is None:
-                        budget.consume_step()
-                    step_id = self.repository.add_step(
-                        task_id,
-                        index,
-                        step,
-                        idempotency_key=idempotency_key,
-                        lease=lease,
-                    )
-                active_step_id = step_id
-                self.repository.set_current_step_index(task_id, index, lease=lease)
-                approved = self.repository.is_tool_approved(task_id, step.tool_name)
-                decision = self.risk_gate.check(step.risk_level, approved=approved)
-                if decision.action == "wait":
+            runtime = self._runtime_from_ledger(task_id)
+            while True:
+                for offset, proposed_step in enumerate(plan):
+                    index = step_start_index + offset
                     self._ensure_running(task_id, lease_is_active)
-                    self.repository.add_approval(
-                        task_id,
+                    tool = self.executor.registry.get(proposed_step.tool_name)
+                    step = proposed_step.model_copy(
+                        update={
+                            "risk_level": tool.risk_level,
+                            "need_human_confirm": tool.risk_level
+                            is RiskLevel.MEDIUM,
+                        }
+                    )
+                    params = self._resolve_params(step.params, workspace, runtime)
+                    idempotency_key = self.repository.step_idempotency_key(
+                        task_id, index, step
+                    )
+                    cached = self.repository.completed_step_result(
+                        task_id, idempotency_key
+                    )
+                    if cached is not None:
+                        result = ToolResult.model_validate(cached["result"])
+                        self._update_runtime(step.tool_name, result, runtime)
+                        continue
+
+                    existing = self.repository.get_step(task_id, index)
+                    if (
+                        existing is not None
+                        and existing.idempotency_key == idempotency_key
+                        and existing.status == "pending"
+                    ):
+                        step_id = existing.id
+                    else:
+                        if existing is None:
+                            budget.consume_step()
+                        step_id = self.repository.add_step(
+                            task_id,
+                            index,
+                            step,
+                            idempotency_key=idempotency_key,
+                            lease=lease,
+                        )
+                    active_step_id = step_id
+                    self.repository.set_current_step_index(
+                        task_id, index, lease=lease
+                    )
+                    approved = self.repository.is_tool_approved(
+                        task_id, step.tool_name
+                    )
+                    decision = self.risk_gate.check(
+                        tool.risk_level, approved=approved
+                    )
+                    if decision.action == "wait":
+                        self._ensure_running(task_id, lease_is_active)
+                        params_summary = json.dumps(
+                            redact_mapping(params),
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        )[:2000]
+                        self.repository.add_approval(
+                            task_id,
+                            step_id=step_id,
+                            tool_name=step.tool_name,
+                            risk_level=tool.risk_level.value,
+                            params_summary=params_summary,
+                            lease=lease,
+                            commit=False,
+                        )
+                        self.repository.set_task_status(
+                            task_id, TaskStatus.WAITING_HUMAN, commit=False
+                        )
+                        TaskEventService(self.repository.session).append(
+                            task_id,
+                            "task.waiting_human",
+                            {"step_index": index},
+                            commit=False,
+                        )
+                        self.repository.commit()
+                        return TaskRunResult(
+                            task_id=task_id,
+                            status=TaskStatus.WAITING_HUMAN,
+                            is_demo=self._is_demo(task_id),
+                        )
+                    budget.check_deadline()
+                    result = await self.executor.execute(
+                        task_id=task_id,
                         step_id=step_id,
                         tool_name=step.tool_name,
-                        risk_level=step.risk_level.value,
-                        params_summary=str(params),
+                        params=params,
+                        context=ToolContext(
+                            task_id, parsed.scene.value, workspace
+                        ),
                         lease=lease,
-                        commit=False,
                     )
-                    self.repository.set_task_status(
-                        task_id, TaskStatus.WAITING_HUMAN, commit=False
-                    )
-                    TaskEventService(self.repository.session).append(
-                        task_id,
-                        "task.waiting_human",
-                        {"step_index": index},
-                        commit=False,
-                    )
-                    self.repository.commit()
-                    return TaskRunResult(
-                        task_id=task_id,
-                        status=TaskStatus.WAITING_HUMAN,
-                        is_demo=self._is_demo(task_id),
-                    )
-                budget.check_deadline()
-                result = await self.executor.execute(
-                    task_id=task_id,
-                    step_id=step_id,
-                    tool_name=step.tool_name,
-                    params=params,
-                    context=ToolContext(task_id, parsed.scene.value, workspace),
-                    lease=lease,
-                )
-                self._update_runtime(step.tool_name, result, runtime)
-                if not result.success:
-                    raise RuntimeError(result.error or result.summary)
-                active_step_id = None
+                    self._update_runtime(step.tool_name, result, runtime)
+                    if not result.success:
+                        raise RuntimeError(result.error or result.summary)
+                    active_step_id = None
 
-            critic_data = self._successful_stage(stages, ModelStage.CRITIC)
-            if critic_data is None:
+                critic_data = self._successful_stage(stages, ModelStage.CRITIC)
+                critic_round = (
+                    critic_data.get("replan_round", 0)
+                    if critic_data is not None
+                    else -1
+                )
+                if critic_data is None or critic_round != replan_round:
+                    outcome = await self._invoke_model(
+                        task_id,
+                        lease,
+                        budget,
+                        ModelStage.CRITIC,
+                        lambda: self.critic.review(task_id, parsed),
+                    )
+                    critic = outcome.value
+                    checkpoint_critic = critic.model_dump(mode="json")
+                    checkpoint_critic["replan_round"] = replan_round
+                    self.repository.save_orchestration_checkpoint(
+                        task_id,
+                        lease=lease,
+                        fingerprint=fingerprint,
+                        stage=ModelStage.CRITIC.value,
+                        data=checkpoint_critic,
+                        model_call_id=outcome.model_call_id,
+                    )
+                    stages[ModelStage.CRITIC.value] = {
+                        "status": "success",
+                        "data": checkpoint_critic,
+                    }
+                else:
+                    critic = CriticDecision.model_validate(critic_data)
+                if critic.is_complete:
+                    break
+                if replan_round >= self.max_replans:
+                    raise RuntimeError("missing evidence after maximum replans")
+
+                observations = self.critic.observation_summary(task_id, critic)
+                replan_round += 1
+                step_start_index += len(plan)
                 outcome = await self._invoke_model(
                     task_id,
                     lease,
                     budget,
-                    ModelStage.CRITIC,
-                    lambda: self.critic.review(task_id, parsed),
+                    ModelStage.PLAN,
+                    lambda: self.planner.plan(
+                        task,
+                        parsed,
+                        observations=observations,
+                        replan_round=replan_round,
+                    ),
                 )
-                critic = outcome.value
+                plan = outcome.value
+                checkpoint_plan = self._plan_checkpoint(
+                    plan, replan_round, step_start_index
+                )
                 self.repository.save_orchestration_checkpoint(
                     task_id,
                     lease=lease,
                     fingerprint=fingerprint,
-                    stage=ModelStage.CRITIC.value,
-                    data=critic.model_dump(mode="json"),
+                    stage=ModelStage.PLAN.value,
+                    data=checkpoint_plan,
                     model_call_id=outcome.model_call_id,
                 )
-                stages[ModelStage.CRITIC.value] = {
+                stages[ModelStage.PLAN.value] = {
                     "status": "success",
-                    "data": critic.model_dump(mode="json"),
+                    "data": checkpoint_plan,
                 }
-            else:
-                critic = CriticDecision.model_validate(critic_data)
-            if not critic.is_complete:
-                raise RuntimeError(f"missing evidence: {critic.missing_evidence}")
 
             report_data = self._successful_stage(stages, ModelStage.REPORT)
             if report_data is None:
@@ -381,6 +454,38 @@ class AgentRunner:
         data = value.get("data")
         return data if isinstance(data, dict) else None
 
+    def _load_plan_checkpoint(
+        self, data: dict[str, Any]
+    ) -> tuple[list[PlanStep], int, int]:
+        raw_steps = data.get("steps")
+        replan_round = data.get("replan_round", 0)
+        step_start_index = data.get("step_start_index", 1)
+        if (
+            not isinstance(raw_steps, list)
+            or not isinstance(replan_round, int)
+            or isinstance(replan_round, bool)
+            or not 0 <= replan_round <= self.max_replans
+            or not isinstance(step_start_index, int)
+            or isinstance(step_start_index, bool)
+            or step_start_index < 1
+        ):
+            raise ValueError("invalid persisted plan checkpoint")
+        return (
+            [PlanStep.model_validate(step) for step in raw_steps],
+            replan_round,
+            step_start_index,
+        )
+
+    @staticmethod
+    def _plan_checkpoint(
+        plan: list[PlanStep], replan_round: int, step_start_index: int
+    ) -> dict[str, Any]:
+        return {
+            "steps": [step.model_dump(mode="json") for step in plan],
+            "replan_round": replan_round,
+            "step_start_index": step_start_index,
+        }
+
     def _ensure_running(
         self,
         task_id: str,
@@ -397,11 +502,21 @@ class AgentRunner:
     def _is_demo(self, task_id: str) -> bool:
         return any(call["is_demo"] for call in self.ledger.snapshot(task_id)["model_calls"])
 
+    def _runtime_from_ledger(self, task_id: str) -> dict[str, Any]:
+        runtime: dict[str, Any] = {}
+        for call in self.ledger.snapshot(task_id)["tool_calls"]:
+            try:
+                result = ToolResult.model_validate(call["result"])
+            except (TypeError, ValueError):
+                continue
+            self._update_runtime(call["tool_name"], result, runtime)
+        return runtime
+
     @staticmethod
     def _update_runtime(
         tool_name: str, result: ToolResult, runtime: dict[str, Any]
     ) -> None:
-        if tool_name == "http_fetch" and result.evidence:
+        if tool_name in {"http_fetch", "http_request"} and result.evidence:
             runtime["http_response"] = result.evidence[0].get("metadata", {})
 
     @staticmethod

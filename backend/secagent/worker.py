@@ -90,6 +90,7 @@ async def execute_queued_task(
     heartbeat_seconds: int = 15,
     max_auto_retries: int = 1,
     task_timeout_seconds: int = 300,
+    max_replans: int = 2,
     settings: Settings | None = None,
 ) -> None:
     with session_factory() as session:
@@ -109,6 +110,7 @@ async def execute_queued_task(
                 heartbeat_seconds=heartbeat_seconds,
                 max_auto_retries=max_auto_retries,
                 task_timeout_seconds=task_timeout_seconds,
+                max_replans=max_replans,
                 heartbeat_session_factory=session_factory,
             )
             await service.execute_queued(
@@ -175,6 +177,7 @@ def run_task(task_id: str, command_id: str) -> None:
             heartbeat_seconds=settings.job_heartbeat_seconds,
             max_auto_retries=settings.job_auto_retries,
             task_timeout_seconds=settings.task_timeout_seconds,
+            max_replans=settings.max_replans,
             settings=settings,
         ),
     )

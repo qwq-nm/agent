@@ -30,8 +30,15 @@ class Planner:
         self.data_dir = data_dir
 
     async def plan(
-        self, task: TaskRead, parsed: ParsedTask
+        self,
+        task: TaskRead,
+        parsed: ParsedTask,
+        *,
+        observations: dict | None = None,
+        replan_round: int = 0,
     ) -> tuple[list[PlanStep], ModelResponse]:
+        if replan_round < 0:
+            raise ValueError("replan_round must be non-negative")
         policy = SCENES[parsed.scene]
         allowed_tools = policy.allowed_tools
         params_by_tool = {name: {} for name in allowed_tools}
@@ -64,6 +71,8 @@ class Planner:
             }
         payload = {
             "goal": parsed.goal,
+            "replan_round": replan_round,
+            "observations": observations or {},
             "allowed_tools": list(allowed_tools),
             "params_by_tool": params_by_tool,
             "risk_by_tool": {
@@ -82,4 +91,8 @@ class Planner:
                 task.preferred_model if task.route_mode is RouteMode.MANUAL else None
             ),
         )
-        return PlanDocument.model_validate(response.data).steps, response
+        steps = PlanDocument.model_validate(response.data).steps
+        allowed = set(allowed_tools)
+        if any(step.tool_name not in allowed for step in steps):
+            raise ValueError("plan selected a tool outside the scene allowlist")
+        return steps, response

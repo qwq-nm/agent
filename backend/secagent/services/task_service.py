@@ -65,6 +65,7 @@ class TaskService:
         heartbeat_seconds: int = 15,
         max_auto_retries: int = 1,
         task_timeout_seconds: int = 300,
+        max_replans: int = 2,
         heartbeat_session_factory=None,
     ) -> None:
         self.repository = repository
@@ -89,6 +90,7 @@ class TaskService:
             critic=Critic(router, ledger),
             reporter=Reporter(router, ledger),
             timeout_seconds=task_timeout_seconds,
+            max_replans=max_replans,
         )
 
     def run(

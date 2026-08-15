@@ -32,7 +32,7 @@ from secagent.domain import (
     UserRole,
 )
 from secagent.services.audit import AuditService
-from secagent.security.redaction import scrub_approval_reason
+from secagent.security.redaction import redact_mapping, scrub_approval_reason
 
 if TYPE_CHECKING:
     from secagent.auth.dependencies import AuthenticatedUser
@@ -1125,7 +1125,9 @@ class TaskRepository:
             existing.name = step.name
             existing.purpose = step.purpose
             existing.tool_name = step.tool_name
-            existing.params_json = json.dumps(step.params, ensure_ascii=False)
+            existing.params_json = json.dumps(
+                redact_mapping(step.params), ensure_ascii=False
+            )
             existing.risk_level = step.risk_level.value
             existing.need_human_confirm = step.need_human_confirm
             existing.status = "pending"
@@ -1141,7 +1143,7 @@ class TaskRepository:
             name=step.name,
             purpose=step.purpose,
             tool_name=step.tool_name,
-            params_json=json.dumps(step.params, ensure_ascii=False),
+            params_json=json.dumps(redact_mapping(step.params), ensure_ascii=False),
             risk_level=step.risk_level.value,
             need_human_confirm=step.need_human_confirm,
         )
