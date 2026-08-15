@@ -21,6 +21,10 @@ it('marks application routes as authenticated and administrative routes as admin
     requiresAuth: true,
     requiresAdmin: true,
   })
+  expect(router.getRoutes().find((route) => route.path === '/system')?.meta).toMatchObject({
+    requiresAuth: true,
+    requiresAdmin: true,
+  })
 })
 
 it('sends unauthenticated visitors to login with a local redirect target', async () => {
@@ -39,6 +43,8 @@ it('prevents analysts from entering administrative routes', async () => {
 
   expect(router.currentRoute.value.path).toBe('/')
   await router.push('/audit')
+  expect(router.currentRoute.value.path).toBe('/')
+  await router.push('/system')
   expect(router.currentRoute.value.path).toBe('/')
 })
 

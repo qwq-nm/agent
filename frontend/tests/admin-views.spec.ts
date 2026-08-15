@@ -115,6 +115,7 @@ it('shows provider check metadata after an explicit health check', async () => {
   expect(api.providerCheck).toHaveBeenCalledWith('deepseek')
   expect(wrapper.text()).toContain('req-1')
   expect(wrapper.text()).toContain('120 ms')
+  expect(wrapper.text()).toContain('12 / 8 tokens')
 })
 
 it('requires the member name before disabling an account', async () => {

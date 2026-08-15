@@ -55,7 +55,7 @@ onMounted(load)
           <span>{{ model.status || model.mode }}</span>
           <b>{{ model.configured ? '已配置' : '未配置' }}</b>
           <button class="ghost-button" :data-action="`provider-check-${model.name}`" type="button" :disabled="checking === model.name" @click="providerCheck(model.name)">{{ checking === model.name ? '检查中…' : '连通性检查' }}</button>
-          <p v-if="checks[model.name]" class="check-result">{{ checks[model.name].status }} · {{ checks[model.name].request_id || '无 request ID' }} · {{ checks[model.name].latency_ms ?? '—' }} ms</p>
+          <p v-if="checks[model.name]" class="check-result">{{ checks[model.name].status }} · {{ checks[model.name].request_id || '无 request ID' }} · {{ checks[model.name].input_tokens ?? '—' }} / {{ checks[model.name].output_tokens ?? '—' }} tokens · {{ checks[model.name].latency_ms ?? '—' }} ms<span v-if="checks[model.name].error_code"> · {{ checks[model.name].error_code }}</span></p>
         </article>
       </section>
       <section class="panel system-panel"><h2>白名单工具</h2><article v-for="tool in tools" :key="tool.name"><strong>{{ tool.name }}</strong><span>{{ tool.scene }}</span><b>{{ tool.risk_level }}</b></article></section>

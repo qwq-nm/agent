@@ -11,7 +11,7 @@ const items = [
   { to: '/tasks/new', label: '创建任务', icon: '+' },
   { to: '/tasks', label: '任务中心', icon: '◎' },
   { to: '/reports', label: '报告', icon: '≣' },
-  { to: '/system', label: '模型与工具', icon: '◇' },
+  { to: '/system', label: '模型与工具', icon: '◇', admin: true },
   { to: '/team', label: 'Team', icon: '◉', admin: true },
   { to: '/audit', label: 'Audit', icon: '◉', admin: true },
 ]

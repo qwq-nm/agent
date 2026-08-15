@@ -2,11 +2,13 @@ import json
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from sqlalchemy import func, select
 
 from secagent.api.errors import ApiError
 from secagent.auth.dependencies import AuthenticatedUser, auth_service, require_admin
+from secagent.db_models import JobRunRow
 from secagent.domain import UserRole
 from secagent.repository import TaskRepository
 from secagent.services.auth_service import (
@@ -70,6 +72,48 @@ def list_users(actor: AdminDep, service: AuthServiceDep) -> list[AdminUserRead]:
         AdminUserRead.model_validate(row, from_attributes=True)
         for row in service.list_users()
     ]
+
+
+@router.get("/workers")
+def worker_summary(request: Request, actor: AdminDep) -> dict[str, int]:
+    del actor
+    with request.app.state.session_factory() as session:
+        active = int(
+            session.scalar(
+                select(func.count())
+                .select_from(JobRunRow)
+                .where(JobRunRow.status == "running")
+            )
+            or 0
+        )
+        queued = int(
+            session.scalar(
+                select(func.count())
+                .select_from(JobRunRow)
+                .where(
+                    JobRunRow.status.in_(("pending_publish", "publishing", "queued"))
+                )
+            )
+            or 0
+        )
+    online = _online_workers(request.app.state.job_queue)
+    return {
+        "online": online,
+        "active": active,
+        "capacity": request.app.state.settings.worker_concurrency,
+        "queued": queued,
+    }
+
+
+def _online_workers(queue: object) -> int:
+    try:
+        from secagent.queue.celery_app import celery
+
+        stats = celery.control.inspect(timeout=0.2).stats() or {}
+        return len(stats)
+    except Exception:
+        del queue
+        return 0
 
 
 @router.post(

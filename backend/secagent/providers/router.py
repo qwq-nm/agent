@@ -4,6 +4,7 @@ from secagent.providers.base import (
     ProviderErrorCode,
     ProviderUnavailable,
 )
+from secagent.security.redaction import redact_text
 
 
 FIXED_PROVIDER = {
@@ -42,10 +43,25 @@ class ModelRouter:
         staged_request = request.model_copy(update={"stage": stage})
         return await self.provider_for(stage).complete(staged_request)
 
-    def describe(self) -> list[dict[str, str | bool]]:
+    def describe(self) -> list[dict[str, str | bool | None]]:
         return [
-            {"name": name, "configured": True, "mode": self.mode}
-            for name in self.providers
+            {
+                "name": name,
+                "configured": True,
+                "mode": self.mode,
+                "model": redact_text(
+                    str(
+                        getattr(
+                            provider,
+                            "model",
+                            "deterministic-mock" if name == "mock" else "unknown",
+                        )
+                    )
+                ),
+                "status": "ready",
+                "error_code": None,
+            }
+            for name, provider in self.providers.items()
         ]
 
     async def aclose(self) -> None:

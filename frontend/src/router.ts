@@ -51,7 +51,7 @@ export const router = createRouter({
     { path: '/tasks', component: TaskListView, meta: { requiresAuth: true } },
     { path: '/tasks/:id', component: TaskDetailView, meta: { requiresAuth: true } },
     { path: '/reports', component: ReportsView, meta: { requiresAuth: true } },
-    { path: '/system', component: SystemView, meta: { requiresAuth: true } },
+    { path: '/system', component: SystemView, meta: { requiresAuth: true, requiresAdmin: true } },
     { path: '/team', component: TeamView, meta: { requiresAuth: true, requiresAdmin: true } },
     { path: '/audit', component: AuditView, meta: { requiresAuth: true, requiresAdmin: true } },
   ],
