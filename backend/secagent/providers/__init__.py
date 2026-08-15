@@ -1,4 +1,5 @@
 from collections.abc import Mapping
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -56,6 +57,10 @@ def build_providers(
             model=settings.deepseek_model,
             client=shared_client,
             timeout_seconds=settings.model_timeout_seconds,
+            api_style=_resolve_deepseek_api_style(
+                settings.deepseek_base_url, settings.deepseek_api_style
+            ),
+            reasoning_effort=settings.deepseek_reasoning_effort,
         )
     if glm_key and shared_client is not None:
         providers["glm"] = GLMProvider(
@@ -74,6 +79,20 @@ def _validate_model(provider: str, model: str) -> None:
         raise ProviderUnavailable(
             provider, ProviderErrorCode.INVALID_SCHEMA, retryable=False
         )
+
+
+def _resolve_deepseek_api_style(base_url: str, requested: str) -> str:
+    style = requested.strip().lower()
+    if style in {"deepseek", "opencode-go"}:
+        return style
+    if style != "auto":
+        raise ValueError(f"unsupported deepseek api style: {requested}")
+    parsed = urlsplit(base_url)
+    if parsed.hostname == "opencode.ai" and parsed.path.rstrip("/").endswith(
+        "/zen/go/v1"
+    ):
+        return "opencode-go"
+    return "deepseek"
 
 
 __all__ = ["build_providers"]

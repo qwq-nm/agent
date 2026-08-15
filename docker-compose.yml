@@ -33,13 +33,17 @@ services:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-secagent}:${POSTGRES_PASSWORD:-secagent}@postgres:5432/${POSTGRES_DB:-secagent}
       REDIS_URL: redis://redis:6379/0
       DATA_DIR: /data
-      MODEL_MODE: mock
+      MODEL_MODE: ${MODEL_MODE:-mock}
       JWT_SIGNING_KEY: ${JWT_SIGNING_KEY:-local-development-signing-key-change-me}
       PROVIDER_CREDENTIAL_ENCRYPTION_KEY: ${PROVIDER_CREDENTIAL_ENCRYPTION_KEY:-}
       PROVIDER_CREDENTIAL_ENCRYPTION_KEY_FILE: /run/secrets/provider_credential_encryption_key
       WORKER_CONCURRENCY: 3
       WEB_ALLOWED_HOSTS: ${WEB_ALLOWED_HOSTS:-web-demo}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
+      DEEPSEEK_API_STYLE: ${DEEPSEEK_API_STYLE:-auto}
+      DEEPSEEK_REASONING_EFFORT: ${DEEPSEEK_REASONING_EFFORT:-high}
       DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-pro}
+      GLM_BASE_URL: ${GLM_BASE_URL:-https://open.bigmodel.cn/api/paas/v4}
       GLM_MODEL: ${GLM_MODEL:-glm-5.2}
     volumes:
       - secagent-data:/data
@@ -61,16 +65,23 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    command: ["celery", "-A", "secagent.queue.celery_app", "worker", "--loglevel=INFO", "--concurrency=3", "--prefetch-multiplier=1"]
+    command: ["celery", "-A", "secagent.worker", "worker", "--loglevel=INFO", "--concurrency=3", "--prefetch-multiplier=1"]
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-secagent}:${POSTGRES_PASSWORD:-secagent}@postgres:5432/${POSTGRES_DB:-secagent}
       REDIS_URL: redis://redis:6379/0
       DATA_DIR: /data
-      MODEL_MODE: mock
+      MODEL_MODE: ${MODEL_MODE:-mock}
       JWT_SIGNING_KEY: ${JWT_SIGNING_KEY:-local-development-signing-key-change-me}
       PROVIDER_CREDENTIAL_ENCRYPTION_KEY: ${PROVIDER_CREDENTIAL_ENCRYPTION_KEY:-}
       PROVIDER_CREDENTIAL_ENCRYPTION_KEY_FILE: /run/secrets/provider_credential_encryption_key
       WORKER_CONCURRENCY: 3
+      WEB_ALLOWED_HOSTS: ${WEB_ALLOWED_HOSTS:-web-demo}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
+      DEEPSEEK_API_STYLE: ${DEEPSEEK_API_STYLE:-auto}
+      DEEPSEEK_REASONING_EFFORT: ${DEEPSEEK_REASONING_EFFORT:-high}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-pro}
+      GLM_BASE_URL: ${GLM_BASE_URL:-https://open.bigmodel.cn/api/paas/v4}
+      GLM_MODEL: ${GLM_MODEL:-glm-5.2}
     volumes:
       - secagent-data:/data
       - ./secrets/provider_credential_encryption_key.txt:/run/secrets/provider_credential_encryption_key:ro

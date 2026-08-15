@@ -1,4 +1,5 @@
 import importlib
+from pathlib import Path
 
 import pytest
 
@@ -58,3 +59,10 @@ def test_celery_queue_sends_only_ids_and_reuses_command_as_task_id(
 
     assert broker_id == "command-1"
     assert calls == [(["task-1", "command-1"], "command-1")]
+
+
+def test_compose_worker_loads_registered_task_module() -> None:
+    repository_root = Path(__file__).resolve().parents[3]
+    compose = (repository_root / "docker-compose.yml").read_text(encoding="utf-8")
+
+    assert '"secagent.worker"' in compose

@@ -99,6 +99,8 @@ def test_settings_uses_required_production_defaults(monkeypatch: pytest.MonkeyPa
     assert settings.jwt_refresh_days == 7
     assert settings.cookie_secure is False
     assert settings.deepseek_model == "deepseek-v4-pro"
+    assert settings.deepseek_api_style == "auto"
+    assert settings.deepseek_reasoning_effort == "high"
     assert settings.glm_model == "glm-5.2"
     assert settings.max_model_calls_per_task == 8
     assert settings.max_input_tokens_per_task == 120_000
@@ -118,6 +120,18 @@ def test_docker_compose_provider_defaults_match_settings() -> None:
     assert "GLM_MODEL: ${GLM_MODEL:-glm-5.2}" in compose
     assert "deepseek-chat" not in compose
     assert "glm-4-flash" not in compose
+
+
+def test_docker_compose_passes_runtime_model_configuration_to_both_services() -> None:
+    repository_root = Path(__file__).resolve().parents[3]
+    compose = (repository_root / "docker-compose.yml").read_text(encoding="utf-8")
+
+    assert compose.count("MODEL_MODE: ${MODEL_MODE:-mock}") == 2
+    assert compose.count(
+        "DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}"
+    ) == 2
+    assert compose.count("DEEPSEEK_API_STYLE: ${DEEPSEEK_API_STYLE:-auto}") == 2
+    assert compose.count("WEB_ALLOWED_HOSTS: ${WEB_ALLOWED_HOSTS:-web-demo}") == 2
 
 
 def test_base_compose_mounts_provider_credential_key_for_api_and_worker() -> None:

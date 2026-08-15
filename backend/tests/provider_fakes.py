@@ -41,15 +41,20 @@ def deepseek_provider(
     *,
     responses: list[ResponseSpec] | None = None,
     capture: list[httpx.Request] | None = None,
+    base_url: str = "https://deepseek.invalid/v1",
+    api_style: str = "deepseek",
+    reasoning_effort: str = "high",
     sleep: Callable[[float], Awaitable[None]] = _no_sleep,
     jitter: Callable[[], float] = lambda: 0.0,
 ) -> DeepSeekProvider:
     sequence = responses or [returning or {}]
     return DeepSeekProvider(
-        base_url="https://deepseek.invalid/v1",
+        base_url=base_url,
         api_key="deepseek-test-key",
         model="deepseek-v4-pro",
         client=_client(sequence, capture),
+        api_style=api_style,
+        reasoning_effort=reasoning_effort,
         sleep=sleep,
         jitter=jitter,
     )

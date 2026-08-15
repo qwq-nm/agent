@@ -59,6 +59,27 @@ async def test_deepseek_payload_is_non_streaming_json_with_thinking() -> None:
 
 
 @pytest.mark.asyncio
+async def test_opencode_go_payload_uses_reasoning_effort() -> None:
+    requests: list[httpx.Request] = []
+    provider = deepseek_provider(
+        returning={
+            "choices": [
+                {"finish_reason": "stop", "message": {"content": '{"steps": []}'}}
+            ]
+        },
+        capture=requests,
+        base_url="https://opencode.ai/zen/go/v1",
+        api_style="opencode-go",
+    )
+
+    await provider.complete(plan_request())
+
+    payload = json.loads(requests[0].content)
+    assert payload["reasoning_effort"] == "high"
+    assert "thinking" not in payload
+
+
+@pytest.mark.asyncio
 async def test_deepseek_rejects_glm_stage_before_transport() -> None:
     requests: list[httpx.Request] = []
     provider = deepseek_provider(capture=requests)

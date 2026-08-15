@@ -41,10 +41,14 @@ class _StructuredProvider:
         timeout_seconds: float = 30.0,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         jitter: Callable[[], float] = random.random,
+        api_style: str = "deepseek",
+        reasoning_effort: str = "high",
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
+        self.api_style = api_style
+        self.reasoning_effort = reasoning_effort
         self.client = client
         self.transport = ProviderHTTPClient(
             provider=self.name,
@@ -220,6 +224,8 @@ class DeepSeekProvider(_StructuredProvider):
     max_tokens = {ModelStage.PLAN: 4096, ModelStage.CRITIC: 2048}
 
     def _provider_options(self) -> dict[str, Any]:
+        if self.api_style == "opencode-go":
+            return {"reasoning_effort": self.reasoning_effort}
         return {"thinking": {"type": "enabled"}}
 
 
