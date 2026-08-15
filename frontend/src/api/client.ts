@@ -1,10 +1,15 @@
 import type {
+  AdminUser,
+  AuditEvent,
   HealthStatus,
   ModelStatus,
+  ProviderCheck,
+  ReadinessStatus,
   Task,
   TaskCreate,
   TaskDetail,
   ToolStatus,
+  WorkerSummary,
 } from '../types'
 import { apiRequest, apiTextRequest } from './http'
 
@@ -31,6 +36,33 @@ export const api = {
   health: () => request<HealthStatus>('/api/health'),
   modelStatus: () => request<ModelStatus[]>('/api/models/status'),
   toolStatus: () => request<ToolStatus[]>('/api/tools'),
+  workers: () => request<WorkerSummary>('/api/admin/workers'),
+  readiness: () => request<ReadinessStatus>('/api/health/ready'),
+  providerCheck: (provider: string) => request<ProviderCheck>('/api/models/check', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ provider }),
+  }),
+  listUsers: () => request<AdminUser[]>('/api/admin/users'),
+  createUser: (payload: { username: string; password: string; role: 'admin' | 'analyst' }) =>
+    request<AdminUser>('/api/admin/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+  updateUser: (id: string, payload: { is_active?: boolean; password?: string }) =>
+    request<AdminUser>(`/api/admin/users/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+  auditEvents: (params: { limit?: number; before?: number; actor?: string; action?: string; outcome?: string; created_after?: string; created_before?: string } = {}) => {
+    const query = new URLSearchParams()
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined && value !== '') query.set(key, String(value))
+    }
+    return request<AuditEvent[]>(`/api/admin/audit-events${query.size ? `?${query}` : ''}`)
+  },
 }
 
 export const lifecycle = {

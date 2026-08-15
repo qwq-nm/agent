@@ -54,6 +54,7 @@ class AdminUserRead(BaseModel):
 class AuditEventRead(BaseModel):
     id: int
     actor_id: str | None
+    actor_username: str | None = None
     action: str
     resource_type: str
     resource_id: str | None
@@ -130,13 +131,38 @@ def list_audit_events(
     actor: AdminDep,
     service: AuthServiceDep,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    before: Annotated[int | None, Query(ge=1)] = None,
+    actor_filter: Annotated[str | None, Query(alias="actor", max_length=80)] = None,
+    action: Annotated[str | None, Query(max_length=120)] = None,
+    outcome: Annotated[str | None, Query(max_length=32)] = None,
+    created_after: datetime | None = None,
+    created_before: datetime | None = None,
 ) -> list[AuditEventRead]:
     del actor
-    rows = TaskRepository(service.session).list_audit_events(limit=limit)
+    users = service.list_users()
+    actor_names = {user.id: user.username for user in users}
+    actor_ids = None
+    if actor_filter:
+        needle = actor_filter.casefold()
+        actor_ids = {
+            user.id
+            for user in users
+            if user.id == actor_filter or needle in user.username.casefold()
+        }
+    rows = TaskRepository(service.session).list_audit_events(
+        limit=limit,
+        before=before,
+        actor_ids=actor_ids,
+        action=action,
+        outcome=outcome,
+        created_after=created_after,
+        created_before=created_before,
+    )
     return [
         AuditEventRead(
             id=row.id,
             actor_id=row.actor_id,
+            actor_username=actor_names.get(row.actor_id),
             action=row.action,
             resource_type=row.resource_type,
             resource_id=row.resource_id,

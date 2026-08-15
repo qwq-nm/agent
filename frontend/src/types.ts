@@ -136,6 +136,51 @@ export interface ModelStatus {
   name: string
   configured: boolean
   mode: string
+  model?: string
+  status?: string
+  error_code?: string | null
+}
+
+export interface WorkerSummary {
+  online: number
+  active: number
+  capacity: number
+  queued: number
+}
+
+export interface ReadinessStatus {
+  status: string
+  checks: Record<string, string>
+}
+
+export interface ProviderCheck {
+  provider: string
+  model: string
+  status: string
+  request_id?: string | null
+  input_tokens?: number | null
+  output_tokens?: number | null
+  latency_ms?: number | null
+  error_code?: string | null
+}
+
+export interface AdminUser {
+  id: string
+  username: string
+  role: UserRole
+  is_active: boolean
+}
+
+export interface AuditEvent {
+  id: number
+  actor_id?: string | null
+  actor_username?: string | null
+  action: string
+  resource_type: string
+  resource_id?: string | null
+  outcome: string
+  details?: Record<string, unknown>
+  created_at: string
 }
 
 export interface ToolStatus {

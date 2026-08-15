@@ -577,12 +577,35 @@ class TaskRepository:
             .order_by(AuditEventRow.id.desc())
         )
 
-    def list_audit_events(self, *, limit: int = 100) -> list[AuditEventRow]:
+    def list_audit_events(
+        self,
+        *,
+        limit: int = 100,
+        before: int | None = None,
+        actor_ids: set[str] | None = None,
+        action: str | None = None,
+        outcome: str | None = None,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
+    ) -> list[AuditEventRow]:
+        query = select(AuditEventRow)
+        if before is not None:
+            query = query.where(AuditEventRow.id < before)
+        if actor_ids is not None:
+            if not actor_ids:
+                return []
+            query = query.where(AuditEventRow.actor_id.in_(actor_ids))
+        if action:
+            query = query.where(AuditEventRow.action == action)
+        if outcome:
+            query = query.where(AuditEventRow.outcome == outcome)
+        if created_after is not None:
+            query = query.where(AuditEventRow.created_at >= created_after)
+        if created_before is not None:
+            query = query.where(AuditEventRow.created_at <= created_before)
         return list(
             self.session.scalars(
-                select(AuditEventRow)
-                .order_by(AuditEventRow.id.desc())
-                .limit(limit)
+                query.order_by(AuditEventRow.id.desc()).limit(limit)
             ).all()
         )
 

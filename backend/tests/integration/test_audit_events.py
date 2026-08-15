@@ -558,3 +558,64 @@ def test_admin_can_list_audit_events(admin_client, analyst_client):
     assert response.status_code == 200
     assert response.json()
     assert {"id", "actor_id", "action", "resource_type", "resource_id", "outcome", "details", "created_at"} <= set(response.json()[0])
+
+
+def test_admin_audit_filters_cursor_and_actor_name(
+    admin_client, app, seeded_admin, seeded_analyst
+):
+    now = datetime.now(timezone.utc)
+    with app.state.session_factory() as session:
+        session.add_all(
+            [
+                AuditEventRow(
+                    actor_id=seeded_admin.id,
+                    action="task.run",
+                    resource_type="task",
+                    resource_id="task-new",
+                    outcome="success",
+                    details_json='{"provider":"deepseek"}',
+                    created_at=now,
+                ),
+                AuditEventRow(
+                    actor_id=seeded_analyst.id,
+                    action="task.run",
+                    resource_type="task",
+                    resource_id="task-old",
+                    outcome="failure",
+                    details_json="{}",
+                    created_at=now - timedelta(hours=1),
+                ),
+                AuditEventRow(
+                    actor_id=seeded_admin.id,
+                    action="user.update",
+                    resource_type="user",
+                    resource_id=seeded_analyst.id,
+                    outcome="success",
+                    details_json="{}",
+                    created_at=now - timedelta(hours=2),
+                ),
+            ]
+        )
+        session.commit()
+
+    filtered = admin_client.get(
+        "/api/admin/audit-events",
+        params={
+            "actor": "admin",
+            "action": "task.run",
+            "outcome": "success",
+            "created_after": (now - timedelta(minutes=5)).isoformat(),
+        },
+    )
+
+    assert filtered.status_code == 200
+    assert len(filtered.json()) == 1
+    assert filtered.json()[0]["actor_username"] == "admin"
+    assert filtered.json()[0]["resource_id"] == "task-new"
+
+    cursor = filtered.json()[0]["id"]
+    older = admin_client.get(
+        "/api/admin/audit-events", params={"before": cursor, "limit": 10}
+    )
+    assert older.status_code == 200
+    assert all(event["id"] < cursor for event in older.json())

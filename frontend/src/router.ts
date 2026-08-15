@@ -5,6 +5,8 @@ import TaskDetailView from './views/TaskDetailView.vue'
 import TaskListView from './views/TaskListView.vue'
 import ReportsView from './views/ReportsView.vue'
 import SystemView from './views/SystemView.vue'
+import TeamView from './views/TeamView.vue'
+import AuditView from './views/AuditView.vue'
 import LoginView from './views/LoginView.vue'
 import { useAuthStore } from './stores/auth'
 
@@ -50,8 +52,8 @@ export const router = createRouter({
     { path: '/tasks/:id', component: TaskDetailView, meta: { requiresAuth: true } },
     { path: '/reports', component: ReportsView, meta: { requiresAuth: true } },
     { path: '/system', component: SystemView, meta: { requiresAuth: true } },
-    { path: '/team', component: SystemView, meta: { requiresAuth: true, requiresAdmin: true } },
-    { path: '/audit', component: SystemView, meta: { requiresAuth: true, requiresAdmin: true } },
+    { path: '/team', component: TeamView, meta: { requiresAuth: true, requiresAdmin: true } },
+    { path: '/audit', component: AuditView, meta: { requiresAuth: true, requiresAdmin: true } },
   ],
 })
 
