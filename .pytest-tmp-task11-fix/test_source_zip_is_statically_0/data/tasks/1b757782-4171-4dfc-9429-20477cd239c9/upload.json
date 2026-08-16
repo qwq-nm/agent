@@ -1,0 +1,10 @@
+{
+  "original_name": "vulnerable_app.zip",
+  "stored_name": "b3e38def66f843f6989d7713d024328f.zip",
+  "sha256": "56938e983c6599be7f1fc591f068e1f4bdbc00e69de957c67defaba8c4e4a33d",
+  "size": 363,
+  "extracted": [
+    "extracted\\vulnerable_app\\app.py",
+    "extracted\\vulnerable_app\\config.py"
+  ]
+}
