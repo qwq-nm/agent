@@ -123,4 +123,4 @@ powershell -ExecutionPolicy Bypass -File scripts\offline_acceptance.ps1
 - 模型输出必须通过 Pydantic 结构校验，不能绕过 RiskGate 或直接执行工具。
 - Mock 是演示数据，不应当作为真实安全结论；真实环境仍需安全人员复核。
 
-部署细节见 [docs/deployment.md](docs/deployment.md)，比赛演示顺序见 [docs/demo-script.md](docs/demo-script.md)。
+完整使用流程见 [docs/user-manual.md](docs/user-manual.md)，部署细节见 [docs/deployment.md](docs/deployment.md)，比赛演示顺序见 [docs/demo-script.md](docs/demo-script.md)。

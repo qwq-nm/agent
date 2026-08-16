@@ -512,5 +512,3 @@ docker compose down
 - [Provider Key 设计说明](superpowers/specs/2026-08-15-provider-key-management-design.md)：凭据加密和管理流程。
 
 最后提醒：授权范围由任务创建者负责，模型输出由系统负责结构化和限权，但最终安全结论、处置动作和对外报告仍必须由有权限的安全人员复核。
-
-
