@@ -1,0 +1,92 @@
+<div id="secagent-architecture">
+  <style>
+    #secagent-architecture .arch-flow { display:grid; grid-template-columns:1fr auto 1.25fr auto 1.25fr; gap:12px; align-items:stretch; margin:24px 0; }
+    #secagent-architecture .arch-node { border:1px solid var(--border); border-radius:12px; padding:16px; background:var(--card); color:var(--card-foreground); }
+    #secagent-architecture .arch-node strong { display:block; margin-bottom:8px; }
+    #secagent-architecture .arch-node span { display:block; color:var(--muted-foreground); margin-top:5px; }
+    #secagent-architecture .arch-arrow { display:flex; align-items:center; color:var(--muted-foreground); }
+    #secagent-architecture .arch-lanes { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin:16px 0 24px; }
+    #secagent-architecture .model-lane { border-left:4px solid var(--viz-series-1); padding:12px 14px; background:color-mix(in srgb, var(--viz-series-1) 8%, transparent); }
+    #secagent-architecture .model-lane:nth-child(2) { border-left-color:var(--viz-series-2); background:color-mix(in srgb, var(--viz-series-2) 8%, transparent); }
+    #secagent-architecture .model-lane strong { display:block; margin-bottom:6px; }
+    #secagent-architecture .guardrail { display:flex; gap:10px; flex-wrap:wrap; margin:16px 0 24px; }
+    #secagent-architecture .guardrail span { border:1px solid var(--border); border-radius:999px; padding:6px 10px; }
+    @media (max-width:720px) {
+      #secagent-architecture .arch-flow { grid-template-columns:1fr; }
+      #secagent-architecture .arch-arrow { justify-content:center; transform:rotate(90deg); }
+      #secagent-architecture .arch-lanes { grid-template-columns:1fr; }
+    }
+  </style>
+
+  <h2>SecAgent-X 团队生产版架构</h2>
+  <p class="subtitle">10 人以内内网团队 · 最多 3 个并发任务 · 双模型固定分工</p>
+
+  <div class="arch-flow" role="img" aria-label="用户通过网关访问 FastAPI，任务进入 Redis 队列，由独立 Worker 执行并写入 PostgreSQL 与证据存储">
+    <div class="arch-node">
+      <strong>团队用户</strong>
+      <span>管理员 / 分析员</span>
+      <span>JWT 登录与权限校验</span>
+    </div>
+    <div class="arch-arrow">→</div>
+    <div class="arch-node">
+      <strong>Nginx + FastAPI</strong>
+      <span>API、上传、审批</span>
+      <span>任务归属与审计</span>
+    </div>
+    <div class="arch-arrow">→</div>
+    <div class="arch-node">
+      <strong>Redis + 3 个 Worker</strong>
+      <span>持久任务队列</span>
+      <span>超时、重试、恢复、并发限制</span>
+    </div>
+  </div>
+
+  <div class="arch-lanes">
+    <div class="model-lane">
+      <strong>DeepSeek：技术决策链</strong>
+      <span>规划 → 工具参数 → 证据复核；强制 JSON Schema，不合格自动修复后重试。</span>
+    </div>
+    <div class="model-lane">
+      <strong>GLM：中文交互链</strong>
+      <span>任务解析 → 中文解释 → 最终报告；与 DeepSeek 固定分工，不静默互相替代。</span>
+    </div>
+  </div>
+
+  <div class="arch-flow" role="img" aria-label="Worker 通过模型网关和风险门禁执行任务，并将结果写入 PostgreSQL 与证据文件存储">
+    <div class="arch-node">
+      <strong>模型网关</strong>
+      <span>密钥隔离、限流、重试</span>
+      <span>Token / 延迟 / 错误指标</span>
+    </div>
+    <div class="arch-arrow">+</div>
+    <div class="arch-node">
+      <strong>RiskGate + 工具沙箱</strong>
+      <span>白名单、授权边界、人工审批</span>
+      <span>禁止任意命令执行</span>
+    </div>
+    <div class="arch-arrow">→</div>
+    <div class="arch-node">
+      <strong>PostgreSQL + 证据存储</strong>
+      <span>用户、任务、状态与审计</span>
+      <span>证据哈希、报告、可追溯链</span>
+    </div>
+  </div>
+
+  <div class="guardrail" aria-label="关键生产约束">
+    <span>模型失败不伪装成功</span>
+    <span>服务重启可恢复</span>
+    <span>密钥不入库不进日志</span>
+    <span>用户只能访问授权任务</span>
+  </div>
+
+  <div class="options">
+    <div class="option" data-choice="approve-architecture" onclick="toggleSelect(this)">
+      <div class="letter">A</div>
+      <div class="content"><h3>批准该架构</h3><p>继续设计任务状态机、权限和异常恢复。</p></div>
+    </div>
+    <div class="option" data-choice="revise-architecture" onclick="toggleSelect(this)">
+      <div class="letter">B</div>
+      <div class="content"><h3>需要调整</h3><p>在终端中告诉我需要改变的部分。</p></div>
+    </div>
+  </div>
+</div>
