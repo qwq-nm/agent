@@ -1,0 +1,13 @@
+.git
+.worktrees
+.venv
+**/__pycache__
+**/.pytest_cache
+**/node_modules
+**/dist
+data
+playwright-report
+test-results
+.env
+secrets/*.txt
+!secrets/*.txt.example

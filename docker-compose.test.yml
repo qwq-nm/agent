@@ -1,0 +1,10 @@
+services:
+  api:
+    environment:
+      MODEL_MODE: mock
+      JWT_SIGNING_KEY: test-signing-key-at-least-32-bytes
+      DATABASE_URL: sqlite:////tmp/secagent-test.db
+  worker:
+    environment:
+      MODEL_MODE: mock
+      WORKER_CONCURRENCY: 3

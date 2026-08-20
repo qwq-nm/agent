@@ -1,0 +1,118 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-secagent}
+      POSTGRES_USER: ${POSTGRES_USER:-secagent}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secagent}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["sh", "-c", "alembic upgrade head && uvicorn secagent.main:app --host 0.0.0.0 --port 8000"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-secagent}:${POSTGRES_PASSWORD:-secagent}@postgres:5432/${POSTGRES_DB:-secagent}
+      REDIS_URL: redis://redis:6379/0
+      DATA_DIR: /data
+      MODEL_MODE: ${MODEL_MODE:-mock}
+      JWT_SIGNING_KEY: ${JWT_SIGNING_KEY:-local-development-signing-key-change-me}
+      PROVIDER_CREDENTIAL_ENCRYPTION_KEY: ${PROVIDER_CREDENTIAL_ENCRYPTION_KEY:-}
+      PROVIDER_CREDENTIAL_ENCRYPTION_KEY_FILE: /run/secrets/provider_credential_encryption_key
+      WORKER_CONCURRENCY: 3
+      WEB_ALLOWED_HOSTS: ${WEB_ALLOWED_HOSTS:-web-demo}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
+      DEEPSEEK_API_STYLE: ${DEEPSEEK_API_STYLE:-auto}
+      DEEPSEEK_REASONING_EFFORT: ${DEEPSEEK_REASONING_EFFORT:-high}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-pro}
+      GLM_BASE_URL: ${GLM_BASE_URL:-https://open.bigmodel.cn/api/paas/v4}
+      GLM_MODEL: ${GLM_MODEL:-glm-5.2}
+    volumes:
+      - secagent-data:/data
+      - ./secrets/provider_credential_encryption_key.txt:/run/secrets/provider_credential_encryption_key:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health/live')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["celery", "-A", "secagent.worker", "worker", "--loglevel=INFO", "--concurrency=3", "--prefetch-multiplier=1"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-secagent}:${POSTGRES_PASSWORD:-secagent}@postgres:5432/${POSTGRES_DB:-secagent}
+      REDIS_URL: redis://redis:6379/0
+      DATA_DIR: /data
+      MODEL_MODE: ${MODEL_MODE:-mock}
+      JWT_SIGNING_KEY: ${JWT_SIGNING_KEY:-local-development-signing-key-change-me}
+      PROVIDER_CREDENTIAL_ENCRYPTION_KEY: ${PROVIDER_CREDENTIAL_ENCRYPTION_KEY:-}
+      PROVIDER_CREDENTIAL_ENCRYPTION_KEY_FILE: /run/secrets/provider_credential_encryption_key
+      WORKER_CONCURRENCY: 3
+      WEB_ALLOWED_HOSTS: ${WEB_ALLOWED_HOSTS:-web-demo}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
+      DEEPSEEK_API_STYLE: ${DEEPSEEK_API_STYLE:-auto}
+      DEEPSEEK_REASONING_EFFORT: ${DEEPSEEK_REASONING_EFFORT:-high}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-pro}
+      GLM_BASE_URL: ${GLM_BASE_URL:-https://open.bigmodel.cn/api/paas/v4}
+      GLM_MODEL: ${GLM_MODEL:-glm-5.2}
+    volumes:
+      - secagent-data:/data
+      - ./secrets/provider_credential_encryption_key.txt:/run/secrets/provider_credential_encryption_key:ro
+    depends_on:
+      api:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    ports:
+      - "${SECAGENT_PORT:-18080}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  web-demo:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./web-demo/html:/usr/share/nginx/html:ro
+      - ./web-demo/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:
+  secagent-data:

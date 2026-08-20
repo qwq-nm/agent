@@ -1,0 +1,47 @@
+services:
+  api:
+    environment:
+      MODEL_MODE: live
+      COOKIE_SECURE: "true"
+      WORKER_CONCURRENCY: 3
+      DEEPSEEK_API_KEY_FILE: /run/secrets/deepseek_api_key
+      GLM_API_KEY_FILE: /run/secrets/glm_api_key
+      JWT_SIGNING_KEY_FILE: /run/secrets/jwt_signing_key
+      PROVIDER_CREDENTIAL_ENCRYPTION_KEY_FILE: /run/secrets/provider_credential_encryption_key
+    secrets:
+      - deepseek_api_key
+      - glm_api_key
+      - jwt_signing_key
+      - source: provider_credential_encryption_key
+        target: /run/secrets/provider_credential_encryption_key
+        mode: 0444
+    volumes: !override
+      - secagent-data:/data
+
+  worker:
+    environment:
+      MODEL_MODE: live
+      WORKER_CONCURRENCY: 3
+      DEEPSEEK_API_KEY_FILE: /run/secrets/deepseek_api_key
+      GLM_API_KEY_FILE: /run/secrets/glm_api_key
+      JWT_SIGNING_KEY_FILE: /run/secrets/jwt_signing_key
+      PROVIDER_CREDENTIAL_ENCRYPTION_KEY_FILE: /run/secrets/provider_credential_encryption_key
+    secrets:
+      - deepseek_api_key
+      - glm_api_key
+      - jwt_signing_key
+      - source: provider_credential_encryption_key
+        target: /run/secrets/provider_credential_encryption_key
+        mode: 0444
+    volumes: !override
+      - secagent-data:/data
+
+secrets:
+  deepseek_api_key:
+    file: ./secrets/deepseek_api_key.txt
+  glm_api_key:
+    file: ./secrets/glm_api_key.txt
+  jwt_signing_key:
+    file: ./secrets/jwt_signing_key.txt
+  provider_credential_encryption_key:
+    file: ./secrets/provider_credential_encryption_key.txt

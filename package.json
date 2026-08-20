@@ -1,0 +1,13 @@
+{
+  "name": "secagent-x-e2e",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build:fixtures": "python scripts/build_demo_archives.py",
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.1"
+  }
+}
