@@ -80,10 +80,21 @@ class Planner:
                 for name in allowed_tools
             },
         }
+        if parsed.scene.value == "web_analysis":
+            payload["web_planning_rules"] = [
+                "Run http_fetch before header_check or form_extract.",
+                "header_check must use exactly {'response': '$http'}.",
+                "form_extract must use exactly {'response': '$http'}.",
+                "Do not pass a URL string as the response parameter.",
+                "Use only passive GET/HEAD observations unless explicitly authorized.",
+            ]
         response = await self.router.complete(
             ModelStage.PLAN,
             ModelRequest(
-                system="只使用给定白名单工具生成最小可执行计划。",
+                system=(
+                    "Generate a minimal executable plan using only the provided "
+                    "allowlisted tools and parameter templates."
+                ),
                 user=json.dumps(payload, ensure_ascii=False),
                 response_schema=PlanDocument.model_json_schema(),
             ),

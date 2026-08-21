@@ -292,15 +292,6 @@ async def test_deepseek_fallback_delay_uses_injected_jitter() -> None:
 @pytest.mark.parametrize(
     ("response_body", "code", "retryable"),
     [
-        (
-            {
-                "choices": [
-                    {"finish_reason": "length", "message": {"content": '{"steps": []}'}}
-                ]
-            },
-            ProviderErrorCode.TRUNCATED,
-            True,
-        ),
         ({"choices": []}, ProviderErrorCode.EMPTY_CONTENT, True),
     ],
 )
@@ -314,6 +305,40 @@ async def test_deepseek_classifies_unusable_completions(
 
     assert caught.value.code is code
     assert caught.value.retryable is retryable
+
+
+@pytest.mark.asyncio
+async def test_deepseek_retries_truncated_completion_with_larger_token_limit() -> None:
+    requests: list[httpx.Request] = []
+    provider = deepseek_provider(
+        responses=[
+            {
+                "choices": [
+                    {"finish_reason": "length", "message": {"content": '{"steps": ['}}
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 4096},
+            },
+            {
+                "id": "retry-success",
+                "choices": [
+                    {"finish_reason": "stop", "message": {"content": '{"steps": []}'}}
+                ],
+                "usage": {"prompt_tokens": 11, "completion_tokens": 3},
+            },
+        ],
+        capture=requests,
+    )
+
+    response = await provider.complete(plan_request())
+
+    first_payload = json.loads(requests[0].content)
+    retry_payload = json.loads(requests[1].content)
+    assert response.data == {"steps": []}
+    assert response.request_id == "retry-success"
+    assert response.retry_count == 1
+    assert response.prompt_tokens == 21
+    assert response.completion_tokens == 4099
+    assert retry_payload["max_tokens"] > first_payload["max_tokens"]
 
 
 @pytest.mark.asyncio
@@ -386,14 +411,24 @@ async def test_deepseek_normalizes_length_before_validation_or_repair(
 ) -> None:
     requests: list[httpx.Request] = []
     provider = deepseek_provider(
-        returning={
-            "choices": [
-                {
-                    "finish_reason": finish_reason,
-                    "message": {"content": "not JSON"},
-                }
-            ]
-        },
+        responses=[
+            {
+                "choices": [
+                    {
+                        "finish_reason": finish_reason,
+                        "message": {"content": "not JSON"},
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "finish_reason": finish_reason,
+                        "message": {"content": "not JSON"},
+                    }
+                ]
+            },
+        ],
         capture=requests,
     )
 
@@ -402,7 +437,7 @@ async def test_deepseek_normalizes_length_before_validation_or_repair(
 
     assert caught.value.code is ProviderErrorCode.TRUNCATED
     assert caught.value.retryable is True
-    assert len(requests) == 1
+    assert len(requests) == 2
 
 
 @pytest.mark.asyncio

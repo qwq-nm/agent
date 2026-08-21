@@ -23,6 +23,8 @@ from secagent.providers.validation import (
     validate_output,
 )
 
+MAX_OUTPUT_TOKEN_RETRY_LIMIT = 8192
+
 
 class _StructuredProvider:
     """Shared structured-output flow; concrete providers own their payload policy."""
@@ -64,15 +66,29 @@ class _StructuredProvider:
                 self.name, ProviderErrorCode.INVALID_SCHEMA, False
             )
         started = time.perf_counter()
-        initial = await self._send(self._initial_payload(request))
-        content, finish_reason = self._completion(initial)
-        prompt_tokens, completion_tokens = _usage_counts(initial.payload)
+        (
+            content,
+            finish_reason,
+            final,
+            prompt_tokens,
+            completion_tokens,
+            retry_count,
+        ) = await self._send_completion_with_truncation_retry(
+            request,
+            self._initial_payload(request),
+        )
         try:
             data = validate_output(content, request.response_schema)
-            final = initial
-            retry_count = initial.retry_count
         except OutputValidationError as first_error:
-            repaired = await self._send(
+            (
+                repaired_content,
+                finish_reason,
+                final,
+                repair_prompt_tokens,
+                repair_completion_tokens,
+                repair_retry_count,
+            ) = await self._send_completion_with_truncation_retry(
+                request,
                 self._repair_payload(
                     request,
                     repair_context(
@@ -80,9 +96,8 @@ class _StructuredProvider:
                         first_error.errors,
                         request.response_schema,
                     ),
-                )
+                ),
             )
-            repaired_content, finish_reason = self._completion(repaired)
             try:
                 data = validate_output(repaired_content, request.response_schema)
             except OutputValidationError as repair_error:
@@ -90,13 +105,9 @@ class _StructuredProvider:
                     self.name,
                     repair_error.code,
                     False,
-                    repaired.request_id,
+                    final.request_id,
                 ) from repair_error
-            final = repaired
-            retry_count = initial.retry_count + 1 + repaired.retry_count
-            repair_prompt_tokens, repair_completion_tokens = _usage_counts(
-                repaired.payload
-            )
+            retry_count += 1 + repair_retry_count
             prompt_tokens = _saturating_add(
                 prompt_tokens, repair_prompt_tokens
             )
@@ -113,6 +124,37 @@ class _StructuredProvider:
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             retry_count=retry_count,
+        )
+
+    async def _send_completion_with_truncation_retry(
+        self, request: ModelRequest, payload: dict[str, Any]
+    ) -> tuple[str, str | None, JSONResponse, int, int, int]:
+        response = await self._send(payload)
+        prompt_tokens, completion_tokens = _usage_counts(response.payload)
+        retry_count = response.retry_count
+        try:
+            content, finish_reason = self._completion(response)
+        except ProviderUnavailable as exc:
+            if exc.code is not ProviderErrorCode.TRUNCATED:
+                raise
+            retry_payload = self._truncation_retry_payload(request, payload)
+            response = await self._send(retry_payload)
+            retry_prompt_tokens, retry_completion_tokens = _usage_counts(
+                response.payload
+            )
+            prompt_tokens = _saturating_add(prompt_tokens, retry_prompt_tokens)
+            completion_tokens = _saturating_add(
+                completion_tokens, retry_completion_tokens
+            )
+            retry_count += 1 + response.retry_count
+            content, finish_reason = self._completion(response)
+        return (
+            content,
+            finish_reason,
+            response,
+            prompt_tokens,
+            completion_tokens,
+            retry_count,
         )
 
     async def _send(self, payload: dict[str, Any]) -> JSONResponse:
@@ -171,6 +213,28 @@ class _StructuredProvider:
         payload.update(self._provider_options())
         return payload
 
+    def _truncation_retry_payload(
+        self, request: ModelRequest, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        assert request.stage is not None
+        retry = dict(payload)
+        current_max = int(retry.get("max_tokens") or self.max_tokens[request.stage])
+        retry["max_tokens"] = min(
+            MAX_OUTPUT_TOKEN_RETRY_LIMIT,
+            max(current_max + 1024, current_max * 2),
+        )
+        retry["messages"] = [
+            *retry.get("messages", []),
+            {
+                "role": "user",
+                "content": (
+                    "The previous JSON response was truncated. Return the same "
+                    "schema again as a complete, concise JSON object only."
+                ),
+            },
+        ]
+        return retry
+
     def _provider_options(self) -> dict[str, Any]:
         return {}
 
@@ -221,7 +285,7 @@ class _StructuredProvider:
 class DeepSeekProvider(_StructuredProvider):
     name = "deepseek"
     allowed_stages = frozenset({ModelStage.PLAN, ModelStage.CRITIC})
-    max_tokens = {ModelStage.PLAN: 4096, ModelStage.CRITIC: 2048}
+    max_tokens = {ModelStage.PLAN: 4096, ModelStage.CRITIC: 4096}
 
     def _provider_options(self) -> dict[str, Any]:
         if self.api_style == "opencode-go":

@@ -180,20 +180,64 @@ async def test_glm_repair_treats_missing_or_invalid_usage_as_zero() -> None:
 
 
 @pytest.mark.asyncio
+async def test_glm_retries_truncated_completion_with_larger_token_limit() -> None:
+    requests: list[httpx.Request] = []
+    provider = glm_provider(
+        responses=[
+            {
+                "choices": [
+                    {"finish_reason": "length", "message": {"content": '{"goal":'}}
+                ],
+                "usage": {"prompt_tokens": 7, "completion_tokens": 4096},
+            },
+            {
+                "id": "glm-retry-success",
+                "choices": [
+                    {"finish_reason": "stop", "message": {"content": '{"goal":"g"}'}}
+                ],
+                "usage": {"prompt_tokens": 8, "completion_tokens": 3},
+            },
+        ],
+        capture=requests,
+    )
+
+    response = await provider.complete(parse_request())
+
+    first_payload = json.loads(requests[0].content)
+    retry_payload = json.loads(requests[1].content)
+    assert response.data == {"goal": "g"}
+    assert response.request_id == "glm-retry-success"
+    assert response.retry_count == 1
+    assert response.prompt_tokens == 15
+    assert response.completion_tokens == 4099
+    assert retry_payload["max_tokens"] > first_payload["max_tokens"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("finish_reason", [" LENGTH ", "LeNgTh"])
 async def test_glm_normalizes_length_before_validation_or_repair(
     finish_reason: str,
 ) -> None:
     requests: list[httpx.Request] = []
     provider = glm_provider(
-        returning={
-            "choices": [
-                {
-                    "finish_reason": finish_reason,
-                    "message": {"content": "not JSON"},
-                }
-            ]
-        },
+        responses=[
+            {
+                "choices": [
+                    {
+                        "finish_reason": finish_reason,
+                        "message": {"content": "not JSON"},
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "finish_reason": finish_reason,
+                        "message": {"content": "not JSON"},
+                    }
+                ]
+            },
+        ],
         capture=requests,
     )
 
@@ -202,7 +246,7 @@ async def test_glm_normalizes_length_before_validation_or_repair(
 
     assert caught.value.code is ProviderErrorCode.TRUNCATED
     assert caught.value.retryable is True
-    assert len(requests) == 1
+    assert len(requests) == 2
 
 
 @pytest.mark.asyncio

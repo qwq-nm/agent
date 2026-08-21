@@ -550,7 +550,16 @@ class AgentRunner:
         tool_name: str, result: ToolResult, runtime: dict[str, Any]
     ) -> None:
         if tool_name in {"http_fetch", "http_request"} and result.evidence:
-            runtime["http_response"] = result.evidence[0].get("metadata", {})
+            metadata = result.evidence[0].get("metadata")
+            if isinstance(metadata, dict):
+                runtime["http_response"] = metadata
+
+    @staticmethod
+    def _runtime_http_response(runtime: dict) -> dict[str, Any]:
+        response = runtime.get("http_response")
+        if not isinstance(response, dict):
+            raise RuntimeError("HTTP observation is not available")
+        return response
 
     @staticmethod
     def _task_fingerprint(task: TaskRead, workspace: Path) -> str:
@@ -581,7 +590,16 @@ class AgentRunner:
 
     @staticmethod
     def _resolve_params(params: dict, workspace: Path, runtime: dict) -> dict:
-        resolved = dict(params)
+        def resolve_value(value: Any) -> Any:
+            if value == "$http":
+                return AgentRunner._runtime_http_response(runtime)
+            if isinstance(value, dict):
+                return {key: resolve_value(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [resolve_value(item) for item in value]
+            return value
+
+        resolved = resolve_value(dict(params))
         if resolved.get("file_path") == "$upload":
             metadata = json.loads(
                 (workspace / "upload.json").read_text(encoding="utf-8")
@@ -594,8 +612,4 @@ class AgentRunner:
             resolved["project_path"] = str(
                 extracted if extracted.is_dir() else workspace / "uploads"
             )
-        if resolved.get("response") == "$http":
-            if "http_response" not in runtime:
-                raise RuntimeError("HTTP observation is not available")
-            resolved["response"] = runtime["http_response"]
         return resolved

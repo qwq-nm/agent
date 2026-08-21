@@ -1,4 +1,5 @@
 from html.parser import HTMLParser
+from typing import Any
 
 from secagent.domain import RiskLevel, ToolResult
 from secagent.security.url_guard import UrlGuard
@@ -16,11 +17,12 @@ class UrlGuardTool(BaseTool):
         self.guard = guard
 
     async def run(self, params: dict, context: ToolContext) -> ToolResult:
+        del context
         parsed = self.guard.check(params["url"])
         normalized = parsed.geturl()
         return ToolResult(
             success=True,
-            summary="目标 URL 通过 SSRF 策略检查",
+            summary="Target URL passed SSRF policy check",
             evidence=[
                 {
                     "evidence_type": "http_observation",
@@ -36,6 +38,20 @@ class HttpFetch(HttpRequest):
     """Backward-compatible name for the guarded HTTP request tool."""
 
 
+def _response_param(params: dict[str, Any]) -> dict[str, Any] | ToolResult:
+    response = params.get("response")
+    if not isinstance(response, dict):
+        return ToolResult(
+            success=False,
+            summary="HTTP response parameter is missing or invalid",
+            error="invalid_http_response",
+            warnings=[
+                "Tool expected response metadata from http_fetch; got a different value."
+            ],
+        )
+    return response
+
+
 class HeaderCheck(BaseTool):
     name = "header_check"
     scene = "web_analysis"
@@ -43,8 +59,21 @@ class HeaderCheck(BaseTool):
     idempotent = True
 
     async def run(self, params: dict, context: ToolContext) -> ToolResult:
-        response = params["response"]
-        headers = {key.lower(): value for key, value in response["headers"].items()}
+        del context
+        response = _response_param(params)
+        if isinstance(response, ToolResult):
+            return response
+        raw_headers = response.get("headers")
+        if not isinstance(raw_headers, dict):
+            return ToolResult(
+                success=False,
+                summary="HTTP response headers are missing or invalid",
+                error="invalid_http_response",
+                warnings=[
+                    "header_check requires the structured metadata produced by http_fetch."
+                ],
+            )
+        headers = {str(key).lower(): str(value) for key, value in raw_headers.items()}
         checks = {
             "content-security-policy": "CSP",
             "strict-transport-security": "HSTS",
@@ -64,14 +93,15 @@ class HeaderCheck(BaseTool):
             }
             for label in missing
         ]
+        source = str(response.get("final_url") or "unknown")
         return ToolResult(
             success=True,
-            summary=f"观察到 {len(missing)} 项缺失的安全响应头",
+            summary=f"Observed {len(missing)} missing security headers",
             findings=findings,
             evidence=[
                 {
                     "evidence_type": "http_observation",
-                    "source": response["final_url"],
+                    "source": source,
                     "content": f"Header observation: missing {label}",
                     "confidence": 1.0,
                 }
@@ -111,13 +141,29 @@ class FormExtract(BaseTool):
     idempotent = True
 
     async def run(self, params: dict, context: ToolContext) -> ToolResult:
-        response = params["response"]
+        del context
+        response = _response_param(params)
+        if isinstance(response, ToolResult):
+            return response
+        body_preview = response.get("body_preview")
+        if body_preview is None:
+            body_preview = ""
+        if not isinstance(body_preview, str):
+            return ToolResult(
+                success=False,
+                summary="HTTP response body preview is invalid",
+                error="invalid_http_response",
+                warnings=[
+                    "form_extract requires the structured metadata produced by http_fetch."
+                ],
+            )
         parser = _FormParser()
-        parser.feed(response["body_preview"])
+        parser.feed(body_preview)
+        source = str(response.get("final_url") or "unknown")
         evidence = [
             {
                 "evidence_type": "http_observation",
-                "source": response["final_url"],
+                "source": source,
                 "content": (
                     f"Passive form: action={form['action']} method={form['method']} "
                     f"inputs={','.join(form['inputs'])}"
@@ -128,7 +174,7 @@ class FormExtract(BaseTool):
         ]
         return ToolResult(
             success=True,
-            summary=f"被动提取 {len(parser.forms)} 个表单（未提交）",
+            summary=f"Passively extracted {len(parser.forms)} forms",
             findings=parser.forms,
             evidence=evidence,
         )
