@@ -27,6 +27,8 @@ from secagent.repository import TaskRepository
 from secagent.services.job_service import JobService
 from secagent.security.url_guard import UrlGuard
 from secagent.tools.registry import ToolRegistry
+from secagent.tools.browser_tool import BrowserSnapshot
+from secagent.tools.dirsearch_tool import DirsearchScan
 from secagent.tools.log_tools import (
     AttackPatternDetector,
     LogAnalyzer,
@@ -115,6 +117,8 @@ def create_app(
             ConfigChecker(),
             UrlGuardTool(url_guard),
             HttpRequest(url_guard),
+            BrowserSnapshot(url_guard),
+            DirsearchScan(url_guard),
             HeaderCheck(),
             FormExtract(),
             LinkExtract(),

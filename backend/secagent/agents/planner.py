@@ -99,6 +99,11 @@ class Planner:
                 "header_check": {"response": "$http"},
                 "form_extract": {"response": "$http"},
                 "link_extract": {"response": "$http"},
+                "browser_snapshot": {"url": task.target_url, "wait_ms": 2500},
+                "dirsearch_scan": {
+                    "url": task.target_url,
+                    "extensions": ["php", "html", "js", "txt", "json", "bak", "zip"],
+                },
                 "robots_analyzer": {
                     "base_url": task.target_url,
                     "response": "$http",
@@ -134,8 +139,9 @@ class Planner:
                 "header_check 和 form_extract 的参数必须严格使用 {'response': '$http'}。",
                 "link_extract、js_analyzer、path_normalizer、flag_pattern_detector、cookie_analyzer 和 sensitive_file_checker 应分析最新的 {'response': '$http'}。",
                 "robots_analyzer 可以使用 {'base_url': target_url, 'response': '$http'} 生成或解析 robots.txt 线索。",
+                "如果 http_fetch 获取到的 HTML 内容很少、只包含前端挂载节点、出现大量 script/app/root 字样，或用户明确提到 JS 渲染，应规划 browser_snapshot 获取浏览器渲染后的可见文本、链接、表单和截图。",
                 "不要把 URL 字符串传给 response 参数；response 只能来自 http_fetch 的结构化结果。",
-                "除非用户明确授权，否则只规划被动 GET/HEAD 观察，不提交表单、不爆破、不执行真实漏洞利用。",
+                "除非用户明确授权，否则只规划被动 GET/HEAD 观察，不提交表单、不进行未授权爆破、不执行真实漏洞利用。",
                 "优先规划公开发现步骤：链接、表单、robots.txt、前端脚本路由、候选路径、疑似 Flag 模式。",
                 "不要重复 execution_memory.successful_tool_calls 中已经成功且参数相同的工具，除非观察结果表明之前失败、过期或证据不足。",
                 "使用 next_focus 选择最小必要的补充证据步骤。",
@@ -144,10 +150,12 @@ class Planner:
             ]
         if parsed.scene is TaskScene.CTF_WEB:
             payload["ctf_web_rules"] = [
+                "允许规划 dirsearch_scan 进行授权范围内的标准 dirsearch 路径发现；该工具属于中风险，必须经过人工确认，不得用于未授权目标。",
+                "如果页面由 JavaScript 渲染、普通 HTTP 响应看不到题目内容或 flag 线索，应规划 browser_snapshot；该工具属于中风险，必须经过人工确认。",
                 "这是授权 CTF Web/靶场题目分析场景，目标是围绕公开页面和授权路径寻找题目线索、候选 flag 或下一步分析方向。",
                 "优先分析首页、robots.txt、公开链接、前端 JS 路由、注释、表单字段、Cookie、响应头、备份文件名、配置文件名、源码泄露线索和页面中的 flag-like pattern。",
                 "如果运行记忆中出现 queued_urls、sensitive_paths、robots_paths、js_files、api_endpoints 或 candidate_flags，应优先规划最小必要工具去验证这些线索。",
-                "允许的自动动作仍然限于白名单工具和授权范围；不要提交表单，不要爆破目录，不要执行 SQL 注入、命令执行、文件写入或破坏性利用。",
+                "允许的自动动作仍然限于白名单工具和授权范围；不要提交表单，不要进行未授权目录爆破，不要执行 SQL 注入、命令执行、文件写入或破坏性利用。",
                 "如果发现疑似 flag，先使用 flag_pattern_detector 或已有证据复核，不要伪造 flag；报告必须说明 flag 来源证据。",
                 "如果没有发现 flag，应明确输出已检查的公开入口、剩余可能方向和需要新增工具能力的原因。",
             ]
