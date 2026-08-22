@@ -41,6 +41,7 @@ from secagent.tools.source_tools import (
 )
 from secagent.tools.http_request import HttpRequest
 from secagent.tools.web_tools import (
+    CookieAnalyzer,
     FlagPatternDetector,
     FormExtract,
     HeaderCheck,
@@ -48,6 +49,7 @@ from secagent.tools.web_tools import (
     LinkExtract,
     PathNormalizer,
     RobotsAnalyzer,
+    SensitiveFileChecker,
     UrlGuardTool,
 )
 
@@ -120,6 +122,8 @@ def create_app(
             JsAnalyzer(),
             PathNormalizer(),
             FlagPatternDetector(),
+            CookieAnalyzer(),
+            SensitiveFileChecker(),
         ]
     )
     app.include_router(system_router)

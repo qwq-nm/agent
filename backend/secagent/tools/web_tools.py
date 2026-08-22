@@ -539,3 +539,98 @@ class FlagPatternDetector(BaseTool):
                 for item in matches
             ],
         )
+
+
+class CookieAnalyzer(BaseTool):
+    name = "cookie_analyzer"
+    scene = "web_analysis"
+    risk_level = RiskLevel.LOW
+    idempotent = True
+    description = "被动分析响应中的 Set-Cookie 安全属性，不修改会话、不提交请求。"
+
+    async def run(self, params: dict, context: ToolContext) -> ToolResult:
+        del context
+        response = _response_param(params)
+        if isinstance(response, ToolResult):
+            return response
+        headers = response.get("headers")
+        if not isinstance(headers, dict):
+            return ToolResult(
+                success=False,
+                summary="HTTP response headers are missing or invalid",
+                error="invalid_http_response",
+            )
+        source = _final_url(response)
+        raw_cookie = ""
+        for key, value in headers.items():
+            if str(key).lower() == "set-cookie":
+                raw_cookie = str(value)
+                break
+        if not raw_cookie:
+            return ToolResult(success=True, summary="No Set-Cookie header observed")
+        lowered = raw_cookie.lower()
+        findings = []
+        for attr in ("httponly", "secure", "samesite"):
+            if attr not in lowered:
+                findings.append({"missing_attribute": attr})
+        return ToolResult(
+            success=True,
+            summary=f"Analyzed Set-Cookie header; missing {len(findings)} recommended attributes",
+            findings=findings,
+            evidence=[
+                {
+                    "evidence_type": "http_observation",
+                    "source": source or "http_response",
+                    "content": f"Cookie security attribute missing: {item['missing_attribute']}",
+                    "confidence": 0.9,
+                    "metadata": item,
+                }
+                for item in findings
+            ],
+        )
+
+
+class SensitiveFileChecker(BaseTool):
+    name = "sensitive_file_checker"
+    scene = "web_analysis"
+    risk_level = RiskLevel.LOW
+    idempotent = True
+    description = "从已获取页面和公开链接中被动识别疑似敏感文件、备份文件或泄露路径线索。"
+
+    async def run(self, params: dict, context: ToolContext) -> ToolResult:
+        del context
+        response = params.get("response")
+        source = str(params.get("source") or "")
+        text = str(params.get("text") or "")
+        if isinstance(response, dict):
+            source = _final_url(response) or source
+            body = _body_preview(response)
+            if isinstance(body, ToolResult):
+                return body
+            text += "\n" + body
+        patterns = [
+            r"(?i)(?:^|[/'\"])(?:\.env|\.git|\.svn|\.DS_Store)(?:$|[/'\"])",
+            r"(?i)[A-Za-z0-9_-]+\.(?:bak|backup|old|zip|tar|gz|sql|7z|rar)",
+            r"(?i)(?:config|database|db|backup|dump)[A-Za-z0-9_.-]*\.(?:php|inc|sql|zip|bak|txt)",
+        ]
+        findings: list[dict[str, str]] = []
+        for pattern in patterns:
+            for match in re.finditer(pattern, text):
+                value = match.group(0).strip("'\"/")
+                if value and value not in {item["candidate"] for item in findings}:
+                    findings.append({"candidate": value[:240]})
+        return ToolResult(
+            success=True,
+            summary=f"Detected {len(findings)} sensitive file or backup path hints",
+            findings=findings,
+            evidence=[
+                {
+                    "evidence_type": "http_observation",
+                    "source": source or "provided_text",
+                    "content": f"Sensitive file hint observed: {item['candidate']}",
+                    "confidence": 0.86,
+                    "metadata": item,
+                }
+                for item in findings
+            ],
+        )

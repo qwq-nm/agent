@@ -6,6 +6,7 @@ from secagent.domain import ModelRequest, ModelResponse, ModelStage, ParsedTask
 from secagent.providers.router import ModelRouter
 from secagent.services.ledger import LedgerService
 
+
 EVIDENCE_TYPE_LABELS = {
     "http_response": "HTTP 响应",
     "http_headers": "响应头",
@@ -22,6 +23,7 @@ EVIDENCE_TYPE_LABELS = {
     "secret_candidate": "疑似敏感信息",
     "runtime_error": "运行错误",
     "observation": "观察结果",
+    "http_observation": "HTTP 观察结果",
 }
 
 TOOL_LABELS = {
@@ -43,7 +45,31 @@ TOOL_LABELS = {
     "js_analyzer": "前端脚本分析",
     "path_normalizer": "路径规范化",
     "flag_pattern_detector": "Flag 模式识别",
+    "cookie_analyzer": "Cookie 安全属性分析",
+    "sensitive_file_checker": "敏感文件线索检查",
     "report_generator": "报告生成",
+}
+
+TOOL_PURPOSES = {
+    "url_guard": "检查目标 URL 是否位于授权范围内，并拦截 SSRF、文件协议、内网地址等越界访问。",
+    "http_fetch": "访问授权页面，获取状态码、响应头和页面内容，为后续解析提供原始材料。",
+    "header_check": "分析响应头安全配置，识别 CSP、HSTS、X-Content-Type-Options 等缺失项。",
+    "form_extract": "被动解析 HTML 表单，识别 action、method 和输入字段，不提交表单。",
+    "link_extract": "提取同源公开链接，为下一轮页面分析提供候选目标。",
+    "robots_analyzer": "读取并解析 robots.txt，发现站点主动声明的路径规则或隐藏目录线索。",
+    "js_analyzer": "分析前端脚本中的接口、路由、关键词和潜在线索。",
+    "path_normalizer": "将页面中发现的相对路径、静态资源和候选路径规范化为可分析 URL。",
+    "flag_pattern_detector": "在已获取的公开文本中检测疑似 flag 或敏感标记。",
+    "cookie_analyzer": "被动分析 Set-Cookie 安全属性，例如 HttpOnly、Secure 和 SameSite。",
+    "sensitive_file_checker": "从已获取页面内容中识别备份文件、配置文件、源码泄露路径等公开线索。",
+    "log_type_detector": "识别日志格式，为后续字段解析和异常检测选择合适策略。",
+    "log_analyzer": "提取日志字段、异常请求、可疑来源和统计特征。",
+    "attack_pattern_detector": "根据规则识别常见攻击行为，例如扫描、注入尝试或异常访问模式。",
+    "timeline_builder": "将日志事件按时间组织，形成可追溯的事件链。",
+    "project_detector": "识别源码项目类型、入口文件和主要技术栈。",
+    "source_scanner": "静态扫描源码中的危险函数、输入入口和高风险代码片段。",
+    "secret_scanner": "检测源码或配置中的硬编码密钥、令牌和敏感字符串。",
+    "config_checker": "检查配置文件中的调试模式、弱口令、暴露服务和危险默认值。",
 }
 
 STOP_REASON_LABELS = {
@@ -69,7 +95,7 @@ SAFETY_MODE_REPORTS = {
 
 class ReportSections(BaseModel):
     summary: str
-    findings: list = Field(default_factory=list)
+    findings: list[str] = Field(default_factory=list)
     recommendations: list[str] = Field(default_factory=list)
     uncertainties: list[str] = Field(default_factory=list)
     evidence_ids: list[str] = Field(default_factory=list)
@@ -97,23 +123,13 @@ class Reporter:
         errors: list[str] | None = None,
     ) -> tuple[ReportArtifact, ModelResponse]:
         snapshot = self.ledger.snapshot(task_id)
-        findings = [
-            {
-                "id": item["id"],
-                "source": self._source_label(item["source"]),
-                "raw_source": item["source"],
-                "evidence_type": self._evidence_type_label(item["evidence_type"]),
-                "content": item["content"],
-                "confidence": item["confidence"],
-            }
-            for item in snapshot["evidences"]
-        ]
+        findings = self._model_findings(snapshot)
         response = await self.router.complete(
             ModelStage.REPORT,
             ModelRequest(
                 system=(
                     "根据提供的证据账本生成中文结构化报告章节，不得补造证据。"
-                    "所有 findings、recommendations、uncertainties 必须使用中文表达。"
+                    "findings、recommendations、uncertainties 必须使用中文表达。"
                     "如果证据不足，要明确说明缺少什么以及为什么不能下最终结论。"
                 ),
                 user=json.dumps(
@@ -123,6 +139,8 @@ class Reporter:
                         "stop_reason": self._stop_reason_label(stop_reason),
                         "safety_policy": self._safety_mode_label(safety_mode),
                         "findings": findings,
+                        "tool_chain": self._tool_chain_payload(snapshot),
+                        "model_calls": self._model_call_payload(snapshot),
                         "recommendations": ["复核原始证据并按授权范围处置"],
                         "errors": errors or [],
                     },
@@ -132,53 +150,17 @@ class Reporter:
             ),
         )
         sections = ReportSections.model_validate(response.data)
-        allowed_ids = {item["id"] for item in snapshot["evidences"]}
-        cited_ids = sections.evidence_ids or [
-            item["id"] for item in snapshot["evidences"]
-        ]
-        if len(cited_ids) != len(set(cited_ids)) or any(
-            evidence_id not in allowed_ids for evidence_id in cited_ids
-        ):
-            raise ValueError("invalid evidence citation for current task")
-        cited = {
-            item["id"]: item
-            for item in findings
-            if item["id"] in set(cited_ids)
-        }
-        demo = response.is_demo or any(
-            item["is_demo"] for item in snapshot["model_calls"]
+        artifact = self._compose_report(
+            snapshot,
+            parsed,
+            report_type=report_type,
+            stop_reason=stop_reason,
+            safety_mode=safety_mode,
+            sections=sections,
+            errors=errors or [],
+            demo=response.is_demo or any(item["is_demo"] for item in snapshot["model_calls"]),
         )
-        title = self._title(report_type, demo)
-        evidence_lines = [
-            f"- `[{evidence_id}]` `{cited[evidence_id]['source']}`："
-            f"{cited[evidence_id]['content']}（置信度 {cited[evidence_id]['confidence']:.2f}）"
-            for evidence_id in cited_ids
-        ] or ["- 暂无证据"]
-        recommendation_lines = [
-            f"- {item}" for item in sections.recommendations
-        ] or ["- 暂无建议"]
-        report = "\n\n".join(
-            [
-                title,
-                f"## 报告类型\n\n{self._type_label(report_type)}",
-                f"## 安全策略\n\n{self._safety_mode_label(safety_mode)}",
-                f"## 停止原因\n\n{self._stop_reason_label(stop_reason)}",
-                f"## 摘要\n\n{sections.summary}",
-                "## 证据链\n\n" + "\n".join(evidence_lines),
-                "## 处置建议\n\n" + "\n".join(recommendation_lines),
-                "## 未完成项与不确定性\n\n"
-                + "\n".join(f"- {item}" for item in (sections.uncertainties or errors or []))
-                if (sections.uncertainties or errors)
-                else "## 未完成项与不确定性\n\n- 暂无",
-                "## 说明\n\n模型仅负责解释，事实来源以证据账本为准。",
-            ]
-        )
-        return (
-            ReportArtifact(
-                content=report, evidence_ids=cited_ids, report_type=report_type
-            ),
-            response,
-        )
+        return artifact, response
 
     def render_fallback(
         self,
@@ -191,44 +173,158 @@ class Reporter:
         errors: list[str] | None = None,
     ) -> ReportArtifact:
         snapshot = self.ledger.snapshot(task_id)
-        evidences = snapshot["evidences"]
-        evidence_ids = [item["id"] for item in evidences]
-        evidence_lines = [
-            f"- `[{item['id']}]` {self._evidence_type_label(item['evidence_type'])}"
-            f" / `{self._source_label(item['source'])}`：{item['content']}"
-            f"（置信度 {item['confidence']:.2f}）"
-            for item in evidences
-        ] or ["- 暂无证据"]
-        tool_lines = [
-            f"- {self._source_label(item['tool_name'])}（`{item['tool_name']}`）："
-            f"{item['result'].get('summary', item['status'])}"
-            for item in snapshot["tool_calls"]
-        ] or ["- 暂无工具调用"]
-        model_lines = [
-            f"- {self._stage_label(item['stage'])} / `{item['provider']}`：{self._status_label(item['status'])}"
-            for item in snapshot["model_calls"]
-        ] or ["- 暂无模型调用"]
-        error_lines = [f"- {item}" for item in (errors or [])] or ["- 暂无"]
+        sections = ReportSections(
+            summary="系统根据当前已持久化证据生成本报告；未补造任何未记录事实。",
+            findings=[],
+            recommendations=["复核证据账本、工具调用记录和任务详情页中的执行时间线。"],
+            uncertainties=errors or ["任务未完全收敛，仍需结合证据账本判断后续方向。"],
+            evidence_ids=[item["id"] for item in snapshot["evidences"]],
+        )
+        return self._compose_report(
+            snapshot,
+            parsed,
+            report_type=report_type,
+            stop_reason=stop_reason,
+            safety_mode=safety_mode,
+            sections=sections,
+            errors=errors or [],
+            demo=any(item["is_demo"] for item in snapshot["model_calls"]),
+            fallback=True,
+        )
+
+    def _compose_report(
+        self,
+        snapshot: dict,
+        parsed: ParsedTask,
+        *,
+        report_type: str,
+        stop_reason: str | None,
+        safety_mode: str,
+        sections: ReportSections,
+        errors: list[str],
+        demo: bool,
+        fallback: bool = False,
+    ) -> ReportArtifact:
+        allowed_ids = {item["id"] for item in snapshot["evidences"]}
+        cited_ids = sections.evidence_ids or [item["id"] for item in snapshot["evidences"]]
+        cited_ids = [item for item in cited_ids if item in allowed_ids]
+        evidence_lines = self._evidence_lines(snapshot, cited_ids)
+        finding_lines = [f"- {item}" for item in sections.findings] or ["- 暂无可独立确认的综合发现。"]
+        recommendation_lines = [f"- {item}" for item in sections.recommendations] or ["- 暂无建议。"]
+        uncertainty_lines = [f"- {item}" for item in (sections.uncertainties or errors)] or ["- 暂无。"]
+
         report = "\n\n".join(
             [
-                self._title(report_type, any(item["is_demo"] for item in snapshot["model_calls"])),
+                self._title(report_type, demo),
                 f"## 报告类型\n\n{self._type_label(report_type)}",
                 f"## 安全策略\n\n{self._safety_mode_label(safety_mode)}",
                 f"## 任务目标\n\n{parsed.goal}",
                 f"## 停止原因\n\n{self._stop_reason_label(stop_reason)}",
-                "## 摘要\n\n系统根据当前已持久化证据生成本报告；未补造任何未记录事实。",
+                self._ai_decision_section(snapshot),
+                f"## 摘要\n\n{sections.summary}",
+                "## 关键发现\n\n" + "\n".join(finding_lines),
                 "## 证据链\n\n" + "\n".join(evidence_lines),
-                "## 工具执行概览\n\n" + "\n".join(tool_lines),
-                "## 模型调用概览\n\n" + "\n".join(model_lines),
-                "## 未完成项与不确定性\n\n" + "\n".join(error_lines),
-                "## 说明\n\n该报告为兜底生成，事实来源以证据账本为准。",
+                self._tool_chain_section(snapshot),
+                self._model_call_section(snapshot),
+                "## 处置建议\n\n" + "\n".join(recommendation_lines),
+                "## 未完成项与不确定性\n\n" + "\n".join(uncertainty_lines),
+                self._explanation_section(fallback),
             ]
         )
-        return ReportArtifact(
-            content=report,
-            evidence_ids=evidence_ids,
-            report_type=report_type,
+        return ReportArtifact(content=report, evidence_ids=cited_ids, report_type=report_type)
+
+    def _model_findings(self, snapshot: dict) -> list[dict]:
+        return [
+            {
+                "id": item["id"],
+                "source": self._source_label(item["source"]),
+                "raw_source": item["source"],
+                "evidence_type": self._evidence_type_label(item["evidence_type"]),
+                "content": item["content"],
+                "confidence": item["confidence"],
+            }
+            for item in snapshot["evidences"]
+        ]
+
+    def _tool_chain_payload(self, snapshot: dict) -> list[dict]:
+        return [
+            {
+                "tool_name": item["tool_name"],
+                "tool_label": self._source_label(item["tool_name"]),
+                "purpose": item.get("step_purpose") or self._tool_purpose(item["tool_name"]),
+                "params": item.get("params", {}),
+                "summary": item.get("result", {}).get("summary", item.get("status", "")),
+                "status": item.get("status", ""),
+            }
+            for item in snapshot["tool_calls"]
+        ]
+
+    def _model_call_payload(self, snapshot: dict) -> list[dict]:
+        return [
+            {
+                "stage": self._stage_label(item["stage"]),
+                "provider": item["provider"],
+                "status": self._status_label(item["status"]),
+                "route_reason": item.get("route_reason"),
+            }
+            for item in snapshot["model_calls"]
+        ]
+
+    def _ai_decision_section(self, snapshot: dict) -> str:
+        model_count = len(snapshot["model_calls"])
+        tool_count = len(snapshot["tool_calls"])
+        evidence_count = len(snapshot["evidences"])
+        return (
+            "## AI 决策说明\n\n"
+            "- AI 不直接访问目标，也不直接执行命令；它负责理解用户目标、授权范围和安全策略，并生成或修正执行计划。\n"
+            "- 系统执行器根据计划调用白名单工具，工具结果会写入证据账本，再作为后续复核、重规划和报告生成的依据。\n"
+            f"- 本次任务已记录 {model_count} 次模型节点、{tool_count} 次工具调用、{evidence_count} 条证据。"
         )
+
+    def _tool_chain_section(self, snapshot: dict) -> str:
+        lines = []
+        for index, item in enumerate(snapshot["tool_calls"], start=1):
+            tool_name = item["tool_name"]
+            result = item.get("result", {})
+            summary = result.get("summary", item.get("status", "无摘要"))
+            purpose = item.get("step_purpose") or self._tool_purpose(tool_name)
+            step_name = item.get("step_name") or self._source_label(tool_name)
+            lines.extend(
+                [
+                    f"- 第 {index} 步：{step_name}，调用 {self._source_label(tool_name)}（`{tool_name}`）",
+                    f"- 调用原因：{purpose}",
+                    "- 输入来源：来自任务目标、授权范围、上一轮工具输出或执行计划中的参数模板。",
+                    f"- 关键结果：{summary}",
+                    "- 对后续判断的作用：该结果会进入证据账本，供 Critic 判断证据是否充分，并供 Planner 生成后续计划时参考。",
+                ]
+            )
+        if not lines:
+            lines.append("- 暂无工具调用。")
+        return "## 工具链执行说明\n\n" + "\n".join(lines)
+
+    def _model_call_section(self, snapshot: dict) -> str:
+        lines = [
+            f"- {self._stage_label(item['stage'])} / `{item['provider']}`：{self._status_label(item['status'])}"
+            for item in snapshot["model_calls"]
+        ] or ["- 暂无模型调用。"]
+        return "## 模型调用概览\n\n" + "\n".join(lines)
+
+    def _evidence_lines(self, snapshot: dict, cited_ids: list[str]) -> list[str]:
+        by_id = {item["id"]: item for item in snapshot["evidences"]}
+        lines = []
+        for evidence_id in cited_ids:
+            item = by_id[evidence_id]
+            lines.append(
+                f"- `[{item['id']}]` {self._evidence_type_label(item['evidence_type'])}"
+                f" / `{self._source_label(item['source'])}`：{item['content']}"
+                f"（置信度 {item['confidence']:.2f}）"
+            )
+        return lines or ["- 暂无证据。"]
+
+    def _explanation_section(self, fallback: bool) -> str:
+        if fallback:
+            return "## 说明\n\n该报告为兜底生成，事实来源以证据账本为准；未记录到证据账本的内容不会作为事实结论。"
+        return "## 说明\n\n模型只负责解释、归纳和规划，事实来源以证据账本和工具调用结果为准。"
 
     @staticmethod
     def _title(report_type: str, demo: bool) -> str:
@@ -260,6 +356,10 @@ class Reporter:
     @staticmethod
     def _source_label(value: str) -> str:
         return TOOL_LABELS.get(value, value)
+
+    @staticmethod
+    def _tool_purpose(value: str) -> str:
+        return TOOL_PURPOSES.get(value, "执行当前计划步骤所需的安全分析动作，并将结果写入证据账本。")
 
     @staticmethod
     def _stage_label(value: str) -> str:

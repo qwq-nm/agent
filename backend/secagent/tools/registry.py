@@ -33,10 +33,6 @@ class ToolRegistry:
 
     def describe(self) -> list[dict[str, str]]:
         return [
-            {
-                "name": tool.name,
-                "scene": tool.scene,
-                "risk_level": tool.risk_level.value,
-            }
+            tool.spec().__dict__
             for tool in self._tools.values()
         ]

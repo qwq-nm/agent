@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import ApprovalDialog from '../components/ApprovalDialog.vue'
+import AgentLoopPanel from '../components/AgentLoopPanel.vue'
 import CurrentExecutionPanel from '../components/CurrentExecutionPanel.vue'
 import EvidencePanel from '../components/EvidencePanel.vue'
 import ModelRoutePanel from '../components/ModelRoutePanel.vue'
@@ -173,6 +174,8 @@ onBeforeUnmount(store.stopWatching)
     />
 
     <CurrentExecutionPanel :task="task" :busy="busy" @approve="approvalOpen = true" />
+
+    <AgentLoopPanel :task="task" />
 
     <PlanPreviewPanel
       :preview="task.plan_preview"

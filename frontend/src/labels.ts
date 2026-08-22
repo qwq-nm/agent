@@ -92,6 +92,8 @@ const TOOL_LABELS: Record<string, string> = {
   js_analyzer: '前端脚本分析',
   path_normalizer: '路径规范化',
   flag_pattern_detector: 'Flag 模式识别',
+  cookie_analyzer: 'Cookie 安全属性分析',
+  sensitive_file_checker: '敏感文件线索检查',
   report_generator: '报告生成',
 }
 

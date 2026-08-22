@@ -365,6 +365,7 @@ class LedgerService:
         task = self.repository.get_task(task_id)
         plan_preview = self._plan_preview(task_id)
         current_stage = self._current_stage(task, rows, plan_preview)
+        steps_by_id = {row.id: row for row in rows["steps"]}
         approvals = [
             {
                 "id": row.id,
@@ -425,6 +426,16 @@ class LedgerService:
             "tool_calls": [
                 {
                     "id": row.id,
+                    "step_id": row.step_id,
+                    "step_index": steps_by_id[row.step_id].step_index
+                    if row.step_id in steps_by_id
+                    else None,
+                    "step_name": steps_by_id[row.step_id].name
+                    if row.step_id in steps_by_id
+                    else None,
+                    "step_purpose": steps_by_id[row.step_id].purpose
+                    if row.step_id in steps_by_id
+                    else None,
                     "tool_name": row.tool_name,
                     "params": json.loads(row.params_json),
                     "result": json.loads(row.result_json),

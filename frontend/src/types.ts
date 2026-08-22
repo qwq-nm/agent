@@ -149,6 +149,10 @@ export interface ModelCall {
 
 export interface ToolCall {
   id: string
+  step_id?: string | null
+  step_index?: number | null
+  step_name?: string | null
+  step_purpose?: string | null
   tool_name: string
   params: Record<string, unknown>
   result: Record<string, unknown>

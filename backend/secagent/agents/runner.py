@@ -737,15 +737,26 @@ class AgentRunner:
             )
         evidence_urls = []
         seen_urls: set[str] = set()
+        latest_evidence = []
         for evidence in snapshot["evidences"]:
             metadata = evidence.get("metadata", {})
             url = metadata.get("url") if isinstance(metadata, dict) else None
             if isinstance(url, str) and url not in seen_urls:
                 seen_urls.add(url)
                 evidence_urls.append(url[:512])
+        for evidence in snapshot["evidences"][-20:]:
+            latest_evidence.append(
+                {
+                    "evidence_type": str(evidence.get("evidence_type", ""))[:80],
+                    "source": str(evidence.get("source", ""))[:160],
+                    "content": str(evidence.get("content", ""))[:500],
+                    "confidence": evidence.get("confidence"),
+                }
+            )
         return {
             "successful_tool_calls": successful[-20:],
             "evidence_urls": evidence_urls[-30:],
+            "latest_evidence": latest_evidence,
         }
 
     @staticmethod

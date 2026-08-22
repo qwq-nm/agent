@@ -44,6 +44,8 @@ SCENES = {
             "js_analyzer",
             "path_normalizer",
             "flag_pattern_detector",
+            "cookie_analyzer",
+            "sensitive_file_checker",
         ),
         ("http_observation",),
     ),

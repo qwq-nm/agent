@@ -33,6 +33,7 @@ from secagent.tools.source_tools import (
     SourceScanner,
 )
 from secagent.tools.web_tools import (
+    CookieAnalyzer,
     FlagPatternDetector,
     FormExtract,
     HeaderCheck,
@@ -40,6 +41,7 @@ from secagent.tools.web_tools import (
     LinkExtract,
     PathNormalizer,
     RobotsAnalyzer,
+    SensitiveFileChecker,
     UrlGuardTool,
 )
 from secagent.security.url_guard import UrlGuard
@@ -87,6 +89,8 @@ def build_worker_registry(allowed_hosts: set[str]) -> ToolRegistry:
             JsAnalyzer(),
             PathNormalizer(),
             FlagPatternDetector(),
+            CookieAnalyzer(),
+            SensitiveFileChecker(),
         ]
     )
 

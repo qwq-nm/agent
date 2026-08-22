@@ -7,6 +7,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from secagent.providers.base import ProviderErrorCode, ProviderFailure
+
 
 @dataclass
 class ApiError(Exception):
@@ -102,11 +104,42 @@ def install_error_handlers(app: FastAPI) -> None:
             headers=exc.headers,
         )
 
+    @app.exception_handler(ProviderFailure)
+    async def provider_error_handler(
+        request: Request, exc: ProviderFailure
+    ) -> JSONResponse:
+        return _response(
+            request,
+            503,
+            f"model_{exc.code.value}",
+            _provider_message(exc),
+            None,
+        )
+
     @app.exception_handler(Exception)
     async def unexpected_error_handler(request: Request, _exc: Exception) -> JSONResponse:
         return _response(
             request, 500, "internal_error", "Internal server error", None
         )
+
+
+def _provider_message(exc: ProviderFailure) -> str:
+    provider = exc.provider.upper()
+    messages = {
+        ProviderErrorCode.AUTH: f"{provider} 模型鉴权失败，请检查 API Key、接口地址和模型配置。",
+        ProviderErrorCode.RATE_LIMIT: f"{provider} 模型请求触发限流，请稍后重试或切换 Provider。",
+        ProviderErrorCode.TIMEOUT: f"{provider} 模型接口响应超时，执行计划没有生成完成。请稍后重试，或检查网络、模型服务状态和接口配置。",
+        ProviderErrorCode.NETWORK: f"{provider} 模型接口网络连接失败，请检查 Docker 网络、代理和接口地址。",
+        ProviderErrorCode.SERVER: f"{provider} 模型服务返回异常，请稍后重试或切换 Provider。",
+        ProviderErrorCode.EMPTY_CONTENT: f"{provider} 模型返回为空，请重试或切换 Provider。",
+        ProviderErrorCode.TRUNCATED: f"{provider} 模型输出被截断，请缩短任务描述或降低输出复杂度后重试。",
+        ProviderErrorCode.INVALID_JSON: f"{provider} 模型返回格式不是有效 JSON，请重试或切换 Provider。",
+        ProviderErrorCode.INVALID_SCHEMA: f"{provider} 模型返回结构不符合系统要求，请重试或切换 Provider。",
+    }
+    message = messages.get(exc.code, f"{provider} 模型暂时不可用，请稍后重试。")
+    if exc.request_id:
+        message += f" 请求 ID：{exc.request_id}"
+    return message
 
 
 def _response(

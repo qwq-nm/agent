@@ -25,6 +25,9 @@ async function stableError(response: Response): Promise<string> {
   } catch {
     // Never surface an arbitrary response body in the UI.
   }
+  if (response.status === 504) return '后端处理超时，通常是模型接口响应太慢或网络不稳定。请稍后重试，或检查模型 Provider 配置。'
+  if (response.status === 503) return '后端服务暂时不可用，请检查模型 Provider、任务队列或 Docker 服务状态。'
+  if (response.status === 502) return '前端网关无法连接后端 API，请检查 api 容器是否正常运行。'
   return 'Request failed'
 }
 
