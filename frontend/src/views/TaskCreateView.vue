@@ -7,7 +7,7 @@ import type { RouteMode, SafetyMode } from '../types'
 interface MissionTemplate {
   id: string
   title: string
-  scene: '' | 'web_analysis' | 'incident_response' | 'source_audit'
+  scene: '' | 'ctf_web' | 'web_analysis' | 'incident_response' | 'source_audit'
   description: string
   prompt: string
   targetHint: string
@@ -42,7 +42,7 @@ const templates: MissionTemplate[] = [
   {
     id: 'web',
     title: 'CTF / Web 被动分析',
-    scene: 'web_analysis',
+    scene: 'ctf_web',
     description: '分析公开页面、响应头、表单、链接、JS、robots.txt 与疑似 flag。',
     targetHint: '适合：授权 CTF Web 题、靶场 Web 页面',
     prompt:
@@ -211,6 +211,7 @@ function chooseFile(event: Event) {
           <span>任务模式</span>
           <div class="segmented">
             <button type="button" :disabled="submitting" :class="{ active: form.scene_hint === '' }" @click="form.scene_hint = ''">自动判断</button>
+            <button type="button" :disabled="submitting" :class="{ active: form.scene_hint === 'ctf_web' }" @click="form.scene_hint = 'ctf_web'">CTF Web</button>
             <button type="button" :disabled="submitting" :class="{ active: form.scene_hint === 'web_analysis' }" @click="form.scene_hint = 'web_analysis'">Web 分析</button>
             <button type="button" :disabled="submitting" :class="{ active: form.scene_hint === 'incident_response' }" @click="form.scene_hint = 'incident_response'">日志分析</button>
             <button type="button" :disabled="submitting" :class="{ active: form.scene_hint === 'source_audit' }" @click="form.scene_hint = 'source_audit'">源码审计</button>

@@ -166,6 +166,33 @@ export interface TaskEvent {
   created_at: string
 }
 
+export interface RuntimeMemoryToolSummary {
+  tool_name: string
+  step_name: string
+  status: string
+  success: boolean
+  summary?: string | null
+  error?: string | null
+}
+
+export interface RuntimeMemory {
+  visited_urls: string[]
+  queued_urls: string[]
+  discovered_links: string[]
+  forms: Array<Record<string, unknown>>
+  parameters: string[]
+  cookies: string[]
+  js_files: string[]
+  api_endpoints: string[]
+  robots_paths: string[]
+  sensitive_paths: string[]
+  candidate_flags: string[]
+  interesting_findings: string[]
+  failed_tools: RuntimeMemoryToolSummary[]
+  tool_result_summary: RuntimeMemoryToolSummary[]
+  last_new_evidence_at?: string | null
+}
+
 export interface PendingApproval {
   step_id: string
   tool_name: string
@@ -195,6 +222,7 @@ export interface TaskDetail extends Task {
   heartbeat_at?: string | null
   current_stage?: string | null
   task_events?: TaskEvent[]
+  runtime_memory?: RuntimeMemory
 }
 
 export interface ModelStatus {

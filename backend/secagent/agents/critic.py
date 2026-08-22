@@ -115,7 +115,7 @@ class Critic:
         recommended_next_focus: list[str] = []
         if evidence_count == 0:
             required_missing.append("at least one tool-backed factual observation")
-        if scene is TaskScene.WEB_ANALYSIS:
+        if scene in {TaskScene.WEB_ANALYSIS, TaskScene.CTF_WEB}:
             if "http" not in contents and "http" not in sources:
                 required_missing.append("authorized HTTP observation")
             if "header" not in contents:
@@ -128,6 +128,28 @@ class Critic:
                 recommended_next_focus.append("robots.txt observation")
             if "flag-like pattern" not in contents:
                 recommended_next_focus.append("flag-like pattern detection")
+            if scene is TaskScene.CTF_WEB:
+                if not any(
+                    marker in contents or marker in sources
+                    for marker in (
+                        "public link",
+                        "client-side route",
+                        "robots.txt",
+                        "flag-like pattern",
+                        "sensitive file",
+                        "backup",
+                        "cookie",
+                        "form",
+                    )
+                ):
+                    required_missing.append("CTF Web public clue observation")
+                for item in (
+                    "front-end route or JavaScript clue review",
+                    "hidden path or backup file clue review",
+                    "candidate flag evidence review",
+                ):
+                    if item not in recommended_next_focus:
+                        recommended_next_focus.append(item)
         elif scene is TaskScene.INCIDENT_RESPONSE:
             if not any(marker in contents for marker in ("raw_line", "timeline", "rule")):
                 required_missing.append("parsed log evidence")

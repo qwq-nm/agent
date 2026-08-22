@@ -141,6 +141,32 @@ class _DuplicatePlanDeepSeekStub(_ReplanningDeepSeekStub):
         )
 
 
+class _DuplicateNeverCompleteDeepSeekStub(_DuplicatePlanDeepSeekStub):
+    async def complete(self, request) -> ModelResponse:
+        if request.response_schema.get("title") == "CriticDecision":
+            self.critic_calls += 1
+            return ModelResponse(
+                provider=self.name,
+                model=self.model,
+                data={
+                    "is_complete": False,
+                    "confidence": 0.1,
+                    "reason": "still incomplete",
+                    "next_focus": ["another non-duplicate observation"],
+                    "missing_evidence": [
+                        {
+                            "kind": "factual",
+                            "description": "another non-duplicate observation",
+                        }
+                    ],
+                },
+                latency_ms=0,
+                prompt_tokens=5,
+                completion_tokens=3,
+            )
+        return await super().complete(request)
+
+
 class _NeverCompleteDeepSeekStub(_ReplanningDeepSeekStub):
     async def complete(self, request) -> ModelResponse:
         if request.response_schema.get("title") == "CriticDecision":
@@ -674,10 +700,10 @@ def test_web_agent_does_not_replan_non_transport_tool_failure(
     )
 
 
-def test_web_agent_stops_replanning_at_configured_bound(
+def test_web_agent_stops_replanning_when_evidence_does_not_change(
     analyst_client, app, fake_queue
 ) -> None:
-    deepseek = _NeverCompleteDeepSeekStub()
+    deepseek = _DuplicateNeverCompleteDeepSeekStub()
     app.state.model_router = ModelRouter(
         {"glm": _GlmStub(), "deepseek": deepseek}, mode="live"
     )
@@ -706,18 +732,19 @@ def test_web_agent_stops_replanning_at_configured_bound(
             app.state.model_router,
             app.state.tool_registry,
             app.state.settings.data_dir,
-            max_replans=1,
+            max_replans=0,
         )
     )
 
     assert len(deepseek.plan_inputs) == 2
     assert deepseek.critic_calls == 2
+    assert observation_tool.calls == ["same"]
     detail = analyst_client.get(f"/api/tasks/{task['id']}").json()
     assert detail["status"] == "completed"
     assert detail["reports"]
     report = analyst_client.get(f"/api/tasks/{task['id']}/report").text
     assert "阶段性安全分析报告" in report
-    assert "missing evidence after maximum replans" in report
+    assert "最近一轮执行后没有产生新的可追踪证据或线索" in report
 
 
 def test_web_agent_uses_registered_tool_risk_over_model_risk(

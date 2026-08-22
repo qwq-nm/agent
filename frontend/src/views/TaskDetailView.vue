@@ -7,6 +7,7 @@ import CurrentExecutionPanel from '../components/CurrentExecutionPanel.vue'
 import EvidencePanel from '../components/EvidencePanel.vue'
 import ModelRoutePanel from '../components/ModelRoutePanel.vue'
 import PlanPreviewPanel from '../components/PlanPreviewPanel.vue'
+import RuntimeMemoryPanel from '../components/RuntimeMemoryPanel.vue'
 import RunLogPanel from '../components/RunLogPanel.vue'
 import StepTimeline from '../components/StepTimeline.vue'
 import { lifecycle } from '../api/client'
@@ -171,6 +172,8 @@ onBeforeUnmount(store.stopWatching)
     </div>
 
     <CurrentExecutionPanel :task="task" :busy="busy" @approve="approvalOpen = true" />
+
+    <RuntimeMemoryPanel :memory="task.runtime_memory" />
 
     <AgentLoopPanel :task="task" />
 

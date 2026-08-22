@@ -33,6 +33,7 @@ class TaskScene(StrEnum):
     INCIDENT_RESPONSE = "incident_response"
     SOURCE_AUDIT = "source_audit"
     WEB_ANALYSIS = "web_analysis"
+    CTF_WEB = "ctf_web"
 
 
 class TaskStatus(StrEnum):

@@ -15,6 +15,8 @@ class MockProvider:
             scene = hint or (
                 "source_audit"
                 if "源码" in goal
+                else "ctf_web"
+                if any(item in goal.lower() for item in ("ctf", "flag", "nssctf", "web题", "web 题", "靶场", "题目"))
                 else "web_analysis"
                 if "Web" in goal or "网站" in goal or payload.get("target_url")
                 else "incident_response"
@@ -25,7 +27,7 @@ class MockProvider:
                 "inputs": payload.get("inputs", []),
                 "constraints": [payload["authorization_scope"]],
                 "authorization_scope": payload["authorization_scope"],
-                "risk_level": "medium" if scene == "web_analysis" else "low",
+                "risk_level": "medium" if scene in {"web_analysis", "ctf_web"} else "low",
                 "expected_outputs": ["证据链", "处置建议", "报告"],
             }
         elif title == "PlanDocument":

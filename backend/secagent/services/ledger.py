@@ -366,6 +366,7 @@ class LedgerService:
         plan_preview = self._plan_preview(task_id)
         current_stage = self._current_stage(task, rows, plan_preview)
         steps_by_id = {row.id: row for row in rows["steps"]}
+        runtime_memory = self._runtime_memory(rows, steps_by_id)
         approvals = [
             {
                 "id": row.id,
@@ -473,10 +474,258 @@ class LedgerService:
                 }
                 for row in rows["task_events"]
             ],
+            "runtime_memory": runtime_memory,
             "approvals": approvals,
             "pending_approval": pending,
             "plan_preview": plan_preview,
         }
+
+    @classmethod
+    def _runtime_memory(
+        cls, rows: dict[str, list[Any]], steps_by_id: dict[str, Any]
+    ) -> dict[str, Any]:
+        memory: dict[str, Any] = {
+            "visited_urls": [],
+            "queued_urls": [],
+            "discovered_links": [],
+            "forms": [],
+            "parameters": [],
+            "cookies": [],
+            "js_files": [],
+            "api_endpoints": [],
+            "robots_paths": [],
+            "sensitive_paths": [],
+            "candidate_flags": [],
+            "interesting_findings": [],
+            "failed_tools": [],
+            "tool_result_summary": [],
+            "last_new_evidence_at": None,
+        }
+
+        visited: set[str] = set()
+        queued: set[str] = set()
+
+        for row in rows["tool_calls"]:
+            result = cls._safe_json_object(row.result_json)
+            params = cls._safe_json_object(row.params_json)
+            step = steps_by_id.get(row.step_id)
+            status = str(row.status or "")
+            success = bool(result.get("success"))
+            summary = str(result.get("summary") or "").strip()
+            tool_name = str(row.tool_name)
+            step_name = str(getattr(step, "name", "") or tool_name)
+
+            cls._append_unique(
+                memory["tool_result_summary"],
+                {
+                    "tool_name": tool_name,
+                    "step_name": step_name,
+                    "status": status,
+                    "success": success,
+                    "summary": summary[:240],
+                    "error": str(result.get("error") or "")[:180] or None,
+                },
+                key=lambda item: f"{item['tool_name']}:{item['step_name']}:{item['summary']}:{item['error']}",
+                limit=60,
+            )
+
+            if status != "completed" or not success:
+                cls._append_unique(
+                    memory["failed_tools"],
+                    {
+                        "tool_name": tool_name,
+                        "step_name": step_name,
+                        "summary": summary[:240] or "工具未成功返回有效结果",
+                        "error": str(result.get("error") or "")[:240] or "未记录具体错误",
+                    },
+                    key=lambda item: f"{item['tool_name']}:{item['step_name']}:{item['error']}",
+                    limit=20,
+                )
+
+            if tool_name in {"http_fetch", "http_request", "url_guard"}:
+                for url in cls._urls_from_result(result, params):
+                    cls._append_unique(memory["visited_urls"], url, visited, limit=80)
+
+            for item in cls._list_of_dicts(result.get("findings")):
+                cls._collect_finding(tool_name, item, memory, visited, queued)
+
+            for item in cls._list_of_dicts(result.get("evidence")):
+                metadata = item.get("metadata")
+                if isinstance(metadata, dict):
+                    cls._collect_finding(tool_name, metadata, memory, visited, queued)
+                content = str(item.get("content") or "")
+                cls._collect_content_hints(content, memory)
+
+        for row in rows["evidences"]:
+            metadata = cls._safe_json_object(row.metadata_json)
+            url = metadata.get("url") or metadata.get("final_url") or row.source
+            if isinstance(url, str) and url.startswith(("http://", "https://")):
+                cls._append_unique(memory["visited_urls"], url[:512], visited, limit=80)
+            cls._collect_finding(str(row.evidence_type or ""), metadata, memory, visited, queued)
+            cls._collect_content_hints(str(row.content or ""), memory)
+            memory["last_new_evidence_at"] = row.created_at.isoformat()
+
+        memory["queued_urls"] = [
+            url for url in memory["queued_urls"] if url not in set(memory["visited_urls"])
+        ][:80]
+        return memory
+
+    @staticmethod
+    def _safe_json_object(value: str | None) -> dict[str, Any]:
+        if not value:
+            return {}
+        try:
+            parsed = json.loads(value)
+        except (TypeError, json.JSONDecodeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    @staticmethod
+    def _list_of_dicts(value: object) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        return [item for item in value if isinstance(item, dict)]
+
+    @staticmethod
+    def _append_unique(
+        target: list[Any],
+        value: Any,
+        seen: set[str] | None = None,
+        *,
+        key: Any | None = None,
+        limit: int = 50,
+    ) -> None:
+        if value in (None, "") or len(target) >= limit:
+            return
+        marker = key(value) if callable(key) else str(value)
+        if seen is None:
+            seen = {key(item) if callable(key) else str(item) for item in target}
+        if marker in seen:
+            return
+        seen.add(marker)
+        target.append(value)
+
+    @classmethod
+    def _urls_from_result(cls, result: dict[str, Any], params: dict[str, Any]) -> list[str]:
+        urls: list[str] = []
+        for key in ("final_url", "url", "source"):
+            value = result.get(key) or params.get(key)
+            if isinstance(value, str) and value.startswith(("http://", "https://")):
+                urls.append(value[:512])
+        for evidence in cls._list_of_dicts(result.get("evidence")):
+            source = evidence.get("source")
+            metadata = evidence.get("metadata")
+            if isinstance(source, str) and source.startswith(("http://", "https://")):
+                urls.append(source[:512])
+            if isinstance(metadata, dict):
+                meta_url = metadata.get("url") or metadata.get("final_url")
+                if isinstance(meta_url, str) and meta_url.startswith(("http://", "https://")):
+                    urls.append(meta_url[:512])
+        return urls
+
+    @classmethod
+    def _collect_finding(
+        cls,
+        tool_name: str,
+        item: dict[str, Any],
+        memory: dict[str, Any],
+        visited: set[str],
+        queued: set[str],
+    ) -> None:
+        url = item.get("url")
+        if isinstance(url, str) and url.startswith(("http://", "https://")):
+            target = url[:512]
+            cls._append_unique(memory["discovered_links"], target, limit=100)
+            if target not in visited:
+                cls._append_unique(memory["queued_urls"], target, queued, limit=100)
+            if target.endswith(".js") or "/static/" in target or "/assets/" in target:
+                cls._append_unique(memory["js_files"], target, limit=50)
+            if "/api/" in target or target.rstrip("/").endswith("/api"):
+                cls._append_unique(memory["api_endpoints"], target, limit=50)
+            if cls._looks_sensitive(target):
+                cls._append_unique(memory["sensitive_paths"], target, limit=50)
+
+        value = item.get("value") or item.get("candidate") or item.get("raw")
+        if isinstance(value, str):
+            cleaned = value[:512]
+            if tool_name == "robots_analyzer":
+                cls._append_unique(memory["robots_paths"], cleaned, limit=50)
+            if cls._looks_sensitive(cleaned):
+                cls._append_unique(memory["sensitive_paths"], cleaned, limit=50)
+
+        pattern = item.get("pattern")
+        if isinstance(pattern, str):
+            cls._append_unique(memory["candidate_flags"], pattern[:240], limit=30)
+
+        keyword = item.get("keyword")
+        if isinstance(keyword, str):
+            cls._append_unique(
+                memory["interesting_findings"],
+                f"页面或脚本中出现关键词：{keyword[:80]}",
+                limit=60,
+            )
+
+        if "missing_attribute" in item:
+            cls._append_unique(
+                memory["cookies"],
+                f"Cookie 缺少安全属性：{str(item['missing_attribute'])[:80]}",
+                limit=30,
+            )
+
+        if "header" in item:
+            cls._append_unique(
+                memory["interesting_findings"],
+                f"响应头缺少或需要关注：{str(item['header'])[:80]}",
+                limit=60,
+            )
+
+        if "action" in item or "inputs" in item:
+            form = {
+                "action": str(item.get("action") or "")[:240],
+                "method": str(item.get("method") or "get")[:20],
+                "inputs": item.get("inputs") if isinstance(item.get("inputs"), list) else [],
+            }
+            cls._append_unique(
+                memory["forms"],
+                form,
+                key=lambda entry: f"{entry['method']}:{entry['action']}:{entry['inputs']}",
+                limit=30,
+            )
+            for field in form["inputs"]:
+                if isinstance(field, dict):
+                    name = field.get("name")
+                    if isinstance(name, str) and name:
+                        cls._append_unique(memory["parameters"], name[:120], limit=80)
+
+    @classmethod
+    def _collect_content_hints(cls, content: str, memory: dict[str, Any]) -> None:
+        for match in re.findall(r"Flag-like pattern observed:\s*([^\s]+)", content):
+            cls._append_unique(memory["candidate_flags"], match[:240], limit=30)
+        for match in re.findall(r"https?://[^\s'\"<>]+", content):
+            if cls._looks_sensitive(match):
+                cls._append_unique(memory["sensitive_paths"], match[:512], limit=50)
+
+    @staticmethod
+    def _looks_sensitive(value: str) -> bool:
+        lowered = value.lower()
+        return any(
+            token in lowered
+            for token in (
+                "flag",
+                "admin",
+                "debug",
+                "upload",
+                "backup",
+                ".bak",
+                ".zip",
+                ".sql",
+                ".env",
+                ".git",
+                "robots.txt",
+                "secret",
+                "token",
+            )
+        )
 
     @staticmethod
     def _current_stage(

@@ -20,6 +20,7 @@ const STATUS_LABELS: Record<string, string> = {
 
 const SCENE_LABELS: Record<string, string> = {
   auto: '自动判断',
+  ctf_web: 'CTF Web 题目分析',
   web_analysis: 'Web 被动分析',
   incident_response: '日志应急分析',
   source_audit: '源码安全审计',

@@ -11,6 +11,7 @@ from secagent.domain import (
     ParsedTask,
     PlanStep,
     RouteMode,
+    TaskScene,
     TaskRead,
 )
 from secagent.providers.router import ModelRouter
@@ -91,7 +92,7 @@ class Planner:
             params_by_tool = {
                 name: {"project_path": "$project"} for name in allowed_tools
             }
-        elif parsed.scene.value == "web_analysis":
+        elif parsed.scene in {TaskScene.WEB_ANALYSIS, TaskScene.CTF_WEB}:
             params_by_tool = {
                 "url_guard": {"url": task.target_url},
                 "http_fetch": {"url": task.target_url},
@@ -127,7 +128,7 @@ class Planner:
                 for name in allowed_tools
             },
         }
-        if parsed.scene.value == "web_analysis":
+        if parsed.scene in {TaskScene.WEB_ANALYSIS, TaskScene.CTF_WEB}:
             payload["web_planning_rules"] = [
                 "在执行 header_check、form_extract、link_extract、js_analyzer、path_normalizer、flag_pattern_detector、cookie_analyzer 或 sensitive_file_checker 前，必须先通过 http_fetch 获得结构化 HTTP 响应。",
                 "header_check 和 form_extract 的参数必须严格使用 {'response': '$http'}。",
@@ -141,6 +142,15 @@ class Planner:
                 "如果 execution_memory.latest_evidence 已包含公开链接、表单、robots 线索、JS 线索或候选路径，应规划调查这些新线索的最小被动步骤，而不是重复抓取首页。",
                 "每一步 purpose 必须使用正式中文表述，说明执行依据、补充的缺失证据，以及该证据如何影响下一步模型判断。",
             ]
+        if parsed.scene is TaskScene.CTF_WEB:
+            payload["ctf_web_rules"] = [
+                "这是授权 CTF Web/靶场题目分析场景，目标是围绕公开页面和授权路径寻找题目线索、候选 flag 或下一步分析方向。",
+                "优先分析首页、robots.txt、公开链接、前端 JS 路由、注释、表单字段、Cookie、响应头、备份文件名、配置文件名、源码泄露线索和页面中的 flag-like pattern。",
+                "如果运行记忆中出现 queued_urls、sensitive_paths、robots_paths、js_files、api_endpoints 或 candidate_flags，应优先规划最小必要工具去验证这些线索。",
+                "允许的自动动作仍然限于白名单工具和授权范围；不要提交表单，不要爆破目录，不要执行 SQL 注入、命令执行、文件写入或破坏性利用。",
+                "如果发现疑似 flag，先使用 flag_pattern_detector 或已有证据复核，不要伪造 flag；报告必须说明 flag 来源证据。",
+                "如果没有发现 flag，应明确输出已检查的公开入口、剩余可能方向和需要新增工具能力的原因。",
+            ]
 
         response = await self.router.complete(
             ModelStage.PLAN,
@@ -149,7 +159,8 @@ class Planner:
                     "生成最小可执行安全分析计划，只能使用 payload.allowed_tools 中的白名单工具和 params_by_tool 中给出的参数模板。"
                     "必须遵守 payload.safety_policy：auto_execute 风险等级可自动执行，requires_approval 风险等级可以规划但需要人工确认，"
                     "must_not_plan 风险等级不得规划。"
-                    "如果这是重规划，请优先阅读 observations、next_focus 和 execution_memory.latest_evidence，"
+                    "如果 payload.ctf_web_rules 存在，说明这是授权 CTF Web 场景，必须优先遵守其中的线索发现、flag 复核和禁止动作要求。"
+                    "如果这是重规划，请优先阅读 observations、next_focus、execution_memory.latest_evidence 和 execution_memory.runtime_memory，"
                     "根据已有工具结果补充缺失证据，避免重复执行 successful_tool_calls 中已经成功且未过期的同参数工具。"
                     "所有 step.name 必须是简短中文动作标题，例如“校验目标 URL 是否安全”“获取首页内容”“分析响应头”。"
                     "所有 step.purpose 必须使用正式中文，说明：执行依据、补充哪类证据、工具结果如何影响下一步模型判断。"

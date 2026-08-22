@@ -4,6 +4,11 @@ from secagent.domain import ToolResult
 from secagent.tools.base import BaseTool, ToolContext
 
 
+SCENE_COMPATIBILITY: dict[str, set[str]] = {
+    "ctf_web": {"web_analysis"},
+}
+
+
 class ToolRegistry:
     def __init__(self, tools: list[BaseTool]) -> None:
         self._tools = {tool.name: tool for tool in tools}
@@ -20,7 +25,7 @@ class ToolRegistry:
         context: ToolContext,
     ) -> ToolResult:
         tool = self.get(name)
-        if tool.scene != context.scene:
+        if not self._scene_allowed(tool.scene, context.scene):
             raise PermissionError(f"tool {name} not allowed for {context.scene}")
         return await asyncio.wait_for(
             tool.run(params, context), timeout=tool.timeout_seconds
@@ -36,3 +41,9 @@ class ToolRegistry:
             tool.spec().__dict__
             for tool in self._tools.values()
         ]
+
+    @staticmethod
+    def _scene_allowed(tool_scene: str, context_scene: str) -> bool:
+        if tool_scene == context_scene:
+            return True
+        return tool_scene in SCENE_COMPATIBILITY.get(context_scene, set())

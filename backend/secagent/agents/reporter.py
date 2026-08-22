@@ -75,6 +75,7 @@ TOOL_PURPOSES = {
 STOP_REASON_LABELS = {
     "evidence_sufficient": "证据已经满足当前任务的报告输出要求。",
     "missing evidence after maximum replans": "多轮重规划后仍缺少部分证据，系统停止继续扩展并输出阶段性报告。",
+    "no new evidence after latest execution loop": "最近一轮执行后没有产生新的可追踪证据或线索，系统停止重复扩展并输出阶段性报告。",
 }
 
 SAFETY_MODE_REPORTS = {

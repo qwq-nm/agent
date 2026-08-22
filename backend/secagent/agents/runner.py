@@ -184,6 +184,7 @@ class AgentRunner:
             snapshot = self.ledger.snapshot(task_id)
             runtime = self._runtime_from_snapshot(snapshot)
             successful_tool_results = self._successful_tool_results(snapshot)
+            last_progress_signature = self._progress_signature(snapshot)
             while True:
                 for offset, proposed_step in enumerate(plan):
                     index = step_start_index + offset
@@ -306,7 +307,7 @@ class AgentRunner:
                         }
                     if not result.success:
                         if (
-                            parsed.scene is TaskScene.WEB_ANALYSIS
+                            parsed.scene in {TaskScene.WEB_ANALYSIS, TaskScene.CTF_WEB}
                             and step.tool_name == "http_fetch"
                             and result.error
                             in {"http_timeout", "http_transport_error"}
@@ -373,15 +374,30 @@ class AgentRunner:
                             report=report_artifact.content,
                         )
                     raise RuntimeError(critic.stop_reason or "critic stopped execution")
-                if replan_round >= self.max_replans:
+                snapshot = self.ledger.snapshot(task_id)
+                progress_signature = self._progress_signature(snapshot)
+                if progress_signature == last_progress_signature:
                     if self._has_evidence(task_id):
+                        missing = [item.description for item in critic.missing_evidence]
+                        self._append_event(
+                            task_id,
+                            "agent.no_new_evidence",
+                            {
+                                "replan_round": replan_round,
+                                "missing_evidence": missing[:8],
+                                "reason": "最近一轮执行没有产生新的可追踪证据或线索",
+                            },
+                        )
                         report_artifact = self._fallback_report(
                             task_id,
                             parsed,
                             report_type="partial",
-                            stop_reason="missing evidence after maximum replans",
+                            stop_reason="no new evidence after latest execution loop",
                             safety_mode=task.safety_mode.value,
-                            errors=[item.description for item in critic.missing_evidence],
+                            errors=missing
+                            or [
+                                "系统已完成一轮执行和复核，但没有产生新的可追踪证据或线索。"
+                            ],
                         )
                         self._save_report_artifact(task_id, lease, report_artifact)
                         return TaskRunResult(
@@ -390,12 +406,12 @@ class AgentRunner:
                             is_demo=self._is_demo(task_id),
                             report=report_artifact.content,
                         )
-                    raise RuntimeError("missing evidence after maximum replans")
+                    raise RuntimeError("no new evidence after latest execution loop")
 
                 observations = self.critic.observation_summary(task_id, critic)
+                last_progress_signature = progress_signature
                 replan_round += 1
                 step_start_index += len(plan)
-                snapshot = self.ledger.snapshot(task_id)
                 self._append_event(
                     task_id,
                     "agent.planning_started",
@@ -602,7 +618,7 @@ class AgentRunner:
             not isinstance(raw_steps, list)
             or not isinstance(replan_round, int)
             or isinstance(replan_round, bool)
-            or not 0 <= replan_round <= self.max_replans
+            or replan_round < 0
             or not isinstance(step_start_index, int)
             or isinstance(step_start_index, bool)
             or step_start_index < 1
@@ -647,6 +663,60 @@ class AgentRunner:
 
     def _has_evidence(self, task_id: str) -> bool:
         return bool(self.ledger.snapshot(task_id)["evidences"])
+
+    @staticmethod
+    def _progress_signature(snapshot: dict[str, Any]) -> str:
+        memory = snapshot.get("runtime_memory")
+        if not isinstance(memory, dict):
+            memory = {}
+        progress = {
+            "evidence_hashes": sorted(
+                str(item.get("evidence_hash"))
+                for item in snapshot.get("evidences", [])
+                if item.get("evidence_hash")
+            ),
+            "visited_urls": AgentRunner._memory_strings(memory, "visited_urls"),
+            "queued_urls": AgentRunner._memory_strings(memory, "queued_urls"),
+            "discovered_links": AgentRunner._memory_strings(memory, "discovered_links"),
+            "parameters": AgentRunner._memory_strings(memory, "parameters"),
+            "cookies": AgentRunner._memory_strings(memory, "cookies"),
+            "js_files": AgentRunner._memory_strings(memory, "js_files"),
+            "api_endpoints": AgentRunner._memory_strings(memory, "api_endpoints"),
+            "robots_paths": AgentRunner._memory_strings(memory, "robots_paths"),
+            "sensitive_paths": AgentRunner._memory_strings(memory, "sensitive_paths"),
+            "candidate_flags": AgentRunner._memory_strings(memory, "candidate_flags"),
+            "interesting_findings": AgentRunner._memory_strings(
+                memory, "interesting_findings"
+            ),
+            "forms": AgentRunner._memory_objects(memory, "forms"),
+        }
+        canonical = json.dumps(
+            progress, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _memory_strings(memory: dict[str, Any], key: str) -> list[str]:
+        value = memory.get(key)
+        if not isinstance(value, list):
+            return []
+        return sorted({str(item)[:512] for item in value if item not in (None, "")})
+
+    @staticmethod
+    def _memory_objects(memory: dict[str, Any], key: str) -> list[dict[str, Any]]:
+        value = memory.get(key)
+        if not isinstance(value, list):
+            return []
+        objects = []
+        for item in value:
+            if isinstance(item, dict):
+                objects.append(redact_mapping(item))
+        return sorted(
+            objects,
+            key=lambda item: json.dumps(
+                item, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ),
+        )
 
     def _fallback_report(
         self,
@@ -757,6 +827,7 @@ class AgentRunner:
             "successful_tool_calls": successful[-20:],
             "evidence_urls": evidence_urls[-30:],
             "latest_evidence": latest_evidence,
+            "runtime_memory": snapshot.get("runtime_memory", {}),
         }
 
     @staticmethod

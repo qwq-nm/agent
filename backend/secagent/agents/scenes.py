@@ -49,4 +49,21 @@ SCENES = {
         ),
         ("http_observation",),
     ),
+    TaskScene.CTF_WEB: ScenePolicy(
+        TaskScene.CTF_WEB,
+        (
+            "url_guard",
+            HttpRequest.name,
+            "header_check",
+            "form_extract",
+            "link_extract",
+            "robots_analyzer",
+            "js_analyzer",
+            "path_normalizer",
+            "flag_pattern_detector",
+            "cookie_analyzer",
+            "sensitive_file_checker",
+        ),
+        ("http_observation",),
+    ),
 }
