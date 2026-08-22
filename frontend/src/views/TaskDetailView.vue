@@ -8,7 +8,6 @@ import EvidencePanel from '../components/EvidencePanel.vue'
 import ModelRoutePanel from '../components/ModelRoutePanel.vue'
 import PlanPreviewPanel from '../components/PlanPreviewPanel.vue'
 import StepTimeline from '../components/StepTimeline.vue'
-import WorkerStatus from '../components/WorkerStatus.vue'
 import { lifecycle } from '../api/client'
 import { useTasksStore } from '../stores/tasks'
 import {
@@ -165,13 +164,6 @@ onBeforeUnmount(store.stopWatching)
       </RouterLink>
       <p v-if="error" class="error-message">{{ error }}</p>
     </div>
-
-    <WorkerStatus
-      :queue-position="task.queue_position"
-      :attempt="task.job_attempt"
-      :heartbeat-at="task.worker_heartbeat_at || task.heartbeat_at"
-      :stage="task.current_stage || task.steps.find((step) => step.status === 'running')?.name"
-    />
 
     <CurrentExecutionPanel :task="task" :busy="busy" @approve="approvalOpen = true" />
 
