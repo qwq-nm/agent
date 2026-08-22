@@ -129,18 +129,17 @@ class Planner:
         }
         if parsed.scene.value == "web_analysis":
             payload["web_planning_rules"] = [
-                "Run http_fetch before header_check or form_extract.",
-                "header_check and form_extract must use exactly {'response': '$http'}.",
-                "link_extract, js_analyzer, path_normalizer, and flag_pattern_detector should analyze the latest {'response': '$http'}.",
-                "robots_analyzer can suggest or parse robots.txt from {'base_url': target_url, 'response': '$http'}.",
-                "Do not pass a URL string as the response parameter.",
-                "Use only passive GET/HEAD observations unless explicitly authorized.",
-                "Prefer public discovery steps: links, forms, robots.txt hints, JavaScript route hints, then flag-like pattern detection.",
-                "cookie_analyzer and sensitive_file_checker are low-risk passive tools that should analyze the latest {'response': '$http'}.",
-                "Do not repeat tool calls listed in execution_memory.successful_tool_calls unless the observations show the earlier call failed or became stale.",
-                "Use next_focus to choose the smallest set of new evidence-gathering steps.",
-                "When execution_memory.latest_evidence contains public links, forms, robots hints, JavaScript hints, or candidate paths, plan the next smallest passive step that investigates those new observations instead of repeating the homepage.",
-                "Each step purpose must mention which missing evidence or next_focus item it addresses.",
+                "在执行 header_check、form_extract、link_extract、js_analyzer、path_normalizer、flag_pattern_detector、cookie_analyzer 或 sensitive_file_checker 前，必须先通过 http_fetch 获得结构化 HTTP 响应。",
+                "header_check 和 form_extract 的参数必须严格使用 {'response': '$http'}。",
+                "link_extract、js_analyzer、path_normalizer、flag_pattern_detector、cookie_analyzer 和 sensitive_file_checker 应分析最新的 {'response': '$http'}。",
+                "robots_analyzer 可以使用 {'base_url': target_url, 'response': '$http'} 生成或解析 robots.txt 线索。",
+                "不要把 URL 字符串传给 response 参数；response 只能来自 http_fetch 的结构化结果。",
+                "除非用户明确授权，否则只规划被动 GET/HEAD 观察，不提交表单、不爆破、不执行真实漏洞利用。",
+                "优先规划公开发现步骤：链接、表单、robots.txt、前端脚本路由、候选路径、疑似 Flag 模式。",
+                "不要重复 execution_memory.successful_tool_calls 中已经成功且参数相同的工具，除非观察结果表明之前失败、过期或证据不足。",
+                "使用 next_focus 选择最小必要的补充证据步骤。",
+                "如果 execution_memory.latest_evidence 已包含公开链接、表单、robots 线索、JS 线索或候选路径，应规划调查这些新线索的最小被动步骤，而不是重复抓取首页。",
+                "每一步 purpose 必须使用正式中文表述，说明执行依据、补充的缺失证据，以及该证据如何影响下一步模型判断。",
             ]
 
         response = await self.router.complete(
@@ -152,7 +151,10 @@ class Planner:
                     "must_not_plan 风险等级不得规划。"
                     "如果这是重规划，请优先阅读 observations、next_focus 和 execution_memory.latest_evidence，"
                     "根据已有工具结果补充缺失证据，避免重复执行 successful_tool_calls 中已经成功且未过期的同参数工具。"
-                    "每一步 purpose 必须说明：为什么需要该工具、它补充哪类证据、它如何服务于用户目标。"
+                    "所有 step.name 必须是简短中文动作标题，例如“校验目标 URL 是否安全”“获取首页内容”“分析响应头”。"
+                    "所有 step.purpose 必须使用正式中文，说明：执行依据、补充哪类证据、工具结果如何影响下一步模型判断。"
+                    "如果某一步依赖前置工具输出，purpose 必须说明前置依赖；如果是重试或重规划，必须说明上一轮失败原因或证据缺口。"
+                    "除工具名、URL、路径、HTTP 字段、代码片段等技术原文外，不要输出英文解释。"
                 ),
                 user=json.dumps(payload, ensure_ascii=False),
                 response_schema=PlanDocument.model_json_schema(),

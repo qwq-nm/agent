@@ -1,15 +1,36 @@
 <script setup lang="ts">
-import type { PendingApproval, TaskStep } from '../types'
-import { providerName, riskLabel, routeReasonLabel, statusLabel, toolNameLabel } from '../labels'
+import type { PendingApproval, TaskStep, ToolCall } from '../types'
+import {
+  providerName,
+  riskLabel,
+  routeReasonLabel,
+  stepImpactExplanationLabel,
+  statusLabel,
+  stepStatusExplanationLabel,
+  stepNameLabel,
+  toolCallReasonLabel,
+  toolCapabilityLabel,
+  toolNameLabel,
+} from '../labels'
 
 defineProps<{
   steps: TaskStep[]
+  toolCalls?: ToolCall[]
   isDemo?: boolean
   pendingApproval?: PendingApproval | null
   busy?: boolean
 }>()
 
 const emit = defineEmits<{ approve: [] }>()
+
+function callForStep(step: TaskStep, toolCalls?: ToolCall[]) {
+  return [...(toolCalls || [])].reverse().find((call) => call.step_id === step.id || call.step_name === step.name)
+}
+
+function reasonForStep(step: TaskStep, call?: ToolCall) {
+  if (call) return toolCallReasonLabel(call)
+  return step.purpose || '根据当前场景策略和已有证据缺口，系统计划调用该工具补充事实。'
+}
 </script>
 
 <template>
@@ -21,11 +42,16 @@ const emit = defineEmits<{ approve: [] }>()
       <div class="timeline-card" :class="{ 'needs-approval': pendingApproval?.step_id === step.id }">
         <header>
           <div>
-            <strong>{{ step.name }}</strong>
-            <small>{{ step.purpose || '执行授权范围内的确定性检查' }}</small>
+            <strong>{{ stepNameLabel(step) }}</strong>
+            <small>执行依据：{{ reasonForStep(step, callForStep(step, toolCalls)) }}</small>
           </div>
           <span class="status-badge" :data-status="step.status">{{ statusLabel(step.status) }}</span>
         </header>
+        <div class="timeline-explain">
+          <p><b>工具作用</b>{{ toolCapabilityLabel(step.tool_name) }}</p>
+          <p><b>执行状态说明</b>{{ stepStatusExplanationLabel(step, callForStep(step, toolCalls)) }}</p>
+          <p><b>后续影响</b>{{ stepImpactExplanationLabel(step, callForStep(step, toolCalls)) }}</p>
+        </div>
         <dl>
           <div>
             <dt>模型/节点</dt>

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { TaskDetail } from '../types'
-import { riskLabel, statusLabel, toolNameLabel } from '../labels'
+import { riskLabel, statusLabel, taskFailureReasonLabel, toolNameLabel } from '../labels'
 
 const props = defineProps<{
   task: TaskDetail
@@ -13,14 +13,23 @@ const emit = defineEmits<{ approve: [] }>()
 const runningStep = computed(() => props.task.steps.find((step) => step.status === 'running'))
 const pendingStep = computed(() => props.task.steps.find((step) => step.status === 'pending'))
 const completedCount = computed(() => props.task.steps.filter((step) => step.status === 'success').length)
-const isActive = computed(() => ['queued', 'planning', 'planned', 'running', 'waiting_human'].includes(props.task.status))
-const currentStage = computed(
-  () => props.task.current_stage || runningStep.value?.name || pendingStep.value?.name || '等待下一步',
-)
+const isActive = computed(() => ['queued', 'planning', 'running', 'waiting_human'].includes(props.task.status))
+const isLive = computed(() => ['queued', 'planning', 'running'].includes(props.task.status))
+const currentStage = computed(() => {
+  if (props.task.current_stage) return props.task.current_stage
+  if (runningStep.value) return runningStep.value.name
+  if (props.task.status === 'failed') return '任务失败，自动分析已停止'
+  if (props.task.status === 'failed_retryable') return '任务失败，可查看原因后重试'
+  if (props.task.status === 'completed') return '任务已完成，报告已生成'
+  if (props.task.status === 'cancelled') return '任务已取消'
+  if (pendingStep.value) return pendingStep.value.name
+  return '等待下一步'
+})
 const heartbeatText = computed(() => props.task.worker_heartbeat_at || props.task.heartbeat_at || '暂无更新记录')
 const progressText = computed(() =>
   props.task.steps.length ? `${completedCount.value}/${props.task.steps.length} 步` : '尚未生成步骤',
 )
+const failureReason = computed(() => taskFailureReasonLabel(props.task))
 </script>
 
 <template>
@@ -52,12 +61,25 @@ const progressText = computed(() =>
       </article>
     </div>
 
-    <div v-if="isActive && task.status !== 'waiting_human'" class="execution-live-strip" role="status" aria-live="polite">
+    <div v-if="task.status === 'planned'" class="execution-live-strip execution-ready-strip" role="status">
+      <div>
+        <strong>执行计划已生成</strong>
+        <p>系统已完成任务理解和计划生成，点击“开始执行”后才会调用工具并更新下方时间线与证据账本。</p>
+      </div>
+    </div>
+
+    <div v-else-if="isLive" class="execution-live-strip" role="status" aria-live="polite">
       <span class="live-dot" aria-hidden="true"></span>
       <div>
         <strong>系统正在执行任务</strong>
         <p>前端会自动刷新任务状态；下方时间线和证据账本会随着工具调用逐步更新。</p>
       </div>
+    </div>
+
+    <div v-if="failureReason" class="execution-failure">
+      <strong>{{ failureReason.title }}</strong>
+      <p>{{ failureReason.reason }}</p>
+      <p>{{ failureReason.suggestion }}</p>
     </div>
 
     <div v-if="task.pending_approval" class="execution-approval">

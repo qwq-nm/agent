@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { Evidence } from '../types'
-import { confidenceLabel, evidenceTypeLabel } from '../labels'
+import { confidenceLabel, evidenceContentLabel, evidenceTypeLabel } from '../labels'
 
 defineProps<{ evidences: Evidence[] }>()
 </script>
@@ -15,7 +15,7 @@ defineProps<{ evidences: Evidence[] }>()
       </header>
       <small class="raw-label">{{ item.evidence_type }}</small>
       <code>{{ item.source }}</code>
-      <p>{{ item.content }}</p>
+      <p>{{ evidenceContentLabel(item) }}</p>
       <code v-if="item.evidence_hash" class="evidence-hash" title="Evidence SHA-256">SHA-256: {{ item.evidence_hash }}</code>
     </article>
   </div>

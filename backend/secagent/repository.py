@@ -16,6 +16,7 @@ from secagent.db_models import (
     ModelCallRow,
     RefreshSessionRow,
     ReportRow,
+    TaskEventRow,
     TaskRow,
     TaskStepRow,
     ToolCallEvidenceRow,
@@ -1591,6 +1592,7 @@ class TaskRepository:
             "evidences": rows(EvidenceRow),
             "reports": rows(ReportRow),
             "approvals": rows(ApprovalRow),
+            "task_events": rows(TaskEventRow),
         }
 
     @staticmethod

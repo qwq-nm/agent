@@ -159,6 +159,13 @@ export interface ToolCall {
   status: string
 }
 
+export interface TaskEvent {
+  id: number
+  event_type: string
+  payload: Record<string, unknown>
+  created_at: string
+}
+
 export interface PendingApproval {
   step_id: string
   tool_name: string
@@ -187,6 +194,7 @@ export interface TaskDetail extends Task {
   worker_heartbeat_at?: string | null
   heartbeat_at?: string | null
   current_stage?: string | null
+  task_events?: TaskEvent[]
 }
 
 export interface ModelStatus {

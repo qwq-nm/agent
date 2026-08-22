@@ -464,6 +464,15 @@ class LedgerService:
                 }
                 for row in rows["reports"]
             ],
+            "task_events": [
+                {
+                    "id": row.id,
+                    "event_type": row.event_type,
+                    "payload": json.loads(row.payload_json),
+                    "created_at": row.created_at.isoformat(),
+                }
+                for row in rows["task_events"]
+            ],
             "approvals": approvals,
             "pending_approval": pending,
             "plan_preview": plan_preview,
@@ -508,6 +517,14 @@ class LedgerService:
             return "正在复核证据或生成报告"
         if status == "waiting_human":
             return "等待人工确认"
+        if status == "completed":
+            return "任务已完成，报告已生成"
+        if status == "failed_retryable":
+            return "任务失败，可查看原因后重试"
+        if status == "failed":
+            return "任务失败，自动分析已停止"
+        if status == "cancelled":
+            return "任务已取消"
         return None
 
     def _plan_preview(self, task_id: str) -> dict[str, Any] | None:

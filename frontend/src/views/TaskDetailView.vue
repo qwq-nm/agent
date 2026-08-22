@@ -7,6 +7,7 @@ import CurrentExecutionPanel from '../components/CurrentExecutionPanel.vue'
 import EvidencePanel from '../components/EvidencePanel.vue'
 import ModelRoutePanel from '../components/ModelRoutePanel.vue'
 import PlanPreviewPanel from '../components/PlanPreviewPanel.vue'
+import RunLogPanel from '../components/RunLogPanel.vue'
 import StepTimeline from '../components/StepTimeline.vue'
 import { lifecycle } from '../api/client'
 import { useTasksStore } from '../stores/tasks'
@@ -21,7 +22,7 @@ import {
 const route = useRoute()
 const store = useTasksStore()
 const taskId = computed(() => String(route.params.id))
-const tab = ref<'evidence' | 'tools' | 'models'>('evidence')
+const tab = ref<'evidence' | 'tools' | 'models' | 'events'>('evidence')
 const busy = ref(false)
 const error = ref('')
 const approvalOpen = ref(false)
@@ -45,6 +46,10 @@ const currentStage = computed(
   () =>
     task.value?.current_stage ||
     task.value?.steps.find((step) => step.status === 'running')?.name ||
+    (task.value?.status === 'failed' ? '任务失败，自动分析已停止' : undefined) ||
+    (task.value?.status === 'failed_retryable' ? '任务失败，可查看原因后重试' : undefined) ||
+    (task.value?.status === 'completed' ? '任务已完成，报告已生成' : undefined) ||
+    (task.value?.status === 'cancelled' ? '任务已取消' : undefined) ||
     task.value?.steps.find((step) => step.status === 'pending')?.name ||
     '等待下一步',
 )
@@ -181,17 +186,17 @@ onBeforeUnmount(store.stopWatching)
       <header class="panel-title">
         <div>
           <p class="eyebrow">AGENT DECISION</p>
-          <h2>自主决策说明</h2>
+          <h2>决策依据与证据链</h2>
         </div>
         <span>中文解释</span>
       </header>
       <div class="decision-body">
         <article>
-          <h3>当前判断</h3>
+          <h3>当前决策状态</h3>
           <p v-for="line in decisionSummary" :key="line">{{ line }}</p>
         </article>
         <article>
-          <h3>证据与工具</h3>
+          <h3>证据链说明</h3>
           <p>证据账本负责保存工具输出、模型决策依据和报告引用，后续结论都应该能回溯到这里。</p>
           <p v-if="latestTool">
             最近一次工具调用是“{{ toolNameLabel(latestTool.tool_name) }}”，内部工具名为
@@ -213,6 +218,7 @@ onBeforeUnmount(store.stopWatching)
         </header>
         <StepTimeline
           :steps="task.steps"
+          :tool-calls="task.tool_calls"
           :is-demo="task.is_demo"
           :pending-approval="task.pending_approval"
           :busy="busy"
@@ -232,6 +238,7 @@ onBeforeUnmount(store.stopWatching)
           <button :class="{ active: tab === 'evidence' }" @click="tab = 'evidence'">证据</button>
           <button :class="{ active: tab === 'tools' }" @click="tab = 'tools'">工具</button>
           <button :class="{ active: tab === 'models' }" @click="tab = 'models'">模型</button>
+          <button :class="{ active: tab === 'events' }" @click="tab = 'events'">过程</button>
         </div>
         <EvidencePanel v-if="tab === 'evidence'" :evidences="task.evidences" />
         <div v-else-if="tab === 'tools'" class="tool-call-list">
@@ -248,7 +255,8 @@ onBeforeUnmount(store.stopWatching)
           </article>
           <p v-if="!task.tool_calls.length" class="empty-state compact">暂无工具调用。</p>
         </div>
-        <ModelRoutePanel v-else :calls="task.model_calls" />
+        <ModelRoutePanel v-else-if="tab === 'models'" :calls="task.model_calls" />
+        <RunLogPanel v-else :events="task.task_events" />
       </aside>
     </div>
 

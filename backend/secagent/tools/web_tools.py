@@ -58,12 +58,12 @@ class UrlGuardTool(BaseTool):
         normalized = parsed.geturl()
         return ToolResult(
             success=True,
-            summary="Target URL passed SSRF policy check",
+            summary="目标 URL 已通过 SSRF 安全边界检查",
             evidence=[
                 {
                     "evidence_type": "http_observation",
                     "source": normalized,
-                    "content": f"URL guard allowed {normalized}",
+                    "content": f"URL 安全边界检查通过，目标允许在当前授权范围内访问：{normalized}",
                     "confidence": 1.0,
                 }
             ],
@@ -79,10 +79,10 @@ def _response_param(params: dict[str, Any]) -> dict[str, Any] | ToolResult:
     if not isinstance(response, dict):
         return ToolResult(
             success=False,
-            summary="HTTP response parameter is missing or invalid",
+            summary="缺少有效的 HTTP 响应数据",
             error="invalid_http_response",
             warnings=[
-                "Tool expected response metadata from http_fetch; got a different value."
+                "该工具需要使用 http_fetch 产生的结构化响应数据。"
             ],
         )
     return response
@@ -103,10 +103,10 @@ class HeaderCheck(BaseTool):
         if not isinstance(raw_headers, dict):
             return ToolResult(
                 success=False,
-                summary="HTTP response headers are missing or invalid",
+                summary="缺少有效的 HTTP 响应头数据",
                 error="invalid_http_response",
                 warnings=[
-                    "header_check requires the structured metadata produced by http_fetch."
+                    "header_check 需要使用 http_fetch 产生的结构化响应数据。"
                 ],
             )
         headers = {str(key).lower(): str(value) for key, value in raw_headers.items()}

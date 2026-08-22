@@ -153,6 +153,10 @@ class HttpRequest(BaseTool):
     @staticmethod
     def _request_failure(params: dict, error_code: str) -> ToolResult:
         safe_url = redact_text(str(params.get("url", "")), include_generic_key=True)
+        reason = {
+            "http_timeout": "HTTP 请求超时，目标可能暂时不可达或响应过慢",
+            "http_transport_error": "HTTP 请求在获得响应前失败，可能是目标不可达、端口不通、连接被拒绝或网络策略限制",
+        }.get(error_code, f"HTTP 请求失败：{error_code}")
         return ToolResult(
             success=False,
             summary="HTTP 请求未获得可分析的响应",
@@ -161,7 +165,7 @@ class HttpRequest(BaseTool):
                 {
                     "evidence_type": "http_observation",
                     "source": safe_url,
-                    "content": f"HTTP request failed before response: {error_code}",
+                    "content": reason,
                     "confidence": 1.0,
                     "metadata": {
                         "final_url": safe_url,
