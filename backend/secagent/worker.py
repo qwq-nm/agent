@@ -28,6 +28,8 @@ from secagent.tools.registry import ToolRegistry
 from secagent.tools.http_request import HttpRequest
 from secagent.tools.browser_tool import BrowserSnapshot
 from secagent.tools.dirsearch_tool import DirsearchScan
+from secagent.tools.login_probe_tool import LoginProbe
+from secagent.tools.sqlmap_tool import SqlmapProbe
 from secagent.tools.source_tools import (
     ConfigChecker,
     ProjectDetector,
@@ -86,6 +88,8 @@ def build_worker_registry(allowed_hosts: set[str]) -> ToolRegistry:
             HttpRequest(guard),
             BrowserSnapshot(guard),
             DirsearchScan(guard),
+            LoginProbe(guard),
+            SqlmapProbe(guard),
             HeaderCheck(),
             FormExtract(),
             LinkExtract(),

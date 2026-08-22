@@ -46,7 +46,7 @@ const templates: MissionTemplate[] = [
     description: '分析公开页面、响应头、表单、链接、JS、robots.txt 与疑似 flag。',
     targetHint: '适合：授权 CTF Web 题、靶场 Web 页面',
     prompt:
-      '对授权 CTF Web 题进行被动分析。只允许 GET/HEAD 请求访问公开页面，包括首页、robots.txt、公开链接、JS/CSS 静态文件和登录页。分析页面结构、响应头、公开表单、隐藏路径线索和可能的 flag 线索，生成中文证据报告。不要提交表单，不要爆破，不要进行破坏性操作。',
+      '对授权 CTF Web 题进行分析。优先使用 GET/HEAD 请求访问公开页面，包括首页、robots.txt、公开链接、JS/CSS 静态文件和登录页。分析页面结构、响应头、公开表单、隐藏路径线索和可能的 flag 线索；如发现登录、目录发现或注入验证方向，可以规划需要人工确认的授权验证工具。禁止越权访问、大规模爆破和破坏性操作，生成中文证据报告。',
   },
   {
     id: 'log',
@@ -106,7 +106,7 @@ const generatedAuthorization = computed(() => {
     targetScope,
     fileScope,
     safetyDescriptions[safetyMode.value],
-    '禁止越权访问、爆破、破坏性操作、端口扫描、非授权外联和真实漏洞利用。',
+    '禁止越权访问、破坏性操作、未授权外联、未授权端口扫描、真实破坏性漏洞利用和大规模爆破；目录发现、登录探测、SQL 注入探测等主动验证工具仅限授权范围内使用，并必须经过人工确认和审计记录。',
     '所有工具调用必须记录到证据账本，报告结论必须能回溯到证据。',
   ].join('')
 })

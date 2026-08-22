@@ -814,6 +814,19 @@ class TaskRepository:
             return {}
         return checkpoint if isinstance(checkpoint, dict) else {}
 
+    def clear_orchestration_checkpoint(
+        self, task_id: str, *, commit: bool = True
+    ) -> None:
+        row = self.session.get(TaskRow, task_id)
+        if row is None:
+            raise KeyError(task_id)
+        row.orchestration_json = None
+        row.current_step_index = None
+        if commit:
+            self.session.commit()
+        else:
+            self.session.flush()
+
     def save_plan_preview_checkpoint(
         self,
         task_id: str,

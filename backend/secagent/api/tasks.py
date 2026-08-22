@@ -281,6 +281,24 @@ def retry_task(
     )
 
 
+@router.post(
+    "/{task_id}/continue",
+    response_model=TaskRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def continue_task(
+    task_id: str, request: Request, repository: RepositoryDep, actor: ActorDep
+) -> TaskRead:
+    return lifecycle_action(
+        "continue_analysis",
+        task_id,
+        request,
+        repository,
+        actor,
+        require_idempotency_key(request),
+    )
+
+
 @router.post("/{task_id}/approve", response_model=TaskRead)
 async def approve_task(
     task_id: str,

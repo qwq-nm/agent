@@ -194,7 +194,7 @@ class AgentRunner:
                         update={
                             "risk_level": tool.risk_level,
                             "need_human_confirm": tool.risk_level
-                            is RiskLevel.MEDIUM,
+                            in {RiskLevel.MEDIUM, RiskLevel.HIGH},
                         }
                     )
                     params = self._resolve_params(step.params, workspace, runtime)

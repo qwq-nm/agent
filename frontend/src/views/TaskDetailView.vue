@@ -36,6 +36,10 @@ const canRun = computed(() => ['created', 'planned'].includes(task.value?.status
 const canPause = computed(() => task.value?.status === 'running')
 const canResume = computed(() => task.value?.status === 'paused')
 const canRetry = computed(() => task.value?.status === 'failed_retryable')
+const canContinue = computed(() =>
+  task.value?.status === 'completed' ||
+  (task.value?.status === 'failed_retryable' && Boolean(task.value?.evidences.length || task.value?.tool_calls.length)),
+)
 const canCancel = computed(() =>
   ['created', 'planning', 'planned', 'running', 'waiting_human', 'paused', 'failed_retryable'].includes(
     task.value?.status || '',
@@ -67,7 +71,7 @@ async function refresh() {
   if (store.detail?.pending_approval) approvalOpen.value = true
 }
 
-function action(name: 'run' | 'pause' | 'resume' | 'retry' | 'cancel') {
+function action(name: 'run' | 'pause' | 'resume' | 'retry' | 'continue' | 'cancel') {
   const existing = pendingActions.get(name)
   if (existing) return existing
   const work = performAction(name)
@@ -75,7 +79,7 @@ function action(name: 'run' | 'pause' | 'resume' | 'retry' | 'cancel') {
   return work.finally(() => pendingActions.delete(name))
 }
 
-async function performAction(name: 'run' | 'pause' | 'resume' | 'retry' | 'cancel') {
+async function performAction(name: 'run' | 'pause' | 'resume' | 'retry' | 'continue' | 'cancel') {
   const key = name === 'pause' ? undefined : pendingKeys.get(name) || crypto.randomUUID()
   if (key) pendingKeys.set(name, key)
   busy.value = true
@@ -85,6 +89,7 @@ async function performAction(name: 'run' | 'pause' | 'resume' | 'retry' | 'cance
     else if (name === 'run') await lifecycle.run(taskId.value, key!)
     else if (name === 'resume') await lifecycle.resume(taskId.value, key!)
     else if (name === 'retry') await lifecycle.retry(taskId.value, key!)
+    else if (name === 'continue') await lifecycle.continueAnalysis(taskId.value, key!)
     else await lifecycle.cancel(taskId.value, key!)
     await refresh()
   } catch (value) {
@@ -161,6 +166,9 @@ onBeforeUnmount(store.stopWatching)
       <button v-if="canPause" class="ghost-button" :disabled="busy" @click="action('pause')">暂停</button>
       <button v-if="canResume" class="primary-button" :disabled="busy" @click="action('resume')">恢复</button>
       <button v-if="canRetry" class="primary-button" :disabled="busy" @click="action('retry')">重试</button>
+      <button v-if="canContinue" class="primary-button" :disabled="busy" @click="action('continue')">
+        继续分析
+      </button>
       <button v-if="task.pending_approval" class="warning-button" :disabled="busy" @click="approvalOpen = true">
         查看待审批动作
       </button>

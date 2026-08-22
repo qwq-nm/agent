@@ -93,6 +93,7 @@ export const lifecycle = {
   pause: (id: string) => request(`/api/tasks/${id}/pause`, { method: 'POST' }),
   resume: (id: string, idempotencyKey: string) => request(`/api/tasks/${id}/resume`, { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey } }),
   retry: (id: string, idempotencyKey: string) => request(`/api/tasks/${id}/retry`, { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey } }),
+  continueAnalysis: (id: string, idempotencyKey: string) => request(`/api/tasks/${id}/continue`, { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey } }),
   cancel: (id: string, idempotencyKey: string) => request(`/api/tasks/${id}/cancel`, { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey } }),
   approve: (id: string, approved: boolean, reason: string, idempotencyKey: string) =>
     request(`/api/tasks/${id}/approve`, {

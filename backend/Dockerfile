@@ -10,7 +10,7 @@ COPY backend ./backend
 COPY alembic.ini ./alembic.ini
 COPY migrations ./migrations
 RUN pip install --no-cache-dir .
-RUN pip install --no-cache-dir dirsearch
+RUN pip install --no-cache-dir dirsearch sqlmap
 USER root
 RUN python -m playwright install --with-deps chromium
 RUN useradd --create-home --uid 10001 secagent \

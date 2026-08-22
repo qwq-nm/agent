@@ -29,6 +29,8 @@ from secagent.security.url_guard import UrlGuard
 from secagent.tools.registry import ToolRegistry
 from secagent.tools.browser_tool import BrowserSnapshot
 from secagent.tools.dirsearch_tool import DirsearchScan
+from secagent.tools.login_probe_tool import LoginProbe
+from secagent.tools.sqlmap_tool import SqlmapProbe
 from secagent.tools.log_tools import (
     AttackPatternDetector,
     LogAnalyzer,
@@ -119,6 +121,8 @@ def create_app(
             HttpRequest(url_guard),
             BrowserSnapshot(url_guard),
             DirsearchScan(url_guard),
+            LoginProbe(url_guard),
+            SqlmapProbe(url_guard),
             HeaderCheck(),
             FormExtract(),
             LinkExtract(),

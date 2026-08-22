@@ -28,14 +28,14 @@ SAFETY_POLICY_GUIDANCE = {
         "auto_execute": ["low"],
         "requires_approval": ["medium"],
         "must_not_plan": ["high", "forbidden"],
-        "guidance": "优先规划低风险、被动、只读工具；避免主动验证、提交 payload、爆破、破坏性操作和任何越权访问。",
+        "guidance": "优先规划低风险、被动、只读工具；中风险工具必须人工确认；高风险、破坏性、大规模爆破和任何越权访问不得规划。",
     },
     "standard": {
         "label": "标准模式",
         "auto_execute": ["low"],
         "requires_approval": ["medium"],
         "must_not_plan": ["high", "forbidden"],
-        "guidance": "可以规划必要的中风险验证类动作，但必须给出明确目的；高风险和禁止动作不要规划。",
+        "guidance": "可以规划必要的中风险授权验证动作，但必须给出明确目的并等待人工确认；高风险、破坏性、大规模爆破和禁止动作不得规划。",
     },
     "expert": {
         "label": "专家模式",
@@ -104,6 +104,16 @@ class Planner:
                     "url": task.target_url,
                     "extensions": ["php", "html", "js", "txt", "json", "bak", "zip"],
                 },
+                "login_probe": {
+                    "url": task.target_url,
+                    "max_attempts": 20,
+                },
+                "sqlmap_probe": {
+                    "url": task.target_url,
+                    "level": 1,
+                    "risk": 1,
+                    "extra_args": [],
+                },
                 "robots_analyzer": {
                     "base_url": task.target_url,
                     "response": "$http",
@@ -141,7 +151,9 @@ class Planner:
                 "robots_analyzer 可以使用 {'base_url': target_url, 'response': '$http'} 生成或解析 robots.txt 线索。",
                 "如果 http_fetch 获取到的 HTML 内容很少、只包含前端挂载节点、出现大量 script/app/root 字样，或用户明确提到 JS 渲染，应规划 browser_snapshot 获取浏览器渲染后的可见文本、链接、表单和截图。",
                 "不要把 URL 字符串传给 response 参数；response 只能来自 http_fetch 的结构化结果。",
-                "除非用户明确授权，否则只规划被动 GET/HEAD 观察，不提交表单、不进行未授权爆破、不执行真实漏洞利用。",
+                "低风险工具可以自动执行；目录发现、浏览器渲染、登录探测、SQL 注入探测等主动验证工具必须在授权范围内规划，并按风险等级等待人工确认；禁止未授权爆破、大规模爆破、破坏性操作和越权访问。",
+                "login_probe 会提交登录表单，属于高风险授权验证工具；只有当安全策略允许规划 high 风险动作、目标明确授权且已经发现登录页或 password 表单时，才可以规划，并且必须说明人工确认依据。",
+                "sqlmap_probe 调用原版 sqlmap，属于高风险授权验证工具；只有当安全策略允许规划 high 风险动作、目标明确授权且已有 URL 参数或表单参数线索时，才可以规划，并且必须说明人工确认依据。",
                 "优先规划公开发现步骤：链接、表单、robots.txt、前端脚本路由、候选路径、疑似 Flag 模式。",
                 "不要重复 execution_memory.successful_tool_calls 中已经成功且参数相同的工具，除非观察结果表明之前失败、过期或证据不足。",
                 "使用 next_focus 选择最小必要的补充证据步骤。",
@@ -152,10 +164,12 @@ class Planner:
             payload["ctf_web_rules"] = [
                 "允许规划 dirsearch_scan 进行授权范围内的标准 dirsearch 路径发现；该工具属于中风险，必须经过人工确认，不得用于未授权目标。",
                 "如果页面由 JavaScript 渲染、普通 HTTP 响应看不到题目内容或 flag 线索，应规划 browser_snapshot；该工具属于中风险，必须经过人工确认。",
+                "如已发现登录表单、登录路径、后台入口或题目明显指向弱口令/万能密码方向，可在专家模式下规划 login_probe；它只做小规模常规弱口令和万能密码探测，必须等待人工确认，不得自动执行。",
+                "如已发现查询参数、搜索入口、登录/查询表单或题目明确指向 SQL 注入方向，可在专家模式下规划 sqlmap_probe；该工具必须等待人工确认，不得自动执行。",
                 "这是授权 CTF Web/靶场题目分析场景，目标是围绕公开页面和授权路径寻找题目线索、候选 flag 或下一步分析方向。",
                 "优先分析首页、robots.txt、公开链接、前端 JS 路由、注释、表单字段、Cookie、响应头、备份文件名、配置文件名、源码泄露线索和页面中的 flag-like pattern。",
                 "如果运行记忆中出现 queued_urls、sensitive_paths、robots_paths、js_files、api_endpoints 或 candidate_flags，应优先规划最小必要工具去验证这些线索。",
-                "允许的自动动作仍然限于白名单工具和授权范围；不要提交表单，不要进行未授权目录爆破，不要执行 SQL 注入、命令执行、文件写入或破坏性利用。",
+                "允许的自动动作仍然限于低风险白名单工具和授权范围；目录发现、登录探测、SQL 注入探测等主动验证动作必须等待人工确认并写入审计记录；禁止未授权目录爆破、大规模爆破、命令执行、文件写入、破坏性利用和越权访问。",
                 "如果发现疑似 flag，先使用 flag_pattern_detector 或已有证据复核，不要伪造 flag；报告必须说明 flag 来源证据。",
                 "如果没有发现 flag，应明确输出已检查的公开入口、剩余可能方向和需要新增工具能力的原因。",
             ]

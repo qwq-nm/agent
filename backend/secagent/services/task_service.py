@@ -58,7 +58,7 @@ TRANSITIONS = {
         TaskStatus.QUEUED,
         TaskStatus.CANCELLED,
     },
-    TaskStatus.COMPLETED: set(),
+    TaskStatus.COMPLETED: {TaskStatus.QUEUED},
     TaskStatus.FAILED: set(),
     TaskStatus.CANCELLED: set(),
 }
@@ -419,7 +419,7 @@ class TaskService:
                 current_attempt = self.repository.current_task_attempt(task_id)
                 attempt = (
                     current_attempt + 1
-                    if action == "retry"
+                    if action in {"retry", "continue"}
                     else max(1, current_attempt)
                 )
                 if attempt == 1:
@@ -572,6 +572,27 @@ class TaskService:
         self, task_id: str, actor: AuthenticatedUser, idempotency_key: str
     ) -> TaskRead:
         return self._enqueue(task_id, actor, idempotency_key, "retry")
+
+    def continue_analysis(
+        self, task_id: str, actor: AuthenticatedUser, idempotency_key: str
+    ) -> TaskRead:
+        task = self.repository.get_authorized(task_id, actor)
+        if task is None:
+            raise KeyError(task_id)
+        if task.status not in {TaskStatus.COMPLETED, TaskStatus.FAILED_RETRYABLE}:
+            raise ValueError("task can only continue after completion or retryable failure")
+        self.repository.clear_orchestration_checkpoint(task_id, commit=False)
+        TaskEventService(self.repository.session).append(
+            task_id,
+            "task.continue_requested",
+            {
+                "from_status": task.status.value,
+                "reason": "user requested another evidence-driven analysis round",
+            },
+            commit=False,
+        )
+        self.repository.commit()
+        return self._enqueue(task_id, actor, idempotency_key, "continue", task=task)
 
     async def approve(
         self,
