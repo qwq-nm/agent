@@ -688,9 +688,13 @@ class TaskRepository:
         except (TypeError, json.JSONDecodeError):
             self.session.commit()
             return {}
+        checkpoint_attempt = checkpoint.get("attempt")
+        attempt_matches = checkpoint_attempt == lease.attempt or (
+            checkpoint_attempt is None and lease.attempt == 1
+        )
         if (
             not isinstance(checkpoint, dict)
-            or checkpoint.get("attempt") != lease.attempt
+            or not attempt_matches
             or checkpoint.get("fingerprint") != fingerprint
             or not isinstance(checkpoint.get("stages", {}), dict)
         ):
@@ -754,6 +758,93 @@ class TaskRepository:
         ):
             self.session.rollback()
             raise ValueError("successful model call is required for checkpoint")
+        stages[stage] = {
+            "status": "success",
+            "model_call_id": model_call_id,
+            "data": data,
+        }
+        row.orchestration_json = json.dumps(
+            checkpoint,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        self.session.commit()
+
+    def load_plan_preview_checkpoint(
+        self, task_id: str, *, fingerprint: str
+    ) -> dict[str, Any]:
+        row = self.session.get(TaskRow, task_id)
+        if row is None:
+            raise KeyError(task_id)
+        try:
+            checkpoint = json.loads(row.orchestration_json or "{}")
+        except (TypeError, json.JSONDecodeError):
+            return {}
+        if (
+            not isinstance(checkpoint, dict)
+            or checkpoint.get("fingerprint") != fingerprint
+            or not isinstance(checkpoint.get("stages"), dict)
+        ):
+            return {}
+        valid_stages: dict[str, Any] = {}
+        for stage, value in checkpoint["stages"].items():
+            if not isinstance(value, dict) or value.get("status") != "success":
+                continue
+            call_id = value.get("model_call_id")
+            call = self.session.get(ModelCallRow, call_id) if call_id else None
+            if (
+                call is not None
+                and call.task_id == task_id
+                and call.stage == stage
+                and call.status == "completed"
+            ):
+                valid_stages[stage] = value
+        checkpoint["stages"] = valid_stages
+        return checkpoint
+
+    def orchestration_checkpoint(self, task_id: str) -> dict[str, Any]:
+        row = self.session.get(TaskRow, task_id)
+        if row is None:
+            raise KeyError(task_id)
+        try:
+            checkpoint = json.loads(row.orchestration_json or "{}")
+        except (TypeError, json.JSONDecodeError):
+            return {}
+        return checkpoint if isinstance(checkpoint, dict) else {}
+
+    def save_plan_preview_checkpoint(
+        self,
+        task_id: str,
+        *,
+        fingerprint: str,
+        stage: str,
+        data: dict[str, Any],
+        model_call_id: str,
+    ) -> None:
+        row = self.session.get(TaskRow, task_id)
+        if row is None:
+            self.session.rollback()
+            raise KeyError(task_id)
+        model_call = self.session.get(ModelCallRow, model_call_id)
+        if (
+            model_call is None
+            or model_call.task_id != task_id
+            or model_call.stage != stage
+            or model_call.status != "completed"
+        ):
+            self.session.rollback()
+            raise ValueError("successful model call is required for checkpoint")
+        try:
+            checkpoint = json.loads(row.orchestration_json or "{}")
+        except (TypeError, json.JSONDecodeError):
+            checkpoint = {}
+        if (
+            not isinstance(checkpoint, dict)
+            or checkpoint.get("fingerprint") != fingerprint
+        ):
+            checkpoint = {"fingerprint": fingerprint, "stages": {}}
+        stages = checkpoint.setdefault("stages", {})
         stages[stage] = {
             "status": "success",
             "model_call_id": model_call_id,

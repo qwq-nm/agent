@@ -37,6 +37,7 @@ class TaskScene(StrEnum):
 
 class TaskStatus(StrEnum):
     CREATED = "created"
+    PLANNING = "planning"
     QUEUED = "queued"
     PARSED = "parsed"
     PLANNED = "planned"
@@ -73,10 +74,17 @@ class RouteMode(StrEnum):
     MANUAL = "manual"
 
 
+class SafetyMode(StrEnum):
+    CONSERVATIVE = "conservative"
+    STANDARD = "standard"
+    EXPERT = "expert"
+
+
 class TaskCreate(BaseModel):
     goal: str = Field(min_length=3, max_length=4000)
     authorization_scope: str = Field(min_length=3, max_length=2000)
     route_mode: RouteMode = RouteMode.AUTO
+    safety_mode: SafetyMode = SafetyMode.CONSERVATIVE
     preferred_model: str | None = None
     scene_hint: TaskScene | None = None
     target_url: str | None = None
@@ -129,6 +137,22 @@ class PlanStep(BaseModel):
     need_human_confirm: bool = False
 
 
+class PlanPreviewStep(PlanStep):
+    index: int
+
+
+class PlanPreview(BaseModel):
+    task_id: str
+    scene: TaskScene
+    goal_summary: str
+    target_summary: str | None = None
+    authorization_summary: str
+    safety_mode: SafetyMode
+    constraints: list[str] = Field(default_factory=list)
+    expected_outputs: list[str] = Field(default_factory=list)
+    steps: list[PlanPreviewStep] = Field(default_factory=list)
+
+
 class ToolResult(BaseModel):
     success: bool
     summary: str
@@ -164,6 +188,11 @@ class CriticDecision(BaseModel):
     confidence: float = Field(ge=0, le=1)
     reason: str
     missing_evidence: list[MissingEvidenceItem] = Field(default_factory=list)
+    goal_completed: bool = False
+    should_continue: bool = True
+    should_report: bool = False
+    next_focus: list[str] = Field(default_factory=list)
+    stop_reason: str | None = None
 
 
 class TaskRunResult(BaseModel):

@@ -21,7 +21,7 @@ export const useTasksStore = defineStore('tasks', () => {
   const activeCount = computed(
     () =>
       tasks.value.filter((task) =>
-        ['created', 'queued', 'parsed', 'planned', 'running', 'waiting_human', 'paused'].includes(
+        ['created', 'planning', 'queued', 'parsed', 'planned', 'running', 'waiting_human', 'paused'].includes(
           task.status,
         ),
       ).length,

@@ -15,6 +15,7 @@ from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from secagent.auth.dependencies import AuthenticatedUser, current_user
 from secagent.domain import TaskCreate, TaskRead
+from secagent.providers.base import ProviderFailure
 from secagent.repository import TaskRepository
 from secagent.services.ledger import LedgerService
 from secagent.services.task_service import TaskService
@@ -72,7 +73,7 @@ def storage_for(request: Request) -> StorageService:
 def task_service_for(request: Request, repository: TaskRepository) -> TaskService:
     return TaskService(
         repository,
-        request.app.state.model_router,
+        request.app.state.provider_runtime_factory.build(repository.session),
         request.app.state.tool_registry,
         request.app.state.settings.data_dir,
         request.app.state.job_queue,
@@ -164,9 +165,30 @@ async def run_task(
         result = service.run(task_id, actor, require_idempotency_key(request))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="task not found") from exc
+    except ProviderFailure as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"模型服务不可用：{exc.provider} / {exc.code.value}",
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return result.model_dump(mode="json")
+
+
+@router.post("/{task_id}/plan", response_model=TaskRead)
+async def plan_task(
+    task_id: str,
+    request: Request,
+    repository: RepositoryDep,
+    actor: ActorDep,
+) -> TaskRead:
+    service = task_service_for(request, repository)
+    try:
+        return await service.plan(task_id, actor)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="task not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/{task_id}/report")

@@ -14,7 +14,16 @@ from secagent.agents.planner import Planner
 from secagent.agents.reporter import Reporter
 from secagent.agents.risk import RiskGate
 from secagent.agents.runner import AgentRunner
-from secagent.domain import TaskRead, TaskRunResult, TaskStatus
+from secagent.domain import (
+    ModelStage,
+    ParsedTask,
+    PlanPreview,
+    PlanPreviewStep,
+    PlanStep,
+    TaskRead,
+    TaskRunResult,
+    TaskStatus,
+)
 from secagent.providers.router import ModelRouter
 from secagent.queue.base import JobQueue
 from secagent.repository import TaskRepository
@@ -24,7 +33,13 @@ from secagent.services.task_events import TaskEventService
 from secagent.tools.registry import ToolRegistry
 
 TRANSITIONS = {
-    TaskStatus.CREATED: {TaskStatus.QUEUED, TaskStatus.PAUSED, TaskStatus.CANCELLED},
+    TaskStatus.CREATED: {
+        TaskStatus.PLANNING,
+        TaskStatus.QUEUED,
+        TaskStatus.PAUSED,
+        TaskStatus.CANCELLED,
+    },
+    TaskStatus.PLANNING: {TaskStatus.PLANNED, TaskStatus.FAILED_RETRYABLE},
     TaskStatus.QUEUED: {TaskStatus.RUNNING, TaskStatus.PAUSED, TaskStatus.CANCELLED},
     TaskStatus.PARSED: {TaskStatus.QUEUED, TaskStatus.PAUSED, TaskStatus.CANCELLED},
     TaskStatus.PLANNED: {TaskStatus.QUEUED, TaskStatus.PAUSED, TaskStatus.CANCELLED},
@@ -38,7 +53,11 @@ TRANSITIONS = {
     },
     TaskStatus.WAITING_HUMAN: {TaskStatus.QUEUED, TaskStatus.CANCELLED},
     TaskStatus.PAUSED: {TaskStatus.QUEUED, TaskStatus.CANCELLED},
-    TaskStatus.FAILED_RETRYABLE: {TaskStatus.QUEUED, TaskStatus.CANCELLED},
+    TaskStatus.FAILED_RETRYABLE: {
+        TaskStatus.PLANNING,
+        TaskStatus.QUEUED,
+        TaskStatus.CANCELLED,
+    },
     TaskStatus.COMPLETED: set(),
     TaskStatus.FAILED: set(),
     TaskStatus.CANCELLED: set(),
@@ -78,17 +97,20 @@ class TaskService:
             lease_seconds=lease_seconds,
             max_auto_retries=max_auto_retries,
         )
-        ledger = LedgerService(repository, data_dir=data_dir)
+        self.ledger = LedgerService(repository, data_dir=data_dir)
+        self.data_dir = data_dir
+        self.parser = TaskParser(router)
+        self.planner = Planner(router, registry, data_dir)
         self.runner = AgentRunner(
             repository=repository,
-            ledger=ledger,
+            ledger=self.ledger,
             risk_gate=RiskGate(),
             data_dir=data_dir,
-            parser=TaskParser(router),
-            planner=Planner(router, registry, data_dir),
-            executor=Executor(registry, ledger),
-            critic=Critic(router, ledger),
-            reporter=Reporter(router, ledger),
+            parser=self.parser,
+            planner=self.planner,
+            executor=Executor(registry, self.ledger),
+            critic=Critic(router, self.ledger),
+            reporter=Reporter(router, self.ledger),
             timeout_seconds=task_timeout_seconds,
             max_replans=max_replans,
         )
@@ -97,6 +119,166 @@ class TaskService:
         self, task_id: str, actor: AuthenticatedUser, idempotency_key: str
     ) -> TaskRead:
         return self._enqueue(task_id, actor, idempotency_key, "run")
+
+    async def plan(self, task_id: str, actor: AuthenticatedUser) -> TaskRead:
+        task = self.repository.get_authorized(task_id, actor)
+        if task is None:
+            raise KeyError(task_id)
+        if task.status is TaskStatus.PLANNED:
+            return task
+        if task.status not in {TaskStatus.CREATED, TaskStatus.FAILED_RETRYABLE}:
+            raise ValueError("task must be created before generating a plan")
+
+        workspace = self.data_dir / "tasks" / task_id
+        workspace.mkdir(parents=True, exist_ok=True)
+        fingerprint = AgentRunner._task_fingerprint(task, workspace)
+        try:
+            self.repository.transition_task_status(
+                task_id, task.status, TaskStatus.PLANNING, commit=False
+            )
+            TaskEventService(self.repository.session).append(
+                task_id, "agent.parsing_started", {}, commit=False
+            )
+            self.repository.record_audit(
+                actor.id,
+                "task.plan",
+                "task",
+                task_id,
+                "started",
+                {},
+                commit=False,
+            )
+            self.repository.commit()
+
+            checkpoint = self.repository.load_plan_preview_checkpoint(
+                task_id, fingerprint=fingerprint
+            )
+            stages = checkpoint.get("stages", {})
+            parsed = await self._preview_parse(task, fingerprint, stages)
+            self.repository.set_task_scene(task_id, parsed.scene)
+            TaskEventService(self.repository.session).append(
+                task_id,
+                "agent.parsing_completed",
+                {"scene": parsed.scene.value},
+                commit=False,
+            )
+            TaskEventService(self.repository.session).append(
+                task_id, "agent.planning_started", {}, commit=False
+            )
+            self.repository.commit()
+
+            plan = await self._preview_plan(task, parsed, fingerprint, stages)
+            preview = self._plan_preview(task, parsed, plan)
+            TaskEventService(self.repository.session).append(
+                task_id,
+                "agent.planning_completed",
+                preview.model_dump(mode="json"),
+                commit=False,
+            )
+            updated = self.repository.transition_task_status(
+                task_id, TaskStatus.PLANNING, TaskStatus.PLANNED, commit=False
+            )
+            self.repository.record_audit(
+                actor.id,
+                "task.plan",
+                "task",
+                task_id,
+                "success",
+                {"steps": len(plan), "scene": parsed.scene.value},
+                commit=False,
+            )
+            self.repository.commit()
+            return updated
+        except Exception as exc:
+            self.repository.rollback()
+            try:
+                current = self.repository.get_task(task_id)
+                if current is not None and current.status is TaskStatus.PLANNING:
+                    self.repository.transition_task_status(
+                        task_id,
+                        TaskStatus.PLANNING,
+                        TaskStatus.FAILED_RETRYABLE,
+                        commit=False,
+                    )
+                TaskEventService(self.repository.session).append(
+                    task_id,
+                    "task.failed_retryable",
+                    {"action": "plan", "error_type": type(exc).__name__},
+                    commit=False,
+                )
+                self.repository.record_audit(
+                    actor.id,
+                    "task.plan",
+                    "task",
+                    task_id,
+                    "failure",
+                    {"error_type": type(exc).__name__},
+                    commit=False,
+                )
+                self.repository.commit()
+            except Exception:
+                self.repository.rollback()
+            raise
+
+    async def _preview_parse(
+        self, task: TaskRead, fingerprint: str, stages: dict
+    ) -> ParsedTask:
+        parsed_data = AgentRunner._successful_stage(stages, ModelStage.TASK_PARSE)
+        if parsed_data is not None:
+            return ParsedTask.model_validate(parsed_data)
+        parsed, response = await self.parser.parse(task)
+        model_call_id = self.ledger.record_model_response(
+            task.id, ModelStage.TASK_PARSE, response
+        )
+        self.repository.save_plan_preview_checkpoint(
+            task.id,
+            fingerprint=fingerprint,
+            stage=ModelStage.TASK_PARSE.value,
+            data=parsed.model_dump(mode="json"),
+            model_call_id=model_call_id,
+        )
+        return parsed
+
+    async def _preview_plan(
+        self, task: TaskRead, parsed: ParsedTask, fingerprint: str, stages: dict
+    ) -> list[PlanStep]:
+        plan_data = AgentRunner._successful_stage(stages, ModelStage.PLAN)
+        if plan_data is not None:
+            plan, _replan_round, _step_start_index = self.runner._load_plan_checkpoint(
+                plan_data
+            )
+            return plan
+        plan, response = await self.planner.plan(task, parsed)
+        model_call_id = self.ledger.record_model_response(
+            task.id, ModelStage.PLAN, response
+        )
+        self.repository.save_plan_preview_checkpoint(
+            task.id,
+            fingerprint=fingerprint,
+            stage=ModelStage.PLAN.value,
+            data=self.runner._plan_checkpoint(plan, 0, 1),
+            model_call_id=model_call_id,
+        )
+        return plan
+
+    @staticmethod
+    def _plan_preview(
+        task: TaskRead, parsed: ParsedTask, plan: list[PlanStep]
+    ) -> PlanPreview:
+        return PlanPreview(
+            task_id=task.id,
+            scene=parsed.scene,
+            goal_summary=parsed.goal,
+            target_summary=task.target_url,
+            authorization_summary=parsed.authorization_scope,
+            safety_mode=task.safety_mode,
+            constraints=parsed.constraints,
+            expected_outputs=parsed.expected_outputs,
+            steps=[
+                PlanPreviewStep(index=index, **step.model_dump())
+                for index, step in enumerate(plan, start=1)
+            ],
+        )
 
     async def execute_queued(
         self, task_id: str, command_id: str, worker_id: str

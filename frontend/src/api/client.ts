@@ -35,6 +35,7 @@ export const api = {
     body.set('file', file)
     return request<Task>('/api/tasks', { method: 'POST', body })
   },
+  planTask: (id: string) => request<Task>(`/api/tasks/${id}/plan`, { method: 'POST' }),
   listTasks: () => request<Task[]>('/api/tasks'),
   getTask: (id: string) => request<TaskDetail>(`/api/tasks/${id}`),
   health: () => request<HealthStatus>('/api/health'),

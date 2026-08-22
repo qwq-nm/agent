@@ -1,5 +1,6 @@
 export type TaskStatus =
   | 'created'
+  | 'planning'
   | 'queued'
   | 'parsed'
   | 'planned'
@@ -12,6 +13,8 @@ export type TaskStatus =
   | 'cancelled'
 
 export type RouteMode = 'auto' | 'manual'
+
+export type SafetyMode = 'conservative' | 'standard' | 'expert'
 
 export type UserRole = 'admin' | 'analyst'
 
@@ -57,6 +60,7 @@ export interface Task {
   goal: string
   authorization_scope: string
   route_mode: RouteMode
+  safety_mode: SafetyMode
   preferred_model?: string
   scene_hint?: string
   target_url?: string
@@ -69,6 +73,7 @@ export interface TaskCreate {
   goal: string
   authorization_scope: string
   route_mode: RouteMode
+  safety_mode: SafetyMode
   preferred_model?: string
   scene_hint?: string
   target_url?: string
@@ -89,6 +94,28 @@ export interface TaskStep {
   tool_name?: string
   route_reason?: string
   risk_level?: string
+}
+
+export interface PlanPreviewStep {
+  index: number
+  name: string
+  purpose?: string
+  tool_name?: string
+  params?: Record<string, unknown>
+  risk_level?: string
+  need_human_confirm?: boolean
+}
+
+export interface PlanPreview {
+  task_id: string
+  scene?: string
+  goal_summary: string
+  target_summary?: string | null
+  authorization_summary: string
+  safety_mode: SafetyMode
+  constraints: string[]
+  expected_outputs: string[]
+  steps: PlanPreviewStep[]
 }
 
 export interface Evidence {
@@ -138,6 +165,7 @@ export interface PendingApproval {
 export interface TaskReport {
   id: string
   content: string
+  evidence_ids?: string[]
   is_demo: boolean
 }
 
@@ -147,6 +175,7 @@ export interface TaskDetail extends Task {
   model_calls: ModelCall[]
   tool_calls: ToolCall[]
   reports: TaskReport[]
+  plan_preview?: PlanPreview | null
   pending_approval?: PendingApproval | null
   queue_position?: number | null
   job_attempt?: number | null

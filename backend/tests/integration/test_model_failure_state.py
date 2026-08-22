@@ -382,6 +382,11 @@ def test_persisted_deadline_fails_pending_approval_step_atomically(
         assert [event.event_type for event in events].count(
             "task.budget_exhausted"
         ) == 1
+    detail = analyst_client.get(f"/api/tasks/{task['id']}").json()
+    assert detail["reports"]
+    report = analyst_client.get(f"/api/tasks/{task['id']}/report").text
+    assert "阶段性安全分析报告" in report
+    assert "budget exhausted: deadline" in report
 
 
 def test_report_rejects_foreign_evidence_id_and_repository_persists_exact_ids(

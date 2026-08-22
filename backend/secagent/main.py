@@ -40,7 +40,16 @@ from secagent.tools.source_tools import (
     SourceScanner,
 )
 from secagent.tools.http_request import HttpRequest
-from secagent.tools.web_tools import FormExtract, HeaderCheck, UrlGuardTool
+from secagent.tools.web_tools import (
+    FlagPatternDetector,
+    FormExtract,
+    HeaderCheck,
+    JsAnalyzer,
+    LinkExtract,
+    PathNormalizer,
+    RobotsAnalyzer,
+    UrlGuardTool,
+)
 
 
 def create_app(
@@ -106,6 +115,11 @@ def create_app(
             HttpRequest(url_guard),
             HeaderCheck(),
             FormExtract(),
+            LinkExtract(),
+            RobotsAnalyzer(),
+            JsAnalyzer(),
+            PathNormalizer(),
+            FlagPatternDetector(),
         ]
     )
     app.include_router(system_router)

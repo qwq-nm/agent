@@ -362,10 +362,9 @@ class LedgerService:
     def snapshot(self, task_id: str) -> dict[str, Any]:
         rows = self.repository.ledger_rows(task_id)
         runtime = self.repository.task_runtime(task_id)
-        current_stage = next(
-            (row.name for row in reversed(rows["steps"]) if row.status in {"running", "pending"}),
-            None,
-        )
+        task = self.repository.get_task(task_id)
+        plan_preview = self._plan_preview(task_id)
+        current_stage = self._current_stage(task, rows, plan_preview)
         approvals = [
             {
                 "id": row.id,
@@ -456,4 +455,97 @@ class LedgerService:
             ],
             "approvals": approvals,
             "pending_approval": pending,
+            "plan_preview": plan_preview,
+        }
+
+    @staticmethod
+    def _current_stage(
+        task: Any | None, rows: dict[str, list[Any]], plan_preview: dict[str, Any] | None
+    ) -> str | None:
+        step_stage = next(
+            (
+                row.name
+                for row in reversed(rows["steps"])
+                if row.status in {"running", "pending"}
+            ),
+            None,
+        )
+        if step_stage:
+            return step_stage
+        pending = next(
+            (
+                row
+                for row in reversed(rows["approvals"])
+                if row.status == "pending"
+            ),
+            None,
+        )
+        if pending is not None:
+            return f"等待人工确认：{pending.tool_name}"
+        status = task.status.value if task is not None else None
+        if status == "planning":
+            return "正在理解任务并生成执行计划"
+        if status == "planned":
+            return "执行计划已生成，等待确认开始"
+        if status == "queued":
+            return "任务已排队，等待 Worker 执行"
+        if status == "running":
+            if not rows["model_calls"]:
+                return "正在启动自主决策流程"
+            if plan_preview and not rows["tool_calls"]:
+                return "准备调用第一批工具"
+            return "正在复核证据或生成报告"
+        if status == "waiting_human":
+            return "等待人工确认"
+        return None
+
+    def _plan_preview(self, task_id: str) -> dict[str, Any] | None:
+        task = self.repository.get_task(task_id)
+        if task is None:
+            return None
+        checkpoint = self.repository.orchestration_checkpoint(task_id)
+        stages = checkpoint.get("stages")
+        if not isinstance(stages, dict):
+            return None
+        parsed_stage = stages.get(ModelStage.TASK_PARSE.value)
+        plan_stage = stages.get(ModelStage.PLAN.value)
+        if not isinstance(parsed_stage, dict) or not isinstance(plan_stage, dict):
+            return None
+        parsed = parsed_stage.get("data")
+        plan = plan_stage.get("data")
+        if not isinstance(parsed, dict) or not isinstance(plan, dict):
+            return None
+        raw_steps = plan.get("steps")
+        if not isinstance(raw_steps, list):
+            return None
+        steps = []
+        for index, raw_step in enumerate(raw_steps, start=1):
+            if not isinstance(raw_step, dict):
+                continue
+            steps.append(
+                {
+                    "index": index,
+                    "name": raw_step.get("name"),
+                    "purpose": raw_step.get("purpose"),
+                    "tool_name": raw_step.get("tool_name"),
+                    "params": raw_step.get("params") if isinstance(raw_step.get("params"), dict) else {},
+                    "risk_level": raw_step.get("risk_level"),
+                    "need_human_confirm": bool(raw_step.get("need_human_confirm")),
+                }
+            )
+        return {
+            "task_id": task.id,
+            "scene": parsed.get("scene") or task.scene or task.scene_hint,
+            "goal_summary": parsed.get("goal") or task.goal,
+            "target_summary": task.target_url,
+            "authorization_summary": parsed.get("authorization_scope")
+            or task.authorization_scope,
+            "safety_mode": task.safety_mode,
+            "constraints": parsed.get("constraints")
+            if isinstance(parsed.get("constraints"), list)
+            else [],
+            "expected_outputs": parsed.get("expected_outputs")
+            if isinstance(parsed.get("expected_outputs"), list)
+            else [],
+            "steps": steps,
         }

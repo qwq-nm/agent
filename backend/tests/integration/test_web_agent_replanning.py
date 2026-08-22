@@ -68,6 +68,7 @@ class _ReplanningDeepSeekStub:
                 "is_complete": complete,
                 "confidence": 0.9 if complete else 0.2,
                 "reason": "sufficient" if complete else "need another probe",
+                "next_focus": [] if complete else ["second observation"],
                 "missing_evidence": (
                     []
                     if complete
@@ -75,6 +76,55 @@ class _ReplanningDeepSeekStub:
                         {
                             "kind": "factual",
                             "description": "second observation",
+                        }
+                    ]
+                ),
+            }
+        else:
+            raise AssertionError(f"unexpected DeepSeek schema: {title}")
+        return ModelResponse(
+            provider=self.name,
+            model=self.model,
+            data=data,
+            latency_ms=0,
+            prompt_tokens=5,
+            completion_tokens=3,
+        )
+
+
+class _DuplicatePlanDeepSeekStub(_ReplanningDeepSeekStub):
+    async def complete(self, request) -> ModelResponse:
+        title = request.response_schema.get("title")
+        if title == "PlanDocument":
+            payload = json.loads(request.user)
+            self.plan_inputs.append(payload)
+            data = {
+                "steps": [
+                    {
+                        "name": "Duplicate probe",
+                        "purpose": "The model repeated a completed probe",
+                        "tool_name": self.tool_name,
+                        "params": {"probe": "same"},
+                        "risk_level": "low",
+                        "need_human_confirm": False,
+                    }
+                ]
+            }
+        elif title == "CriticDecision":
+            self.critic_calls += 1
+            complete = self.critic_calls == 2
+            data = {
+                "is_complete": complete,
+                "confidence": 0.9 if complete else 0.2,
+                "reason": "sufficient" if complete else "need another probe",
+                "next_focus": [] if complete else ["avoid repeating completed probe"],
+                "missing_evidence": (
+                    []
+                    if complete
+                    else [
+                        {
+                            "kind": "factual",
+                            "description": "another non-duplicate observation",
                         }
                     ]
                 ),
@@ -345,6 +395,7 @@ def test_web_agent_replans_from_redacted_observations_and_completes(
             "goal": "Inspect the authorized web target and gather enough evidence",
             "authorization_scope": "Only the configured target host",
             "scene_hint": "web_analysis",
+            "safety_mode": "expert",
             "target_url": "https://target.test/",
         },
     ).json()
@@ -368,6 +419,12 @@ def test_web_agent_replans_from_redacted_observations_and_completes(
 
     assert observation_tool.calls == ["round-1", "round-2"]
     assert len(deepseek.plan_inputs) == 2
+    assert deepseek.plan_inputs[0]["safety_mode"] == "expert"
+    assert deepseek.plan_inputs[0]["safety_policy"]["label"] == "专家模式"
+    assert deepseek.plan_inputs[0]["safety_policy"]["requires_approval"] == [
+        "medium",
+        "high",
+    ]
     assert all(
         "报告本身不得列为缺失证据" in prompt
         for prompt in deepseek.critic_system_prompts
@@ -375,6 +432,10 @@ def test_web_agent_replans_from_redacted_observations_and_completes(
     second_plan = deepseek.plan_inputs[1]
     assert second_plan["replan_round"] == 1
     assert "round-1" in json.dumps(second_plan["observations"])
+    assert second_plan["next_focus"]
+    assert second_plan["execution_memory"]["successful_tool_calls"][0]["tool_name"] == (
+        "url_guard"
+    )
     assert "private-observation-secret" not in json.dumps(second_plan)
     detail = analyst_client.get(f"/api/tasks/{task['id']}").json()
     assert detail["status"] == "completed"
@@ -389,6 +450,54 @@ def test_web_agent_replans_from_redacted_observations_and_completes(
     with app.state.session_factory() as session:
         checkpoint = json.loads(session.get(TaskRow, task["id"]).orchestration_json)
     assert checkpoint["stages"]["plan"]["data"]["replan_round"] == 1
+
+
+def test_replanned_duplicate_idempotent_tool_call_is_skipped(
+    analyst_client, app, fake_queue
+) -> None:
+    deepseek = _DuplicatePlanDeepSeekStub()
+    app.state.model_router = ModelRouter(
+        {"glm": _GlmStub(), "deepseek": deepseek}, mode="live"
+    )
+    observation_tool = _ObservationTool()
+    app.state.tool_registry._tools[observation_tool.name] = observation_tool
+    task = analyst_client.post(
+        "/api/tasks",
+        json={
+            "goal": "Do not repeat already completed passive observations",
+            "authorization_scope": "Only the configured target host",
+            "scene_hint": "web_analysis",
+            "target_url": "https://target.test/",
+        },
+    ).json()
+    analyst_client.post(
+        f"/api/tasks/{task['id']}/run",
+        headers={"Idempotency-Key": "web-duplicate-memory-001"},
+    )
+    job = fake_queue.enqueued[0]
+
+    asyncio.run(
+        execute_queued_task(
+            job.task_id,
+            job.command_id,
+            app.state.session_factory,
+            app.state.model_router,
+            app.state.tool_registry,
+            app.state.settings.data_dir,
+            max_replans=1,
+        )
+    )
+
+    assert observation_tool.calls == ["same"]
+    assert len(deepseek.plan_inputs) == 2
+    second_plan = deepseek.plan_inputs[1]
+    assert second_plan["execution_memory"]["successful_tool_calls"][0]["params"] == {
+        "probe": "same"
+    }
+    detail = analyst_client.get(f"/api/tasks/{task['id']}").json()
+    assert detail["status"] == "completed"
+    assert len(detail["tool_calls"]) == 1
+    assert len(detail["steps"]) == 1
 
 
 def test_report_generation_only_missing_evidence_is_complete(
@@ -589,24 +698,26 @@ def test_web_agent_stops_replanning_at_configured_bound(
     )
     job = fake_queue.enqueued[0]
 
-    with pytest.raises(RuntimeError, match="maximum replans"):
-        asyncio.run(
-            execute_queued_task(
-                job.task_id,
-                job.command_id,
-                app.state.session_factory,
-                app.state.model_router,
-                app.state.tool_registry,
-                app.state.settings.data_dir,
-                max_replans=1,
-            )
+    asyncio.run(
+        execute_queued_task(
+            job.task_id,
+            job.command_id,
+            app.state.session_factory,
+            app.state.model_router,
+            app.state.tool_registry,
+            app.state.settings.data_dir,
+            max_replans=1,
         )
+    )
 
     assert len(deepseek.plan_inputs) == 2
     assert deepseek.critic_calls == 2
-    assert analyst_client.get(f"/api/tasks/{task['id']}").json()["status"] == (
-        "failed_retryable"
-    )
+    detail = analyst_client.get(f"/api/tasks/{task['id']}").json()
+    assert detail["status"] == "completed"
+    assert detail["reports"]
+    report = analyst_client.get(f"/api/tasks/{task['id']}/report").text
+    assert "阶段性安全分析报告" in report
+    assert "missing evidence after maximum replans" in report
 
 
 def test_web_agent_uses_registered_tool_risk_over_model_risk(

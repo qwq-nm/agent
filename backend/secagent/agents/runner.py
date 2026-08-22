@@ -114,6 +114,7 @@ class AgentRunner:
 
             parsed_data = self._successful_stage(stages, ModelStage.TASK_PARSE)
             if parsed_data is None:
+                self._append_event(task_id, "agent.parsing_started", {})
                 outcome = await self._invoke_model(
                     task_id,
                     lease,
@@ -135,11 +136,15 @@ class AgentRunner:
                     "status": "success",
                     "data": parsed.model_dump(mode="json"),
                 }
+                self._append_event(
+                    task_id, "agent.parsing_completed", {"scene": parsed.scene.value}
+                )
             else:
                 parsed = ParsedTask.model_validate(parsed_data)
 
             plan_data = self._successful_stage(stages, ModelStage.PLAN)
             if plan_data is None:
+                self._append_event(task_id, "agent.planning_started", {})
                 outcome = await self._invoke_model(
                     task_id,
                     lease,
@@ -165,12 +170,20 @@ class AgentRunner:
                     "status": "success",
                     "data": checkpoint_plan,
                 }
+                self._append_event(
+                    task_id,
+                    "agent.planning_completed",
+                    {"steps": len(plan), "replan_round": replan_round},
+                )
             else:
                 plan, replan_round, step_start_index = self._load_plan_checkpoint(
                     plan_data
                 )
 
-            runtime = self._runtime_from_ledger(task_id)
+            self._append_event(task_id, "agent.executing_started", {})
+            snapshot = self.ledger.snapshot(task_id)
+            runtime = self._runtime_from_snapshot(snapshot)
+            successful_tool_results = self._successful_tool_results(snapshot)
             while True:
                 for offset, proposed_step in enumerate(plan):
                     index = step_start_index + offset
@@ -184,6 +197,13 @@ class AgentRunner:
                         }
                     )
                     params = self._resolve_params(step.params, workspace, runtime)
+                    tool_result_key = self._tool_result_key(step.tool_name, params)
+                    if tool.idempotent and tool_result_key in successful_tool_results:
+                        result = ToolResult.model_validate(
+                            successful_tool_results[tool_result_key]["result"]
+                        )
+                        self._update_runtime(step.tool_name, result, runtime)
+                        continue
                     idempotency_key = self.repository.step_idempotency_key(
                         task_id, index, step
                     )
@@ -220,7 +240,9 @@ class AgentRunner:
                         task_id, step.tool_name, step_id=step_id
                     )
                     decision = self.risk_gate.check(
-                        tool.risk_level, approved=approved
+                        tool.risk_level,
+                        approved=approved,
+                        safety_mode=task.safety_mode,
                     )
                     if decision.action == "wait":
                         self._ensure_running(task_id, lease_is_active)
@@ -244,7 +266,12 @@ class AgentRunner:
                         TaskEventService(self.repository.session).append(
                             task_id,
                             "task.waiting_human",
-                            {"step_index": index},
+                            {
+                                "step_index": index,
+                                "safety_mode": task.safety_mode.value,
+                                "risk_level": tool.risk_level.value,
+                                "policy_reason": decision.reason,
+                            },
                             commit=False,
                         )
                         self.repository.commit()
@@ -271,6 +298,12 @@ class AgentRunner:
                     except TimeoutError as exc:
                         raise BudgetExceeded("deadline") from exc
                     self._update_runtime(step.tool_name, result, runtime)
+                    if result.success and tool.idempotent:
+                        successful_tool_results[tool_result_key] = {
+                            "tool_name": step.tool_name,
+                            "params": redact_mapping(params),
+                            "result": result.model_dump(mode="json"),
+                        }
                     if not result.success:
                         if (
                             parsed.scene is TaskScene.WEB_ANALYSIS
@@ -290,6 +323,11 @@ class AgentRunner:
                     else -1
                 )
                 if critic_data is None or critic_round != replan_round:
+                    self._append_event(
+                        task_id,
+                        "agent.critic_started",
+                        {"replan_round": replan_round},
+                    )
                     outcome = await self._invoke_model(
                         task_id,
                         lease,
@@ -314,14 +352,55 @@ class AgentRunner:
                     }
                 else:
                     critic = self._critic_from_checkpoint(critic_data)
-                if critic.is_complete:
+                if critic.should_report or critic.is_complete:
                     break
+                if not critic.should_continue:
+                    if self._has_evidence(task_id):
+                        report_artifact = self._fallback_report(
+                            task_id,
+                            parsed,
+                            report_type="partial",
+                            stop_reason=critic.stop_reason
+                            or "critic stopped execution with persisted evidence",
+                            safety_mode=task.safety_mode.value,
+                            errors=[critic.reason],
+                        )
+                        self._save_report_artifact(task_id, lease, report_artifact)
+                        return TaskRunResult(
+                            task_id=task_id,
+                            status=TaskStatus.COMPLETED,
+                            is_demo=self._is_demo(task_id),
+                            report=report_artifact.content,
+                        )
+                    raise RuntimeError(critic.stop_reason or "critic stopped execution")
                 if replan_round >= self.max_replans:
+                    if self._has_evidence(task_id):
+                        report_artifact = self._fallback_report(
+                            task_id,
+                            parsed,
+                            report_type="partial",
+                            stop_reason="missing evidence after maximum replans",
+                            safety_mode=task.safety_mode.value,
+                            errors=[item.description for item in critic.missing_evidence],
+                        )
+                        self._save_report_artifact(task_id, lease, report_artifact)
+                        return TaskRunResult(
+                            task_id=task_id,
+                            status=TaskStatus.COMPLETED,
+                            is_demo=self._is_demo(task_id),
+                            report=report_artifact.content,
+                        )
                     raise RuntimeError("missing evidence after maximum replans")
 
                 observations = self.critic.observation_summary(task_id, critic)
                 replan_round += 1
                 step_start_index += len(plan)
+                snapshot = self.ledger.snapshot(task_id)
+                self._append_event(
+                    task_id,
+                    "agent.planning_started",
+                    {"replan_round": replan_round},
+                )
                 outcome = await self._invoke_model(
                     task_id,
                     lease,
@@ -332,6 +411,8 @@ class AgentRunner:
                         parsed,
                         observations=observations,
                         replan_round=replan_round,
+                        execution_memory=self._planner_execution_memory(snapshot),
+                        next_focus=critic.next_focus,
                     ),
                 )
                 plan = outcome.value
@@ -350,15 +431,25 @@ class AgentRunner:
                     "status": "success",
                     "data": checkpoint_plan,
                 }
+                self._append_event(
+                    task_id,
+                    "agent.planning_completed",
+                    {"steps": len(plan), "replan_round": replan_round},
+                )
 
             report_data = self._successful_stage(stages, ModelStage.REPORT)
             if report_data is None:
+                self._append_event(task_id, "agent.reporting_started", {})
                 outcome = await self._invoke_model(
                     task_id,
                     lease,
                     budget,
                     ModelStage.REPORT,
-                    lambda: self.reporter.render(task_id, parsed),
+                    lambda: self.reporter.render(
+                        task_id,
+                        parsed,
+                        safety_mode=task.safety_mode.value,
+                    ),
                 )
                 report_artifact = outcome.value
                 self.repository.save_orchestration_checkpoint(
@@ -388,6 +479,20 @@ class AgentRunner:
                 report=report_artifact.content,
             )
         except BudgetExceeded as exc:
+            if self._has_evidence(task_id):
+                try:
+                    parsed_for_report = self._parsed_for_fallback(task, stages)
+                    report_artifact = self._fallback_report(
+                        task_id,
+                        parsed_for_report,
+                        report_type="partial",
+                        stop_reason=f"budget exhausted: {exc.dimension}",
+                        safety_mode=task.safety_mode.value,
+                        errors=[f"Execution stopped because {exc.dimension} was exhausted."],
+                    )
+                    self._save_report_artifact(task_id, lease, report_artifact)
+                except StaleJobLease as stale:
+                    raise ExecutionInterrupted("job lease was lost") from stale
             try:
                 self.repository.fail_budget_exhausted(
                     task_id,
@@ -532,18 +637,127 @@ class AgentRunner:
         if lease_is_active is not None and not lease_is_active():
             raise ExecutionInterrupted("job lease was lost")
 
+    def _append_event(self, task_id: str, event_type: str, payload: dict) -> None:
+        TaskEventService(self.repository.session).append(
+            task_id, event_type, payload, commit=True
+        )
+
     def _is_demo(self, task_id: str) -> bool:
         return any(call["is_demo"] for call in self.ledger.snapshot(task_id)["model_calls"])
 
+    def _has_evidence(self, task_id: str) -> bool:
+        return bool(self.ledger.snapshot(task_id)["evidences"])
+
+    def _fallback_report(
+        self,
+        task_id: str,
+        parsed: ParsedTask,
+        *,
+        report_type: str,
+        stop_reason: str,
+        safety_mode: str,
+        errors: list[str] | None = None,
+    ) -> ReportArtifact:
+        return self.reporter.render_fallback(
+            task_id,
+            parsed,
+            report_type=report_type,
+            stop_reason=stop_reason,
+            safety_mode=safety_mode,
+            errors=errors,
+        )
+
+    def _save_report_artifact(
+        self, task_id: str, lease: JobLease, report_artifact: ReportArtifact
+    ) -> None:
+        self.repository.save_report(
+            task_id,
+            report_artifact.content,
+            is_demo=self._is_demo(task_id),
+            evidence_ids=report_artifact.evidence_ids,
+            lease=lease,
+        )
+
+    @staticmethod
+    def _parsed_for_fallback(task: TaskRead, stages: dict[str, Any]) -> ParsedTask:
+        parsed_data = AgentRunner._successful_stage(stages, ModelStage.TASK_PARSE)
+        if parsed_data is not None:
+            return ParsedTask.model_validate(parsed_data)
+        return ParsedTask(
+            scene=task.scene or task.scene_hint or TaskScene.INCIDENT_RESPONSE,
+            goal=task.goal,
+            authorization_scope=task.authorization_scope,
+            risk_level=RiskLevel.LOW,
+            constraints=[task.authorization_scope],
+        )
+
     def _runtime_from_ledger(self, task_id: str) -> dict[str, Any]:
+        return self._runtime_from_snapshot(self.ledger.snapshot(task_id))
+
+    def _runtime_from_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:
         runtime: dict[str, Any] = {}
-        for call in self.ledger.snapshot(task_id)["tool_calls"]:
+        for call in snapshot["tool_calls"]:
             try:
                 result = ToolResult.model_validate(call["result"])
             except (TypeError, ValueError):
                 continue
             self._update_runtime(call["tool_name"], result, runtime)
         return runtime
+
+    @classmethod
+    def _successful_tool_results(cls, snapshot: dict[str, Any]) -> dict[str, dict]:
+        results: dict[str, dict] = {}
+        for call in snapshot["tool_calls"]:
+            try:
+                result = ToolResult.model_validate(call["result"])
+            except (TypeError, ValueError):
+                continue
+            if call.get("status") != "completed" or not result.success:
+                continue
+            key = cls._tool_result_key(call["tool_name"], call.get("params", {}))
+            results[key] = {
+                "tool_name": call["tool_name"],
+                "params": call.get("params", {}),
+                "result": result.model_dump(mode="json"),
+            }
+        return results
+
+    @classmethod
+    def _planner_execution_memory(cls, snapshot: dict[str, Any]) -> dict[str, Any]:
+        successful = []
+        for key, value in cls._successful_tool_results(snapshot).items():
+            result = value["result"]
+            successful.append(
+                {
+                    "tool_name": value["tool_name"],
+                    "params_hash": key.split(":", 1)[1],
+                    "params": value["params"],
+                    "summary": str(result.get("summary", ""))[:256],
+                }
+            )
+        evidence_urls = []
+        seen_urls: set[str] = set()
+        for evidence in snapshot["evidences"]:
+            metadata = evidence.get("metadata", {})
+            url = metadata.get("url") if isinstance(metadata, dict) else None
+            if isinstance(url, str) and url not in seen_urls:
+                seen_urls.add(url)
+                evidence_urls.append(url[:512])
+        return {
+            "successful_tool_calls": successful[-20:],
+            "evidence_urls": evidence_urls[-30:],
+        }
+
+    @staticmethod
+    def _tool_result_key(tool_name: str, params: dict[str, Any]) -> str:
+        canonical = json.dumps(
+            redact_mapping(params),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return f"{tool_name}:{digest}"
 
     @staticmethod
     def _update_runtime(

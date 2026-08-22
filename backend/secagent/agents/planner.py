@@ -21,6 +21,40 @@ class PlanDocument(BaseModel):
     steps: list[PlanStep] = Field(default_factory=list)
 
 
+SAFETY_POLICY_GUIDANCE = {
+    "conservative": {
+        "label": "保守模式",
+        "auto_execute": ["low"],
+        "requires_approval": ["medium"],
+        "must_not_plan": ["high", "forbidden"],
+        "guidance": (
+            "优先规划低风险、被动、只读工具；避免主动验证、提交 payload、"
+            "爆破、破坏性操作和任何越权访问。"
+        ),
+    },
+    "standard": {
+        "label": "标准模式",
+        "auto_execute": ["low"],
+        "requires_approval": ["medium"],
+        "must_not_plan": ["high", "forbidden"],
+        "guidance": (
+            "可以规划必要的中风险验证类动作，但必须给出明确目的；"
+            "高风险和禁止动作不要规划。"
+        ),
+    },
+    "expert": {
+        "label": "专家模式",
+        "auto_execute": ["low"],
+        "requires_approval": ["medium", "high"],
+        "must_not_plan": ["forbidden"],
+        "guidance": (
+            "可以规划中高风险授权验证动作，但必须最小化步骤、说明授权依据，"
+            "并依赖人工确认；禁止动作永远不能规划。"
+        ),
+    },
+}
+
+
 class Planner:
     def __init__(
         self, router: ModelRouter, registry: ToolRegistry, data_dir: Path
@@ -36,6 +70,8 @@ class Planner:
         *,
         observations: dict | None = None,
         replan_round: int = 0,
+        execution_memory: dict | None = None,
+        next_focus: list[str] | None = None,
     ) -> tuple[list[PlanStep], ModelResponse]:
         if replan_round < 0:
             raise ValueError("replan_round must be non-negative")
@@ -68,11 +104,26 @@ class Planner:
                 "http_fetch": {"url": task.target_url},
                 "header_check": {"response": "$http"},
                 "form_extract": {"response": "$http"},
+                "link_extract": {"response": "$http"},
+                "robots_analyzer": {
+                    "base_url": task.target_url,
+                    "response": "$http",
+                },
+                "js_analyzer": {"response": "$http"},
+                "path_normalizer": {
+                    "base_url": task.target_url,
+                    "response": "$http",
+                },
+                "flag_pattern_detector": {"response": "$http"},
             }
         payload = {
             "goal": parsed.goal,
             "replan_round": replan_round,
+            "safety_mode": task.safety_mode.value,
+            "safety_policy": SAFETY_POLICY_GUIDANCE[task.safety_mode.value],
             "observations": observations or {},
+            "next_focus": next_focus or [],
+            "execution_memory": execution_memory or {},
             "allowed_tools": list(allowed_tools),
             "params_by_tool": params_by_tool,
             "risk_by_tool": {
@@ -85,15 +136,23 @@ class Planner:
                 "Run http_fetch before header_check or form_extract.",
                 "header_check must use exactly {'response': '$http'}.",
                 "form_extract must use exactly {'response': '$http'}.",
+                "link_extract, js_analyzer, path_normalizer, and flag_pattern_detector should analyze the latest {'response': '$http'}.",
+                "robots_analyzer can suggest or parse robots.txt from {'base_url': target_url, 'response': '$http'}.",
                 "Do not pass a URL string as the response parameter.",
                 "Use only passive GET/HEAD observations unless explicitly authorized.",
+                "Prefer public discovery steps: links, forms, robots.txt hints, JavaScript route hints, then flag-like pattern detection.",
+                "Do not repeat tool calls listed in execution_memory.successful_tool_calls unless the observations show the earlier call failed or became stale.",
+                "Use next_focus to choose the smallest set of new evidence-gathering steps.",
             ]
         response = await self.router.complete(
             ModelStage.PLAN,
             ModelRequest(
                 system=(
-                    "Generate a minimal executable plan using only the provided "
-                    "allowlisted tools and parameter templates."
+                    "生成最小可执行安全分析计划，只能使用用户提供的白名单工具和参数模板。"
+                    "必须遵守 payload.safety_policy：低风险工具可自动执行，"
+                    "requires_approval 中的风险等级可以规划但需要人工确认，"
+                    "must_not_plan 中的风险等级不得规划。"
+                    "每一步 purpose 要说明为什么需要该工具以及它要补充哪类证据。"
                 ),
                 user=json.dumps(payload, ensure_ascii=False),
                 response_schema=PlanDocument.model_json_schema(),

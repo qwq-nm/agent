@@ -32,7 +32,16 @@ from secagent.tools.source_tools import (
     SecretScanner,
     SourceScanner,
 )
-from secagent.tools.web_tools import FormExtract, HeaderCheck, UrlGuardTool
+from secagent.tools.web_tools import (
+    FlagPatternDetector,
+    FormExtract,
+    HeaderCheck,
+    JsAnalyzer,
+    LinkExtract,
+    PathNormalizer,
+    RobotsAnalyzer,
+    UrlGuardTool,
+)
 from secagent.security.url_guard import UrlGuard
 
 
@@ -73,6 +82,11 @@ def build_worker_registry(allowed_hosts: set[str]) -> ToolRegistry:
             HttpRequest(guard),
             HeaderCheck(),
             FormExtract(),
+            LinkExtract(),
+            RobotsAnalyzer(),
+            JsAnalyzer(),
+            PathNormalizer(),
+            FlagPatternDetector(),
         ]
     )
 

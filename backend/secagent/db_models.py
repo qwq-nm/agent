@@ -106,6 +106,9 @@ class TaskRow(Base):
     goal: Mapped[str] = mapped_column(Text)
     authorization_scope: Mapped[str] = mapped_column(Text)
     route_mode: Mapped[str] = mapped_column(String(16))
+    safety_mode: Mapped[str] = mapped_column(
+        String(24), default="conservative", server_default="conservative"
+    )
     preferred_model: Mapped[str | None] = mapped_column(String(120), nullable=True)
     scene_hint: Mapped[str | None] = mapped_column(String(40), nullable=True)
     target_url: Mapped[str | None] = mapped_column(Text, nullable=True)

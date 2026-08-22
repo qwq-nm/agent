@@ -49,6 +49,11 @@ class MockProvider:
                 "is_complete": has_evidence,
                 "confidence": 0.9 if has_evidence else 0.0,
                 "reason": "存在可追溯工具证据" if has_evidence else "缺少工具证据",
+                "goal_completed": has_evidence,
+                "should_continue": not has_evidence,
+                "should_report": has_evidence,
+                "next_focus": [] if has_evidence else ["补充白名单工具证据"],
+                "stop_reason": "evidence_sufficient" if has_evidence else None,
                 "missing_evidence": (
                     []
                     if has_evidence

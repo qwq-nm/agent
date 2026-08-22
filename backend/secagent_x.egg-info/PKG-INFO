@@ -11,6 +11,7 @@ Requires-Dist: psycopg[binary]<4,>=3.2
 Requires-Dist: redis<7,>=6
 Requires-Dist: celery[redis]<5.7,>=5.6
 Requires-Dist: PyJWT[crypto]<3,>=2.10
+Requires-Dist: cryptography<47,>=43
 Requires-Dist: argon2-cffi<26,>=23.1
 Requires-Dist: httpx<1,>=0.28
 Requires-Dist: python-multipart<1,>=0.0.20

@@ -7,6 +7,7 @@ psycopg[binary]<4,>=3.2
 redis<7,>=6
 celery[redis]<5.7,>=5.6
 PyJWT[crypto]<3,>=2.10
+cryptography<47,>=43
 argon2-cffi<26,>=23.1
 httpx<1,>=0.28
 python-multipart<1,>=0.0.20
