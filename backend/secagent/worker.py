@@ -115,7 +115,7 @@ async def execute_queued_task(
     lease_seconds: int = 90,
     heartbeat_seconds: int = 15,
     max_auto_retries: int = 1,
-    task_timeout_seconds: int = 300,
+    task_timeout_seconds: int = 1800,
     max_replans: int = 2,
     settings: Settings | None = None,
 ) -> None:

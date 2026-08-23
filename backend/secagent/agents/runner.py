@@ -145,16 +145,61 @@ class AgentRunner:
             plan_data = self._successful_stage(stages, ModelStage.PLAN)
             if plan_data is None:
                 self._append_event(task_id, "agent.planning_started", {})
-                outcome = await self._invoke_model(
-                    task_id,
-                    lease,
-                    budget,
-                    ModelStage.PLAN,
-                    lambda: self.planner.plan(task, parsed),
+                prior_snapshot = self.ledger.snapshot(task_id)
+                has_prior_execution = bool(
+                    prior_snapshot["steps"]
+                    or prior_snapshot["tool_calls"]
+                    or prior_snapshot["evidences"]
                 )
+                prior_observations = (
+                    self.critic.observation_summary(task_id)
+                    if has_prior_execution
+                    else None
+                )
+                prior_memory = (
+                    self._planner_execution_memory(prior_snapshot)
+                    if has_prior_execution
+                    else None
+                )
+                try:
+                    outcome = await self._invoke_model(
+                        task_id,
+                        lease,
+                        budget,
+                        ModelStage.PLAN,
+                        lambda: self.planner.plan(
+                            task,
+                            parsed,
+                            observations=prior_observations,
+                            replan_round=1 if has_prior_execution else 0,
+                            execution_memory=prior_memory,
+                        ),
+                    )
+                except (BudgetExceeded, ProviderFailure) as exc:
+                    if not has_prior_execution:
+                        raise
+                    reason = self._model_failure_stop_reason(exc, ModelStage.PLAN)
+                    self._append_event(
+                        task_id,
+                        "agent.planning_failed_with_prior_evidence",
+                        {
+                            "stage": ModelStage.PLAN.value,
+                            "reason": reason,
+                            "prior_evidence_count": len(prior_snapshot["evidences"]),
+                            "prior_tool_call_count": len(prior_snapshot["tool_calls"]),
+                        },
+                    )
+                    return TaskRunResult(
+                        task_id=task_id,
+                        status=TaskStatus.FAILED_RETRYABLE,
+                        is_demo=self._is_demo(task_id),
+                        report=None,
+                    )
                 plan = outcome.value
-                replan_round = 0
-                step_start_index = 1
+                replan_round = 1 if has_prior_execution else 0
+                step_start_index = (
+                    len(prior_snapshot["steps"]) + 1 if has_prior_execution else 1
+                )
                 checkpoint_plan = self._plan_checkpoint(
                     plan, replan_round, step_start_index
                 )
@@ -417,20 +462,41 @@ class AgentRunner:
                     "agent.planning_started",
                     {"replan_round": replan_round},
                 )
-                outcome = await self._invoke_model(
-                    task_id,
-                    lease,
-                    budget,
-                    ModelStage.PLAN,
-                    lambda: self.planner.plan(
-                        task,
-                        parsed,
-                        observations=observations,
-                        replan_round=replan_round,
-                        execution_memory=self._planner_execution_memory(snapshot),
-                        next_focus=critic.next_focus,
-                    ),
-                )
+                try:
+                    outcome = await self._invoke_model(
+                        task_id,
+                        lease,
+                        budget,
+                        ModelStage.PLAN,
+                        lambda: self.planner.plan(
+                            task,
+                            parsed,
+                            observations=observations,
+                            replan_round=replan_round,
+                            execution_memory=self._planner_execution_memory(snapshot),
+                            next_focus=critic.next_focus,
+                        ),
+                    )
+                except (BudgetExceeded, ProviderFailure) as exc:
+                    if not self._has_evidence(task_id):
+                        raise
+                    reason = self._model_failure_stop_reason(exc, ModelStage.PLAN)
+                    self._append_event(
+                        task_id,
+                        "agent.replanning_failed",
+                        {
+                            "replan_round": replan_round,
+                            "stage": ModelStage.PLAN.value,
+                            "reason": reason,
+                            "next_focus": critic.next_focus[:8],
+                        },
+                    )
+                    return TaskRunResult(
+                        task_id=task_id,
+                        status=TaskStatus.FAILED_RETRYABLE,
+                        is_demo=self._is_demo(task_id),
+                        report=None,
+                    )
                 plan = outcome.value
                 checkpoint_plan = self._plan_checkpoint(
                     plan, replan_round, step_start_index
@@ -737,6 +803,33 @@ class AgentRunner:
             errors=errors,
         )
 
+    @staticmethod
+    def _model_failure_stop_reason(exc: BaseException, stage: ModelStage) -> str:
+        stage_label = {
+            ModelStage.TASK_PARSE: "任务理解",
+            ModelStage.PLAN: "计划生成",
+            ModelStage.CRITIC: "证据复核",
+            ModelStage.REPORT: "报告生成",
+        }[stage]
+        if isinstance(exc, BudgetExceeded):
+            if exc.dimension == "deadline":
+                return f"{stage_label}阶段未能在后台超时保护时间内完成。"
+            return f"{stage_label}阶段触发后台安全限制：{exc.dimension}。"
+        if isinstance(exc, ProviderFailure):
+            code_label = {
+                "auth": "API Key 或鉴权失败",
+                "rate_limit": "模型额度或频率限制",
+                "server": "模型服务端异常",
+                "timeout": "模型请求超时",
+                "network": "网络连接异常",
+                "empty_content": "模型返回内容为空",
+                "truncated": "模型输出被截断",
+                "invalid_json": "模型返回不是有效 JSON",
+                "invalid_schema": "模型返回结构不符合系统要求",
+            }.get(exc.code.value, exc.code.value)
+            return f"{stage_label}阶段模型调用失败：{code_label}。"
+        return f"{stage_label}阶段发生未预期错误：{type(exc).__name__}。"
+
     def _save_report_artifact(
         self, task_id: str, lease: JobLease, report_artifact: ReportArtifact
     ) -> None:
@@ -805,6 +898,22 @@ class AgentRunner:
                     "summary": str(result.get("summary", ""))[:256],
                 }
             )
+        failed = []
+        for call in snapshot["tool_calls"]:
+            try:
+                result = ToolResult.model_validate(call["result"])
+            except (TypeError, ValueError):
+                continue
+            if call.get("status") == "completed" and result.success:
+                continue
+            failed.append(
+                {
+                    "tool_name": str(call.get("tool_name", ""))[:80],
+                    "status": str(call.get("status", ""))[:40],
+                    "summary": result.summary[:180],
+                    "error": result.error[:120] if result.error else None,
+                }
+            )
         evidence_urls = []
         seen_urls: set[str] = set()
         latest_evidence = []
@@ -813,22 +922,87 @@ class AgentRunner:
             url = metadata.get("url") if isinstance(metadata, dict) else None
             if isinstance(url, str) and url not in seen_urls:
                 seen_urls.add(url)
-                evidence_urls.append(url[:512])
-        for evidence in snapshot["evidences"][-20:]:
+                evidence_urls.append(url[:180])
+        for evidence in snapshot["evidences"][-6:]:
             latest_evidence.append(
                 {
                     "evidence_type": str(evidence.get("evidence_type", ""))[:80],
-                    "source": str(evidence.get("source", ""))[:160],
-                    "content": str(evidence.get("content", ""))[:500],
+                    "source": str(evidence.get("source", ""))[:120],
+                    "content": cls._compact_text(evidence.get("content", ""), 220),
                     "confidence": evidence.get("confidence"),
                 }
             )
+        runtime_memory = cls._compact_runtime_memory(snapshot.get("runtime_memory", {}))
         return {
-            "successful_tool_calls": successful[-20:],
-            "evidence_urls": evidence_urls[-30:],
+            "memory_policy": (
+                "这里只提供压缩后的任务记忆；原始证据仍保存在证据账本。"
+                "规划下一步时优先依据 latest_evidence、runtime_memory 和 failed_tool_calls。"
+            ),
+            "evidence_count": len(snapshot.get("evidences", [])),
+            "tool_call_count": len(snapshot.get("tool_calls", [])),
+            "successful_tool_calls": successful[-8:],
+            "failed_tool_calls": failed[-5:],
+            "evidence_urls": evidence_urls[-12:],
             "latest_evidence": latest_evidence,
-            "runtime_memory": snapshot.get("runtime_memory", {}),
+            "runtime_memory": runtime_memory,
         }
+
+    @staticmethod
+    def _compact_text(value: Any, limit: int) -> str:
+        text = " ".join(str(value).split())
+        if len(text) <= limit:
+            return text
+        return f"{text[:limit]}..."
+
+    @classmethod
+    def _compact_runtime_memory(cls, memory: Any) -> dict[str, Any]:
+        if not isinstance(memory, dict):
+            return {}
+        list_limits = {
+            "visited_urls": 8,
+            "queued_urls": 8,
+            "discovered_links": 10,
+            "forms": 5,
+            "parameters": 12,
+            "cookies": 8,
+            "js_files": 8,
+            "api_endpoints": 8,
+            "robots_paths": 8,
+            "sensitive_paths": 8,
+            "candidate_flags": 8,
+            "interesting_findings": 8,
+            "failed_tools": 5,
+            "tool_result_summary": 8,
+        }
+        compact: dict[str, Any] = {}
+        for key, limit in list_limits.items():
+            value = memory.get(key)
+            if isinstance(value, list):
+                compact[key] = [cls._compact_memory_item(item) for item in value[-limit:]]
+        if memory.get("last_new_evidence_at"):
+            compact["last_new_evidence_at"] = memory["last_new_evidence_at"]
+        return compact
+
+    @classmethod
+    def _compact_memory_item(cls, item: Any) -> Any:
+        if isinstance(item, str):
+            return cls._compact_text(item, 180)
+        if isinstance(item, dict):
+            compact: dict[str, Any] = {}
+            for key, value in item.items():
+                if isinstance(value, str):
+                    compact[key] = cls._compact_text(value, 160)
+                elif isinstance(value, list):
+                    compact[key] = [cls._compact_memory_item(v) for v in value[:8]]
+                elif isinstance(value, dict):
+                    compact[key] = {
+                        str(k)[:80]: cls._compact_memory_item(v)
+                        for k, v in list(value.items())[:8]
+                    }
+                else:
+                    compact[key] = value
+            return compact
+        return item
 
     @staticmethod
     def _tool_result_key(tool_name: str, params: dict[str, Any]) -> str:

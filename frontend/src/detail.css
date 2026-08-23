@@ -10,6 +10,48 @@
 .authorization-brief strong { color: #eaf3ff; font-size: 13px; }
 .authorization-brief p { margin: 6px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
 .task-actions { min-height: 64px; display: flex; align-items: center; gap: 9px; }
+.task-board { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: stretch; }
+.board-panel { min-width: 0; margin: 0 !important; }
+.task-board > .panel { display: flex; flex-direction: column; border-radius: 10px; overflow: hidden; }
+.task-board > .panel > .panel-title, .task-board > .panel > .tabs { flex: 0 0 auto; }
+.task-board .current-execution, .task-board .live-plan-panel { height: 360px; }
+.task-board .detail-column, .task-board .evidence-live-panel { height: 640px; }
+.task-board .agent-loop-panel, .task-board .runtime-memory-panel { height: 620px; }
+.task-board .plan-preview, .task-board .decision-panel { height: 430px; }
+.task-board .plan-preview { grid-column: 1 / -1; }
+.task-board .plan-preview.collapsed { height: auto; min-height: 0; }
+.task-board .decision-panel { grid-column: 1 / -1; }
+.task-board.is-live .live-plan-panel, .task-board.is-live .evidence-live-panel, .task-board.is-live .current-execution { box-shadow: 0 0 0 1px rgba(53,216,230,.07), 0 18px 56px rgba(0,0,0,.18); }
+.live-plan-panel { border-radius: 10px; overflow: hidden; }
+.live-plan-list { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 12px; }
+.live-plan-list article { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 10px; align-items: start; padding: 10px; margin-bottom: 8px; background: rgba(3,13,24,.38); border: 1px solid var(--line); border-radius: 7px; }
+.plan-round { margin: 0 0 12px; padding: 10px; border: 1px solid rgba(53,216,230,.16); border-radius: 8px; background: rgba(3,13,24,.22); }
+.plan-round > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0 0 8px; padding: 0 2px 8px; border-bottom: 1px solid rgba(120,157,195,.16); }
+.plan-round > header strong { color: #eaf3ff; font-size: 11px; }
+.plan-round > header small { color: var(--muted); font-size: 10px; }
+.plan-round article:last-child { margin-bottom: 0; }
+.live-plan-list article.active { border-color: rgba(53,216,230,.55); box-shadow: 0 0 0 1px rgba(53,216,230,.1), 0 0 22px rgba(53,216,230,.08); }
+.live-plan-list article.waiting { border-color: rgba(244,199,125,.48); background: rgba(244,199,125,.08); }
+.live-plan-list article.planning-next { border-color: rgba(53,216,230,.55); background: rgba(53,216,230,.07); }
+.live-plan-list article.active span { animation: live-pulse 1.2s ease-in-out infinite; }
+.live-plan-list article > span { display: grid; place-items: center; width: 26px; height: 26px; color: var(--cyan); border: 1px solid rgba(53,216,230,.38); border-radius: 50%; font: 700 10px ui-monospace, monospace; }
+.live-plan-list strong, .live-plan-list small { display: block; overflow-wrap: anywhere; }
+.live-plan-list strong { color: #eaf3ff; font-size: 12px; line-height: 1.45; }
+.live-plan-list small { margin-top: 4px; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.task-board .current-execution .execution-grid { flex: 0 0 auto; }
+.task-board .current-execution { min-height: 0; overflow: auto; }
+.task-board .current-execution > :not(.panel-title) { flex: 0 0 auto; }
+.task-board .agent-loop-grid, .task-board .decision-body { flex: 1 1 auto; min-height: 0; overflow: hidden; }
+.task-board .agent-loop-grid article { min-height: 0; max-height: none; }
+.task-board .decision-body article { min-height: 0; max-height: none; }
+.task-board .runtime-memory-panel .memory-grid { flex: 1 1 auto; min-height: 0; overflow: auto; }
+.task-board .plan-preview:not(.collapsed) { overflow: auto; scroll-padding-bottom: 48px; }
+.task-board .plan-preview.collapsed .plan-collapsed-summary { flex: 1 1 auto; overflow: auto; }
+.task-board .plan-preview .plan-step-list { flex: 0 0 auto; min-height: auto; overflow: visible; padding-bottom: 48px; }
+.live-plan-list::-webkit-scrollbar { width: 8px; height: 8px; }
+.live-plan-list::-webkit-scrollbar-track { background: rgba(3,13,24,.45); border-radius: 999px; }
+.live-plan-list::-webkit-scrollbar-thumb { background: rgba(120,157,195,.26); border: 2px solid rgba(3,13,24,.45); border-radius: 999px; }
+.live-plan-list::-webkit-scrollbar-thumb:hover { background: rgba(53,216,230,.36); }
 .ghost-button, .warning-button { padding: 9px 14px; color: #dce8f6; background: rgba(15,33,53,.8); border: 1px solid var(--line); border-radius: 7px; cursor: pointer; }
 .warning-button { color: #f4c77d; border-color: rgba(244,199,125,.35); }
 .ghost-button.danger { color: var(--danger); }
@@ -58,24 +100,24 @@
 .agent-loop-panel { margin: 0 0 18px; border-radius: 10px; overflow: hidden; }
 .agent-loop-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; padding: 16px 18px 18px; align-items: stretch; }
 .agent-loop-grid article { min-height: 520px; max-height: 520px; overflow: auto; padding: 14px; background: rgba(3,13,24,.34); border: 1px solid var(--line); border-radius: 8px; }
-.agent-loop-grid article, .memory-grid article, .decision-body article, .detail-column .timeline-wrap, .evidence-list, .route-list, .tool-call-list, .run-log-list {
+.agent-loop-grid article, .memory-grid article, .memory-grid, .decision-body article, .detail-column .timeline-wrap, .task-board .current-execution, .task-board .plan-preview, .evidence-list, .route-list, .tool-call-list, .run-log-list {
   scrollbar-color: rgba(120,157,195,.26) rgba(3,13,24,.45);
   scrollbar-width: thin;
 }
-.agent-loop-grid article::-webkit-scrollbar, .memory-grid article::-webkit-scrollbar, .decision-body article::-webkit-scrollbar, .detail-column .timeline-wrap::-webkit-scrollbar, .evidence-list::-webkit-scrollbar, .route-list::-webkit-scrollbar, .tool-call-list::-webkit-scrollbar, .run-log-list::-webkit-scrollbar {
+.agent-loop-grid article::-webkit-scrollbar, .memory-grid article::-webkit-scrollbar, .memory-grid::-webkit-scrollbar, .decision-body article::-webkit-scrollbar, .detail-column .timeline-wrap::-webkit-scrollbar, .task-board .current-execution::-webkit-scrollbar, .task-board .plan-preview::-webkit-scrollbar, .evidence-list::-webkit-scrollbar, .route-list::-webkit-scrollbar, .tool-call-list::-webkit-scrollbar, .run-log-list::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
-.agent-loop-grid article::-webkit-scrollbar-track, .memory-grid article::-webkit-scrollbar-track, .decision-body article::-webkit-scrollbar-track, .detail-column .timeline-wrap::-webkit-scrollbar-track, .evidence-list::-webkit-scrollbar-track, .route-list::-webkit-scrollbar-track, .tool-call-list::-webkit-scrollbar-track, .run-log-list::-webkit-scrollbar-track {
+.agent-loop-grid article::-webkit-scrollbar-track, .memory-grid article::-webkit-scrollbar-track, .memory-grid::-webkit-scrollbar-track, .decision-body article::-webkit-scrollbar-track, .detail-column .timeline-wrap::-webkit-scrollbar-track, .task-board .current-execution::-webkit-scrollbar-track, .task-board .plan-preview::-webkit-scrollbar-track, .evidence-list::-webkit-scrollbar-track, .route-list::-webkit-scrollbar-track, .tool-call-list::-webkit-scrollbar-track, .run-log-list::-webkit-scrollbar-track {
   background: rgba(3,13,24,.45);
   border-radius: 999px;
 }
-.agent-loop-grid article::-webkit-scrollbar-thumb, .memory-grid article::-webkit-scrollbar-thumb, .decision-body article::-webkit-scrollbar-thumb, .detail-column .timeline-wrap::-webkit-scrollbar-thumb, .evidence-list::-webkit-scrollbar-thumb, .route-list::-webkit-scrollbar-thumb, .tool-call-list::-webkit-scrollbar-thumb, .run-log-list::-webkit-scrollbar-thumb {
+.agent-loop-grid article::-webkit-scrollbar-thumb, .memory-grid article::-webkit-scrollbar-thumb, .memory-grid::-webkit-scrollbar-thumb, .decision-body article::-webkit-scrollbar-thumb, .detail-column .timeline-wrap::-webkit-scrollbar-thumb, .task-board .current-execution::-webkit-scrollbar-thumb, .task-board .plan-preview::-webkit-scrollbar-thumb, .evidence-list::-webkit-scrollbar-thumb, .route-list::-webkit-scrollbar-thumb, .tool-call-list::-webkit-scrollbar-thumb, .run-log-list::-webkit-scrollbar-thumb {
   background: rgba(120,157,195,.26);
   border: 2px solid rgba(3,13,24,.45);
   border-radius: 999px;
 }
-.agent-loop-grid article::-webkit-scrollbar-thumb:hover, .memory-grid article::-webkit-scrollbar-thumb:hover, .decision-body article::-webkit-scrollbar-thumb:hover, .detail-column .timeline-wrap::-webkit-scrollbar-thumb:hover, .evidence-list::-webkit-scrollbar-thumb:hover, .route-list::-webkit-scrollbar-thumb:hover, .tool-call-list::-webkit-scrollbar-thumb:hover, .run-log-list::-webkit-scrollbar-thumb:hover {
+.agent-loop-grid article::-webkit-scrollbar-thumb:hover, .memory-grid article::-webkit-scrollbar-thumb:hover, .memory-grid::-webkit-scrollbar-thumb:hover, .decision-body article::-webkit-scrollbar-thumb:hover, .detail-column .timeline-wrap::-webkit-scrollbar-thumb:hover, .task-board .current-execution::-webkit-scrollbar-thumb:hover, .task-board .plan-preview::-webkit-scrollbar-thumb:hover, .evidence-list::-webkit-scrollbar-thumb:hover, .route-list::-webkit-scrollbar-thumb:hover, .tool-call-list::-webkit-scrollbar-thumb:hover, .run-log-list::-webkit-scrollbar-thumb:hover {
   background: rgba(53,216,230,.36);
 }
 .agent-loop-grid h3 { margin: 0 0 8px; color: #eaf3ff; font-size: 13px; }
@@ -119,7 +161,7 @@
 .decision-body p { margin: 7px 0; color: #c7d5e5; font-size: 12px; line-height: 1.65; }
 .decision-body code { color: var(--cyan); }
 .detail-grid { display: grid; grid-template-columns: minmax(0, 1.18fr) minmax(390px, .82fr); gap: 18px; align-items: stretch; }
-.detail-column, .evidence-column { height: min(780px, calc(100vh - 110px)); display: flex; flex-direction: column; border-radius: 10px; overflow: hidden; }
+.detail-grid .detail-column, .detail-grid .evidence-column { height: min(780px, calc(100vh - 110px)); display: flex; flex-direction: column; border-radius: 10px; overflow: hidden; }
 .detail-column .timeline-wrap { flex: 1 1 auto; min-height: 0; overflow: auto; }
 .evidence-column > .panel-title, .detail-column > .panel-title, .evidence-column > .tabs { flex: 0 0 auto; }
 .panel-title { display: flex; justify-content: space-between; align-items: center; padding: 20px 22px; border-bottom: 1px solid var(--line); }
@@ -134,6 +176,8 @@
 .timeline-item:last-child .timeline-rail::after { display: none; }
 .timeline-rail span { display: grid; place-items: center; width: 27px; height: 27px; color: var(--cyan); border: 1px solid rgba(53,216,230,.35); border-radius: 50%; font: 700 10px ui-monospace, monospace; }
 .timeline-card { margin-bottom: 17px; padding: 15px; background: rgba(3,13,24,.38); border: 1px solid var(--line); border-radius: 7px; }
+.timeline-card.is-current { border-color: rgba(53,216,230,.58); box-shadow: 0 0 0 1px rgba(53,216,230,.12), 0 0 26px rgba(53,216,230,.08); }
+.timeline-card.is-current .status-badge { animation: live-pulse 1.2s ease-in-out infinite; }
 .timeline-card.needs-approval { border-color: rgba(244,199,125,.46); box-shadow: 0 0 0 1px rgba(244,199,125,.08); }
 .timeline-card header { display: flex; justify-content: space-between; gap: 16px; }
 .timeline-card header strong, .timeline-card header small { display: block; }
@@ -239,4 +283,5 @@
 .system-panel article { display: grid; grid-template-columns: 1fr .8fr .6fr; gap: 12px; padding: 12px 0; border-top: 1px solid var(--line); align-items: center; }
 .system-panel article span { color: var(--muted); }
 .system-panel article b { color: var(--green); font-size: 10px; text-align: right; }
+@media (max-width: 1280px) { .task-board { grid-template-columns: 1fr; } .task-board .current-execution, .task-board .live-plan-panel, .task-board .detail-column, .task-board .evidence-live-panel, .task-board .agent-loop-panel, .task-board .runtime-memory-panel, .task-board .plan-preview, .task-board .decision-panel { height: auto; max-height: 680px; } }
 @media (max-width: 1050px) { .decision-body, .detail-grid, .memory-grid, .report-layout, .plan-understanding, .plan-summary, .plan-lists, .plan-step-list dl { grid-template-columns: 1fr; } .memory-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } .approval-banner { align-items: stretch; flex-direction: column; } }

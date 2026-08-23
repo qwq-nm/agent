@@ -34,6 +34,8 @@ services:
       REDIS_URL: redis://redis:6379/0
       DATA_DIR: /data
       MODEL_MODE: ${MODEL_MODE:-mock}
+      MODEL_TIMEOUT_SECONDS: ${MODEL_TIMEOUT_SECONDS:-600}
+      TASK_TIMEOUT_SECONDS: ${TASK_TIMEOUT_SECONDS:-1800}
       JWT_SIGNING_KEY: ${JWT_SIGNING_KEY:-local-development-signing-key-change-me}
       PROVIDER_CREDENTIAL_ENCRYPTION_KEY: ${PROVIDER_CREDENTIAL_ENCRYPTION_KEY:-}
       PROVIDER_CREDENTIAL_ENCRYPTION_KEY_FILE: /run/secrets/provider_credential_encryption_key
@@ -71,6 +73,8 @@ services:
       REDIS_URL: redis://redis:6379/0
       DATA_DIR: /data
       MODEL_MODE: ${MODEL_MODE:-mock}
+      MODEL_TIMEOUT_SECONDS: ${MODEL_TIMEOUT_SECONDS:-600}
+      TASK_TIMEOUT_SECONDS: ${TASK_TIMEOUT_SECONDS:-1800}
       JWT_SIGNING_KEY: ${JWT_SIGNING_KEY:-local-development-signing-key-change-me}
       PROVIDER_CREDENTIAL_ENCRYPTION_KEY: ${PROVIDER_CREDENTIAL_ENCRYPTION_KEY:-}
       PROVIDER_CREDENTIAL_ENCRYPTION_KEY_FILE: /run/secrets/provider_credential_encryption_key

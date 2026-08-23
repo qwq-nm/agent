@@ -83,7 +83,7 @@ class TaskService:
         lease_seconds: int = 90,
         heartbeat_seconds: int = 15,
         max_auto_retries: int = 1,
-        task_timeout_seconds: int = 300,
+        task_timeout_seconds: int = 1800,
         max_replans: int = 2,
         heartbeat_session_factory=None,
     ) -> None:
@@ -350,16 +350,19 @@ class TaskService:
                     {"command_id": command_id, "error_type": type(exc).__name__},
                 )
                 raise
+            final_job_status = (
+                "completed" if result.status is TaskStatus.COMPLETED else "failed"
+            )
             finished = self.job_service.finish(
-                lease.job_run_id, lease.worker_id, "completed"
+                lease.job_run_id, lease.worker_id, final_job_status
             )
             self.repository.record_audit(
                 None,
                 "task.execute",
                 "task",
                 task_id,
-                "success" if finished else "stale",
-                {"command_id": command_id},
+                final_job_status if finished else "stale",
+                {"command_id": command_id, "task_status": result.status.value},
             )
             return result if finished else None
         finally:

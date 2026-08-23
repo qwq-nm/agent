@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import type { TaskDetail } from '../types'
 import {
   providerName,
@@ -17,7 +17,11 @@ import {
 
 const props = defineProps<{
   task: TaskDetail
+  live?: boolean
 }>()
+
+const modelLoop = ref<HTMLElement | null>(null)
+const toolLoop = ref<HTMLElement | null>(null)
 
 const recentModelCalls = computed(() => props.task.model_calls.slice(-8))
 const recentToolCalls = computed(() => props.task.tool_calls.slice(-8))
@@ -70,10 +74,23 @@ const evidenceFeedback = computed(() => {
   }
   return `最近一次工具“${toolNameLabel(latest.tool_name)}”未成功，反馈为：${toolResultSummaryLabel(latest.result)}`
 })
+
+async function focusLatestLoopItems() {
+  if (!props.live) return
+  await nextTick()
+  modelLoop.value?.lastElementChild?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  toolLoop.value?.lastElementChild?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+}
+
+onMounted(focusLatestLoopItems)
+watch(
+  () => [props.task.model_calls.length, props.task.tool_calls.length, props.task.steps.map((step) => step.status).join('|')],
+  () => void focusLatestLoopItems(),
+)
 </script>
 
 <template>
-  <section class="panel agent-loop-panel">
+  <section class="panel agent-loop-panel" :class="{ 'is-live': live }">
     <header class="panel-title compact-title">
       <div>
         <p class="eyebrow">AGENT LOOP</p>
@@ -87,7 +104,7 @@ const evidenceFeedback = computed(() => {
         <h3>模型决策过程</h3>
         <p v-for="note in taskDecisionNotes" :key="note">{{ note }}</p>
         <p>{{ evidenceFeedback }}</p>
-        <ol v-if="recentModelCalls.length" class="loop-list">
+        <ol v-if="recentModelCalls.length" ref="modelLoop" class="loop-list">
           <li v-for="call in recentModelCalls" :key="call.id">
             <strong>{{ stageLabel(call.stage) }}</strong>
             <span>{{ modelNodeDetail(call) }}</span>
@@ -102,7 +119,7 @@ const evidenceFeedback = computed(() => {
         <p>
           以下内容来自本任务的实际工具调用记录。工具输出写入证据账本后，会作为模型复核、重规划和报告生成的上下文。
         </p>
-        <ol v-if="recentToolCalls.length" class="loop-list tool-loop-list">
+        <ol v-if="recentToolCalls.length" ref="toolLoop" class="loop-list tool-loop-list">
           <li v-for="call in recentToolCalls" :key="call.id">
             <strong>{{ stepNameLabel(call) }}</strong>
             <span>{{ toolNameLabel(call.tool_name) }} · {{ statusLabel(call.status) }}</span>

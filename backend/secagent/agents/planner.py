@@ -131,6 +131,7 @@ class Planner:
         payload = {
             "goal": parsed.goal,
             "replan_round": replan_round,
+            "max_plan_steps": 2,
             "safety_mode": task.safety_mode.value,
             "safety_policy": SAFETY_POLICY_GUIDANCE[task.safety_mode.value],
             "observations": observations or {},
@@ -145,6 +146,9 @@ class Planner:
         }
         if parsed.scene in {TaskScene.WEB_ANALYSIS, TaskScene.CTF_WEB}:
             payload["web_planning_rules"] = [
+                "每一轮只规划 1-2 个最有价值的下一步，不要一次性罗列所有工具；执行后由 Critic 复核证据，再决定是否继续。",
+                "必须根据 observations、next_focus 和 execution_memory 判断当前页面类型与证据缺口，再选择工具；禁止把允许工具按顺序轮询一遍。",
+                "login_probe 只是候选工具，不是发现 password 字段后的固定动作；只有 AI 根据页面文本、表单字段、错误提示、注册入口、Cookie 变化和题目目标判断登录探测有价值时，才允许规划，并且必须等待人工确认。",
                 "在执行 header_check、form_extract、link_extract、js_analyzer、path_normalizer、flag_pattern_detector、cookie_analyzer 或 sensitive_file_checker 前，必须先通过 http_fetch 获得结构化 HTTP 响应。",
                 "header_check 和 form_extract 的参数必须严格使用 {'response': '$http'}。",
                 "link_extract、js_analyzer、path_normalizer、flag_pattern_detector、cookie_analyzer 和 sensitive_file_checker 应分析最新的 {'response': '$http'}。",
@@ -162,6 +166,8 @@ class Planner:
             ]
         if parsed.scene is TaskScene.CTF_WEB:
             payload["ctf_web_rules"] = [
+                "CTF Web 场景也必须证据驱动：先判断页面是登录、注册、搜索、上传、静态提示、前端路由还是目录/源码泄露方向，再选择最小必要工具。",
+                "发现登录表单后，先判断是否存在注册入口、忘记密码/密保字段、默认账号线索、JS 校验或错误提示；不满足登录探测条件时，不要机械调用 login_probe。",
                 "允许规划 dirsearch_scan 进行授权范围内的标准 dirsearch 路径发现；该工具属于中风险，必须经过人工确认，不得用于未授权目标。",
                 "如果页面由 JavaScript 渲染、普通 HTTP 响应看不到题目内容或 flag 线索，应规划 browser_snapshot；该工具属于中风险，必须经过人工确认。",
                 "如已发现登录表单、登录路径、后台入口或题目明显指向弱口令/万能密码方向，可在专家模式下规划 login_probe；它只做小规模常规弱口令和万能密码探测，必须等待人工确认，不得自动执行。",
@@ -178,6 +184,10 @@ class Planner:
             ModelStage.PLAN,
             ModelRequest(
                 system=(
+                    "每次最多返回 payload.max_plan_steps 个步骤；如果还需要更多探索，等待本轮工具执行和 Critic 复核后再重规划。"
+                    "不要把 allowed_tools 当作待执行清单逐个尝试，必须基于当前证据选择最小必要工具。"
+                    "输出必须非常精简：step.name 不超过 18 个汉字，step.purpose 不超过 120 个汉字。"
+                    "不要在 purpose 中复述大段证据、HTML、HTTP 响应或工具原始输出，只写本轮选择该工具的关键依据和要补的证据缺口。"
                     "生成最小可执行安全分析计划，只能使用 payload.allowed_tools 中的白名单工具和 params_by_tool 中给出的参数模板。"
                     "必须遵守 payload.safety_policy：auto_execute 风险等级可自动执行，requires_approval 风险等级可以规划但需要人工确认，"
                     "must_not_plan 风险等级不得规划。"
@@ -197,6 +207,7 @@ class Planner:
             ),
         )
         steps = PlanDocument.model_validate(response.data).steps
+        steps = steps[: int(payload["max_plan_steps"])]
         allowed = set(allowed_tools)
         if any(step.tool_name not in allowed for step in steps):
             raise ValueError("plan selected a tool outside the scene allowlist")

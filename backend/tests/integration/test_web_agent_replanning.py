@@ -6,6 +6,7 @@ import pytest
 
 from secagent.db_models import TaskRow
 from secagent.domain import ModelResponse, RiskLevel, ToolResult
+from secagent.providers.base import ProviderErrorCode, ProviderFailure
 from secagent.providers.mock import MockProvider
 from secagent.providers.router import ModelRouter
 from secagent.tools.base import BaseTool, ToolContext
@@ -181,6 +182,34 @@ class _NeverCompleteDeepSeekStub(_ReplanningDeepSeekStub):
                     "missing_evidence": [
                         {"kind": "factual", "description": "more evidence"}
                     ],
+                },
+                latency_ms=0,
+                prompt_tokens=5,
+                completion_tokens=3,
+            )
+        return await super().complete(request)
+
+
+class _ReplanFailureDeepSeekStub(_ReplanningDeepSeekStub):
+    async def complete(self, request) -> ModelResponse:
+        if request.response_schema.get("title") == "PlanDocument":
+            self.plan_inputs.append(json.loads(request.user))
+            if len(self.plan_inputs) > 1:
+                raise ProviderFailure("deepseek", ProviderErrorCode.TIMEOUT, True)
+            return ModelResponse(
+                provider=self.name,
+                model=self.model,
+                data={
+                    "steps": [
+                        {
+                            "name": "Initial probe",
+                            "purpose": "Collect the first authorized observation",
+                            "tool_name": self.tool_name,
+                            "params": {"probe": "round-1"},
+                            "risk_level": "low",
+                            "need_human_confirm": False,
+                        }
+                    ]
                 },
                 latency_ms=0,
                 prompt_tokens=5,
@@ -745,6 +774,51 @@ def test_web_agent_stops_replanning_when_evidence_does_not_change(
     report = analyst_client.get(f"/api/tasks/{task['id']}/report").text
     assert "阶段性安全分析报告" in report
     assert "最近一轮执行后没有产生新的可追踪证据或线索" in report
+
+
+def test_web_agent_preserves_evidence_when_replan_model_fails(
+    analyst_client, app, fake_queue
+) -> None:
+    deepseek = _ReplanFailureDeepSeekStub()
+    app.state.model_router = ModelRouter(
+        {"glm": _GlmStub(), "deepseek": deepseek}, mode="live"
+    )
+    observation_tool = _ObservationTool()
+    app.state.tool_registry._tools[observation_tool.name] = observation_tool
+    task = analyst_client.post(
+        "/api/tasks",
+        json={
+            "goal": "Preserve evidence if replanning cannot complete",
+            "authorization_scope": "Only the configured target host",
+            "scene_hint": "web_analysis",
+            "target_url": "https://target.test/",
+        },
+    ).json()
+    analyst_client.post(
+        f"/api/tasks/{task['id']}/run",
+        headers={"Idempotency-Key": "web-replan-provider-failure-001"},
+    )
+    job = fake_queue.enqueued[0]
+
+    asyncio.run(
+        execute_queued_task(
+            job.task_id,
+            job.command_id,
+            app.state.session_factory,
+            app.state.model_router,
+            app.state.tool_registry,
+            app.state.settings.data_dir,
+            max_replans=1,
+        )
+    )
+
+    assert len(deepseek.plan_inputs) == 2
+    assert deepseek.critic_calls == 1
+    assert observation_tool.calls == ["round-1"]
+    detail = analyst_client.get(f"/api/tasks/{task['id']}").json()
+    assert detail["status"] == "failed_retryable"
+    assert detail["reports"] == []
+    assert len(detail["evidences"]) == 1
 
 
 def test_web_agent_uses_registered_tool_risk_over_model_risk(

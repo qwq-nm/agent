@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { nextTick, onMounted, ref, watch } from 'vue'
 import type { PendingApproval, TaskStep, ToolCall } from '../types'
 import {
   providerName,
@@ -13,15 +14,17 @@ import {
   toolNameLabel,
 } from '../labels'
 
-defineProps<{
+const props = defineProps<{
   steps: TaskStep[]
   toolCalls?: ToolCall[]
   isDemo?: boolean
   pendingApproval?: PendingApproval | null
   busy?: boolean
+  autoFocus?: boolean
 }>()
 
 const emit = defineEmits<{ approve: [] }>()
+const timelineWrap = ref<HTMLElement | null>(null)
 
 function callForStep(step: TaskStep, toolCalls?: ToolCall[]) {
   return [...(toolCalls || [])].reverse().find((call) => call.step_id === step.id || call.step_name === step.name)
@@ -31,15 +34,43 @@ function reasonForStep(step: TaskStep, call?: ToolCall) {
   if (call) return toolCallReasonLabel(call)
   return step.purpose || '根据当前场景策略和已有证据缺口，系统计划调用该工具补充事实。'
 }
+
+function stepFocusKey() {
+  const approvalId = props.pendingApproval?.step_id
+  const running = props.steps.find((step) => step.status === 'running')
+  const waiting = approvalId ? props.steps.find((step) => step.id === approvalId) : undefined
+  const latestFinished = [...props.steps].reverse().find((step) => step.status !== 'pending')
+  return waiting?.id || running?.id || latestFinished?.id || props.steps.at(-1)?.id || ''
+}
+
+async function focusCurrentStep() {
+  if (!props.autoFocus || !timelineWrap.value) return
+  await nextTick()
+  const target = timelineWrap.value.querySelector<HTMLElement>('.timeline-card.is-current, .timeline-card.needs-approval, .timeline-card.latest-step')
+  target?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+}
+
+onMounted(focusCurrentStep)
+watch(
+  () => [stepFocusKey(), props.steps.map((step) => `${step.id}:${step.status}`).join('|'), props.toolCalls?.length || 0],
+  () => void focusCurrentStep(),
+)
 </script>
 
 <template>
-  <div class="timeline-wrap">
+  <div ref="timelineWrap" class="timeline-wrap">
     <div v-if="isDemo" class="demo-banner">演示结果 · Mock 模型产生的路由与解释</div>
     <p v-if="!steps.length" class="empty-state compact">任务尚未生成执行步骤。</p>
     <article v-for="(step, index) in steps" :key="step.id" class="timeline-item">
       <div class="timeline-rail"><span>{{ index + 1 }}</span></div>
-      <div class="timeline-card" :class="{ 'needs-approval': pendingApproval?.step_id === step.id }">
+      <div
+        class="timeline-card"
+        :class="{
+          'is-current': step.status === 'running',
+          'latest-step': step.id === stepFocusKey(),
+          'needs-approval': pendingApproval?.step_id === step.id,
+        }"
+      >
         <header>
           <div>
             <strong>{{ stepNameLabel(step) }}</strong>

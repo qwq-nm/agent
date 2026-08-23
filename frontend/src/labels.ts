@@ -382,6 +382,7 @@ export function stepImpactExplanationLabel(step: TaskStep, call?: ToolCall) {
 }
 
 export function taskFailureReasonLabel(task: TaskDetail) {
+  if (task.status === 'completed') return null
   const failedStep = [...task.steps].reverse().find((step) => step.status === 'failed' || step.status === 'failed_retryable')
   const failedCall = [...task.tool_calls].reverse().find((call) => {
     const error = resultErrorCode(call.result)

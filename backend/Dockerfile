@@ -6,13 +6,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 COPY pyproject.toml ./
-COPY backend ./backend
-COPY alembic.ini ./alembic.ini
-COPY migrations ./migrations
-RUN pip install --no-cache-dir .
+RUN python -c "import tomllib; data = tomllib.load(open('pyproject.toml', 'rb')); print('\n'.join(data['project']['dependencies']))" > /tmp/requirements.txt \
+    && pip install --no-cache-dir "setuptools>=75" \
+    && pip install --no-cache-dir -r /tmp/requirements.txt
 RUN pip install --no-cache-dir dirsearch sqlmap
 USER root
 RUN python -m playwright install --with-deps chromium
+
+COPY backend ./backend
+COPY alembic.ini ./alembic.ini
+COPY migrations ./migrations
+RUN pip install --no-cache-dir --no-deps --no-build-isolation .
 RUN useradd --create-home --uid 10001 secagent \
     && mkdir -p /data \
     && chown -R secagent:secagent /app /data /ms-playwright

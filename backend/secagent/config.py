@@ -26,14 +26,14 @@ class Settings(BaseSettings):
     provider_credential_encryption_key_file: Path | None = None
     data_dir: Path = Path("data")
     model_mode: str = "auto"
-    model_timeout_seconds: float = 30.0
+    model_timeout_seconds: float = 600.0
     upload_max_bytes: int = 10 * 1024 * 1024
     archive_max_files: int = 200
     archive_max_bytes: int = 50 * 1024 * 1024
     web_allowed_hosts: str = "web-demo"
     max_steps_per_task: int = 20
     max_replans: int = 2
-    task_timeout_seconds: int = 300
+    task_timeout_seconds: int = 1800
 
     deepseek_api_key: str | None = None
     deepseek_api_key_file: Path | None = None

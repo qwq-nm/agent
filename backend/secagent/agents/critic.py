@@ -14,9 +14,9 @@ from secagent.providers.router import ModelRouter
 from secagent.security.redaction import redact_mapping
 from secagent.services.ledger import LedgerService
 
-MAX_OBSERVATIONS = 12
-MAX_OBSERVATION_CONTENT_CHARS = 1024
-MAX_OBSERVATION_SOURCE_CHARS = 256
+MAX_OBSERVATIONS = 8
+MAX_OBSERVATION_CONTENT_CHARS = 360
+MAX_OBSERVATION_SOURCE_CHARS = 160
 
 
 class Critic:

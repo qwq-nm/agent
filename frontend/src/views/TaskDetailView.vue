@@ -16,6 +16,7 @@ import {
   safetyModeLabel,
   sceneLabel,
   statusLabel,
+  stepNameLabel,
   summarizeTaskDecision,
   toolNameLabel,
 } from '../labels'
@@ -45,8 +46,47 @@ const canCancel = computed(() =>
     task.value?.status || '',
   ),
 )
+const isLive = computed(() => ['queued', 'planning', 'running', 'waiting_human'].includes(task.value?.status || ''))
 const decisionSummary = computed(() => (task.value ? summarizeTaskDecision(task.value) : []))
 const latestTool = computed(() => task.value?.tool_calls.at(-1))
+const completedSteps = computed(() => task.value?.steps.filter((step) => step.status === 'success').length || 0)
+const planRounds = computed(() => {
+  const value = task.value
+  if (!value?.steps.length) return []
+  const events = [...(value.task_events || [])]
+    .filter((event) => event.event_type === 'agent.planning_completed')
+    .sort((left, right) => left.id - right.id)
+  const rounds: Array<{ round: number; label: string; steps: typeof value.steps }> = []
+  let offset = 0
+  for (const event of events) {
+    const count = Number(event.payload?.steps || 0)
+    if (!Number.isFinite(count) || count <= 0) continue
+    const round = Number(event.payload?.replan_round || rounds.length)
+    const steps = value.steps.slice(offset, offset + count)
+    if (steps.length) {
+      rounds.push({
+        round,
+        label: round > 0 ? `第 ${round + 1} 轮继续分析规划` : '第 1 轮初始规划',
+        steps,
+      })
+      offset += steps.length
+    }
+  }
+  if (offset < value.steps.length) {
+    rounds.push({
+      round: rounds.length,
+      label: rounds.length ? `第 ${rounds.length + 1} 轮规划` : '第 1 轮规划',
+      steps: value.steps.slice(offset),
+    })
+  }
+  return rounds
+})
+const isWaitingForNextPlan = computed(() =>
+  task.value?.status === 'running' &&
+  Boolean(task.value.steps.length) &&
+  !task.value.steps.some((step) => ['running', 'pending'].includes(step.status)) &&
+  !task.value.pending_approval,
+)
 const currentStage = computed(
   () =>
     task.value?.current_stage ||
@@ -179,47 +219,77 @@ onBeforeUnmount(store.stopWatching)
       <p v-if="error" class="error-message">{{ error }}</p>
     </div>
 
-    <CurrentExecutionPanel :task="task" :busy="busy" @approve="approvalOpen = true" />
+    <div class="task-board" :class="{ 'is-live': isLive }">
+      <CurrentExecutionPanel class="board-panel" :task="task" :busy="busy" @approve="approvalOpen = true" />
 
-    <RuntimeMemoryPanel :memory="task.runtime_memory" />
-
-    <AgentLoopPanel :task="task" />
-
-    <PlanPreviewPanel
-      :preview="task.plan_preview"
-      :can-start="task.status === 'planned'"
-      :busy="busy"
-      :default-collapsed="task.status !== 'planned'"
-      @start="action('run')"
-    />
-
-    <section class="panel decision-panel">
-      <header class="panel-title">
-        <div>
-          <p class="eyebrow">AGENT DECISION</p>
-          <h2>决策依据与证据链</h2>
+      <section class="panel live-plan-panel board-panel">
+        <header class="panel-title compact-title">
+          <div>
+            <p class="eyebrow">LIVE PLAN</p>
+            <h2>执行计划</h2>
+          </div>
+          <span>{{ completedSteps }}/{{ task.steps.length || task.plan_preview?.steps.length || 0 }} 步</span>
+        </header>
+        <div class="live-plan-list">
+          <section v-for="round in planRounds" :key="round.label" class="plan-round">
+            <header>
+              <strong>{{ round.label }}</strong>
+              <small>{{ round.steps.length }} 步</small>
+            </header>
+            <article
+              v-for="step in round.steps"
+              :key="step.id"
+              :class="{ active: step.status === 'running', waiting: task.pending_approval?.step_id === step.id }"
+            >
+              <span>{{ step.index || task.steps.indexOf(step) + 1 }}</span>
+              <div>
+                <strong>{{ stepNameLabel(step) }}</strong>
+                <small>{{ toolNameLabel(step.tool_name) }} · {{ statusLabel(step.status) }}</small>
+              </div>
+            </article>
+          </section>
+          <article
+            v-for="step in task.steps.slice(0, 0)"
+            :key="step.id"
+            :class="{ active: step.status === 'running', waiting: task.pending_approval?.step_id === step.id }"
+          >
+            <span>{{ step.index || task.steps.indexOf(step) + 1 }}</span>
+            <div>
+              <strong>{{ stepNameLabel(step) }}</strong>
+              <small>{{ toolNameLabel(step.tool_name) }} · {{ statusLabel(step.status) }}</small>
+            </div>
+          </article>
+          <article
+            v-for="step in task.steps.length ? [] : task.plan_preview?.steps || []"
+            :key="`${step.index}-${step.name}`"
+          >
+            <span>{{ step.index }}</span>
+            <div>
+              <strong>{{ step.name }}</strong>
+              <small>{{ toolNameLabel(step.tool_name) }} · 待执行</small>
+            </div>
+          </article>
+          <article v-if="isWaitingForNextPlan" class="active planning-next">
+            <span>{{ task.steps.length + 1 }}</span>
+            <div>
+              <strong>正在生成下一轮执行计划</strong>
+              <small>AI 正在根据证据账本和工具结果重新规划</small>
+            </div>
+          </article>
+          <p v-if="!task.steps.length && !task.plan_preview" class="empty-state compact">尚未生成执行计划。</p>
         </div>
-        <span>中文解释</span>
-      </header>
-      <div class="decision-body">
-        <article>
-          <h3>当前决策状态</h3>
-          <p v-for="line in decisionSummary" :key="line">{{ line }}</p>
-        </article>
-        <article>
-          <h3>证据链说明</h3>
-          <p>证据账本负责保存工具输出、模型决策依据和报告引用，后续结论都应该能回溯到这里。</p>
-          <p v-if="latestTool">
-            最近一次工具调用是“{{ toolNameLabel(latestTool.tool_name) }}”，内部工具名为
-            <code>{{ latestTool.tool_name }}</code>。
-          </p>
-          <p v-else>当前还没有真实工具调用，系统仍处于任务理解或计划生成阶段。</p>
-        </article>
-      </div>
-    </section>
+      </section>
 
-    <div class="detail-grid">
-      <section class="panel detail-column">
+      <PlanPreviewPanel
+        class="board-panel"
+        :preview="task.plan_preview"
+        :can-start="task.status === 'planned'"
+        :busy="busy"
+        :default-collapsed="task.status !== 'planned'"
+        @start="action('run')"
+      />
+
+      <section class="panel detail-column board-panel">
         <header class="panel-title">
           <div>
             <p class="eyebrow">DECISION TRACE</p>
@@ -233,15 +303,16 @@ onBeforeUnmount(store.stopWatching)
           :is-demo="task.is_demo"
           :pending-approval="task.pending_approval"
           :busy="busy"
+          :auto-focus="isLive"
           @approve="approvalOpen = true"
         />
       </section>
 
-      <aside class="panel evidence-column">
+      <section class="panel evidence-live-panel board-panel">
         <header class="panel-title">
           <div>
             <p class="eyebrow">EVIDENCE LEDGER</p>
-            <h2>证据账本</h2>
+            <h2>证据与工具</h2>
           </div>
           <span>{{ task.evidences.length }} 条</span>
         </header>
@@ -251,7 +322,7 @@ onBeforeUnmount(store.stopWatching)
           <button :class="{ active: tab === 'models' }" @click="tab = 'models'">模型</button>
           <button :class="{ active: tab === 'events' }" @click="tab = 'events'">过程</button>
         </div>
-        <EvidencePanel v-if="tab === 'evidence'" :evidences="task.evidences" />
+        <EvidencePanel v-if="tab === 'evidence'" :evidences="task.evidences" :auto-focus="isLive" />
         <div v-else-if="tab === 'tools'" class="tool-call-list">
           <article v-for="call in task.tool_calls" :key="call.id">
             <header>
@@ -268,7 +339,34 @@ onBeforeUnmount(store.stopWatching)
         </div>
         <ModelRoutePanel v-else-if="tab === 'models'" :calls="task.model_calls" />
         <RunLogPanel v-else :events="task.task_events" />
-      </aside>
+      </section>
+
+      <AgentLoopPanel class="board-panel" :task="task" :live="isLive" />
+      <RuntimeMemoryPanel class="board-panel" :memory="task.runtime_memory" />
+
+      <section class="panel decision-panel board-panel">
+        <header class="panel-title">
+          <div>
+            <p class="eyebrow">AGENT DECISION</p>
+            <h2>当前决策摘要</h2>
+          </div>
+          <span>{{ task.model_calls.length }} 次模型节点</span>
+        </header>
+        <div class="decision-body">
+          <article>
+            <h3>系统判断</h3>
+            <p v-for="line in decisionSummary" :key="line">{{ line }}</p>
+          </article>
+          <article>
+            <h3>最近工具结果</h3>
+            <p v-if="latestTool">
+              最近一次工具调用是“{{ toolNameLabel(latestTool.tool_name) }}”，内部工具名为
+              <code>{{ latestTool.tool_name }}</code>。
+            </p>
+            <p v-else>当前还没有真实工具调用，系统仍处于任务理解或计划生成阶段。</p>
+          </article>
+        </div>
+      </section>
     </div>
 
     <ApprovalDialog

@@ -820,8 +820,8 @@ class TaskRepository:
         row = self.session.get(TaskRow, task_id)
         if row is None:
             raise KeyError(task_id)
-        row.orchestration_json = None
-        row.current_step_index = None
+        row.orchestration_json = "{}"
+        row.current_step_index = 0
         if commit:
             self.session.commit()
         else:
@@ -899,12 +899,18 @@ class TaskRepository:
         timeout_seconds: int,
         now: datetime,
     ) -> dict[str, Any]:
-        self.require_job_fence(lease, task_id)
+        job = self.require_job_fence(lease, task_id)
         row = self.session.get(TaskRow, task_id)
         if row is None:
             self.session.rollback()
             raise KeyError(task_id)
-        if row.budget_deadline_at is None:
+        job_started_at = job.started_at or now
+        if job_started_at.tzinfo is None:
+            job_started_at = job_started_at.replace(tzinfo=timezone.utc)
+        current_deadline = row.budget_deadline_at
+        if current_deadline is not None and current_deadline.tzinfo is None:
+            current_deadline = current_deadline.replace(tzinfo=timezone.utc)
+        if current_deadline is None or current_deadline <= job_started_at:
             row.budget_deadline_at = now + timedelta(seconds=timeout_seconds)
             self.session.commit()
         deadline = row.budget_deadline_at
@@ -915,10 +921,16 @@ class TaskRepository:
                 func.count(ModelCallRow.id),
                 func.coalesce(func.sum(ModelCallRow.prompt_tokens), 0),
                 func.coalesce(func.sum(ModelCallRow.completion_tokens), 0),
-            ).where(ModelCallRow.task_id == task_id)
+            ).where(
+                ModelCallRow.task_id == task_id,
+                ModelCallRow.attempt == lease.attempt,
+            )
         ).one()
         step_count = self.session.scalar(
-            select(func.count(TaskStepRow.id)).where(TaskStepRow.task_id == task_id)
+            select(func.count(TaskStepRow.id)).where(
+                TaskStepRow.task_id == task_id,
+                TaskStepRow.created_at >= job_started_at,
+            )
         )
         state = {
             "max_calls": row.max_model_calls,
