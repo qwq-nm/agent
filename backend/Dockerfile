@@ -5,11 +5,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 WORKDIR /app
 
+ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_DEFAULT_TIMEOUT=120 \
+    PIP_RETRIES=10
+
 COPY pyproject.toml ./
 RUN python -c "import tomllib; data = tomllib.load(open('pyproject.toml', 'rb')); print('\n'.join(data['project']['dependencies']))" > /tmp/requirements.txt \
-    && pip install --no-cache-dir "setuptools>=75" \
-    && pip install --no-cache-dir -r /tmp/requirements.txt
-RUN pip install --no-cache-dir dirsearch sqlmap
+    && pip install --no-cache-dir --index-url "$PIP_INDEX_URL" "setuptools>=75" \
+    && pip install --no-cache-dir --index-url "$PIP_INDEX_URL" -r /tmp/requirements.txt
+RUN pip install --no-cache-dir --index-url "$PIP_INDEX_URL" dirsearch sqlmap
 USER root
 RUN python -m playwright install --with-deps chromium
 
