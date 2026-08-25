@@ -24,6 +24,8 @@ const SCENE_LABELS: Record<string, string> = {
   web_analysis: 'Web 被动分析',
   incident_response: '日志应急分析',
   source_audit: '源码安全审计',
+  vulnerability_hunting: '漏洞挖掘',
+  reverse_analysis: '逆向分析',
   policy_review: '策略与风险复核',
 }
 
@@ -73,6 +75,8 @@ const EVIDENCE_TYPE_LABELS: Record<string, string> = {
   login_probe: '登录探测',
   sqlmap_probe: 'sqlmap 探测',
   observation: '观察结果',
+  vulnerability_finding: '漏洞发现',
+  reverse_artifact: '逆向样本观察',
   note: '说明',
 }
 
@@ -101,6 +105,8 @@ const TOOL_LABELS: Record<string, string> = {
   flag_pattern_detector: 'Flag 模式识别',
   cookie_analyzer: 'Cookie 安全属性分析',
   sensitive_file_checker: '敏感文件线索检查',
+  vulnerability_scanner: '漏洞模式扫描',
+  reverse_artifact_analyzer: '逆向样本静态分析',
   report_generator: '报告生成',
 }
 

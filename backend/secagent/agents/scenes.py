@@ -32,6 +32,16 @@ SCENES = {
         ),
         ("source_location",),
     ),
+    TaskScene.VULNERABILITY_HUNTING: ScenePolicy(
+        TaskScene.VULNERABILITY_HUNTING,
+        ("vulnerability_scanner",),
+        ("vulnerability_finding",),
+    ),
+    TaskScene.REVERSE_ANALYSIS: ScenePolicy(
+        TaskScene.REVERSE_ANALYSIS,
+        ("reverse_artifact_analyzer",),
+        ("reverse_artifact",),
+    ),
     TaskScene.WEB_ANALYSIS: ScenePolicy(
         TaskScene.WEB_ANALYSIS,
         (

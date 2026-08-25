@@ -97,7 +97,7 @@ onBeforeUnmount(() => {
     </header>
 
     <div ref="layoutRef" class="report-layout" :class="{ resizing }" :style="reportLayoutStyle">
-      <article class="panel report-document">
+      <article class="panel report-document" data-tour="report-document">
         <p v-if="error" class="error-message">{{ error }}</p>
         <MarkdownReport v-else-if="report" :content="report" />
         <p v-else class="empty-state">选择一项已完成或已生成阶段性报告的任务查看报告。</p>
@@ -111,7 +111,7 @@ onBeforeUnmount(() => {
         @pointerdown="startResize"
       ></button>
 
-      <aside class="panel report-list">
+      <aside class="panel report-list" data-tour="report-list">
         <header class="report-list-header">
           <strong>报告导览</strong>
           <small>{{ tasks.length }} 项</small>

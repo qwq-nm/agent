@@ -283,5 +283,150 @@
 .system-panel article { display: grid; grid-template-columns: 1fr .8fr .6fr; gap: 12px; padding: 12px 0; border-top: 1px solid var(--line); align-items: center; }
 .system-panel article span { color: var(--muted); }
 .system-panel article b { color: var(--green); font-size: 10px; text-align: right; }
+
+/* Detail view: replace the dark translucent blocks with clean light cards. */
+:root[data-theme='light'] .task-meta-row > span,
+:root[data-theme='light'] .task-meta-row > b,
+:root[data-theme='light'] .task-now,
+:root[data-theme='light'] .live-plan-list article,
+:root[data-theme='light'] .plan-round,
+:root[data-theme='light'] .execution-grid article,
+:root[data-theme='light'] .memory-stats article,
+:root[data-theme='light'] .memory-grid article,
+:root[data-theme='light'] .agent-loop-grid article,
+:root[data-theme='light'] .loop-list li,
+:root[data-theme='light'] .plan-understanding article,
+:root[data-theme='light'] .plan-summary article,
+:root[data-theme='light'] .plan-lists article,
+:root[data-theme='light'] .plan-step-list li,
+:root[data-theme='light'] .decision-body article,
+:root[data-theme='light'] .timeline-card,
+:root[data-theme='light'] .evidence-card,
+:root[data-theme='light'] .route-card,
+:root[data-theme='light'] .tool-call-list article,
+:root[data-theme='light'] .run-log-card {
+  color: #172638;
+  background: linear-gradient(145deg, #ffffff 0%, #f2f8fb 100%);
+  border-color: rgba(35, 67, 94, .22);
+  box-shadow: 0 8px 22px rgba(35, 67, 94, .08);
+}
+:root[data-theme='light'] .agent-loop-grid h3,
+:root[data-theme='light'] .agent-loop-grid p,
+:root[data-theme='light'] .agent-loop-grid article,
+:root[data-theme='light'] .loop-list strong,
+:root[data-theme='light'] .plan-round > header strong,
+:root[data-theme='light'] .live-plan-list strong,
+:root[data-theme='light'] .plan-understanding strong,
+:root[data-theme='light'] .plan-summary h3,
+:root[data-theme='light'] .plan-lists h3,
+:root[data-theme='light'] .plan-summary p,
+:root[data-theme='light'] .plan-lists li,
+:root[data-theme='light'] .timeline-explain p,
+:root[data-theme='light'] .timeline-explain b,
+:root[data-theme='light'] .evidence-card p,
+:root[data-theme='light'] .run-log-card p,
+:root[data-theme='light'] .run-log-card strong,
+:root[data-theme='light'] .tool-call-list h3,
+:root[data-theme='light'] .markdown-report,
+:root[data-theme='light'] .markdown-report h1,
+:root[data-theme='light'] .markdown-report h2,
+:root[data-theme='light'] .markdown-report h3,
+:root[data-theme='light'] .markdown-report h4 {
+  color: #172638;
+}
+:root[data-theme='light'] .loop-list span,
+:root[data-theme='light'] .loop-list small,
+:root[data-theme='light'] .memory-grid li,
+:root[data-theme='light'] .memory-grid p,
+:root[data-theme='light'] .memory-form-list span,
+:root[data-theme='light'] .timeline-card dd,
+:root[data-theme='light'] .route-card p,
+:root[data-theme='light'] .tool-call-list pre,
+:root[data-theme='light'] .run-log-card small {
+  color: #52677a;
+}
+:root[data-theme='light'] .task-meta-row > b,
+:root[data-theme='light'] .route-card header span {
+  color: #8a5a00;
+}
+:root[data-theme='light'] .execution-live-strip,
+:root[data-theme='light'] .timeline-explain {
+  color: #164b5d;
+  background: linear-gradient(135deg, #e8f8fb, #f5fbfc);
+}
+:root[data-theme='light'] .execution-live-strip strong { color: #123247; }
+:root[data-theme='light'] .execution-live-strip p { color: #4c6175; }
+:root[data-theme='light'] .execution-failure { color: #7a2136; background: #fff1f3; }
+:root[data-theme='light'] .execution-failure p { color: #7a4351; }
+:root[data-theme='light'] .approval-banner { color: #5c4200; background: linear-gradient(135deg, #fff8e7, #ffffff); }
+:root[data-theme='light'] .approval-banner p { color: #5a4b2c; }
+:root[data-theme='light'] .markdown-report code,
+:root[data-theme='light'] .tool-call-list code { color: #075f78; }
+:root[data-theme='light'] .markdown-report pre,
+:root[data-theme='light'] .timeline-approval pre { color: #304c63; background: #edf4f8; }
+
+/* Final contrast pass for decision and result summaries. */
+:root[data-theme='light'] .decision-body,
+:root[data-theme='light'] .decision-body article,
+:root[data-theme='light'] .decision-body p,
+:root[data-theme='light'] .decision-body h3,
+:root[data-theme='light'] .decision-body li,
+:root[data-theme='light'] .decision-body span,
+:root[data-theme='light'] .decision-body strong,
+:root[data-theme='light'] .agent-loop-grid p,
+:root[data-theme='light'] .agent-loop-grid h3,
+:root[data-theme='light'] .agent-loop-grid strong,
+:root[data-theme='light'] .agent-loop-grid span,
+:root[data-theme='light'] .agent-loop-grid small,
+:root[data-theme='light'] .route-card p,
+:root[data-theme='light'] .route-card strong,
+:root[data-theme='light'] .route-card small {
+  color: #1d344a !important;
+}
+:root[data-theme='light'] .decision-body h3,
+:root[data-theme='light'] .agent-loop-grid h3,
+:root[data-theme='light'] .route-card header strong,
+:root[data-theme='light'] .memory-grid h3,
+:root[data-theme='light'] .memory-stats strong,
+:root[data-theme='light'] .plan-understanding strong,
+:root[data-theme='light'] .live-plan-list strong,
+:root[data-theme='light'] .timeline-card strong,
+:root[data-theme='light'] .evidence-card header b {
+  color: #071b2e !important;
+  font-weight: 750;
+}
+:root[data-theme='light'] .decision-body code,
+:root[data-theme='light'] .agent-loop-grid code,
+:root[data-theme='light'] .route-card code {
+  color: #075f78 !important;
+  font-weight: 650;
+}
 @media (max-width: 1280px) { .task-board { grid-template-columns: 1fr; } .task-board .current-execution, .task-board .live-plan-panel, .task-board .detail-column, .task-board .evidence-live-panel, .task-board .agent-loop-panel, .task-board .runtime-memory-panel, .task-board .plan-preview, .task-board .decision-panel { height: auto; max-height: 680px; } }
 @media (max-width: 1050px) { .decision-body, .detail-grid, .memory-grid, .report-layout, .plan-understanding, .plan-summary, .plan-lists, .plan-step-list dl { grid-template-columns: 1fr; } .memory-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } .approval-banner { align-items: stretch; flex-direction: column; } }
+
+/* Report readability pass: navigation and evidence identifiers must remain legible in light mode. */
+:root[data-theme='light'] .report-list { background: #ffffff; border-color: #b8cbd8; box-shadow: 0 4px 16px rgba(31, 58, 79, .10); }
+:root[data-theme='light'] .report-list-header { color: #102b42; border-bottom-color: #b8cbd8; }
+:root[data-theme='light'] .report-list-header strong { color: #0b263d; font-size: 16px; font-weight: 800; }
+:root[data-theme='light'] .report-list-header small { color: #466176; font-size: 12px; font-weight: 650; }
+:root[data-theme='light'] .report-list button { color: #17364d; border-color: transparent; }
+:root[data-theme='light'] .report-list button strong { color: #16354c; font-size: 13px; font-weight: 750; }
+:root[data-theme='light'] .report-list button small { color: #486579; font-size: 11px; font-weight: 600; }
+:root[data-theme='light'] .report-list button.active,
+:root[data-theme='light'] .report-list button:hover { background: #e8f7f8; border-color: #76c9d0; }
+:root[data-theme='light'] .report-list button.active strong { color: #07334b; }
+:root[data-theme='light'] .report-document { background: #ffffff; border-color: #c1d0da; }
+:root[data-theme='light'] .markdown-report code {
+  color: #d9fbff;
+  background: #263947;
+  border-color: #263947;
+  font-weight: 700;
+  box-shadow: inset 0 -1px 0 rgba(255,255,255,.14);
+}
+:root[data-theme='light'] .markdown-report pre {
+  color: #f1f8fc;
+  background: #1b2b38;
+  border-color: #314b5d;
+  box-shadow: 0 3px 10px rgba(24, 49, 67, .14);
+}
+:root[data-theme='light'] .markdown-report pre code { color: #f1f8fc; background: transparent; border-color: transparent; }

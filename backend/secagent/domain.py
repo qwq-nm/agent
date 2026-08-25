@@ -32,6 +32,8 @@ def normalize_token_count(value: object) -> int:
 class TaskScene(StrEnum):
     INCIDENT_RESPONSE = "incident_response"
     SOURCE_AUDIT = "source_audit"
+    VULNERABILITY_HUNTING = "vulnerability_hunting"
+    REVERSE_ANALYSIS = "reverse_analysis"
     WEB_ANALYSIS = "web_analysis"
     CTF_WEB = "ctf_web"
 

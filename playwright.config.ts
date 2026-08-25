@@ -14,7 +14,7 @@ export default defineConfig({
   ],
   webServer: {
     command: 'docker compose up --build',
-    url: 'http://127.0.0.1:18080/api/health',
+    url: 'http://127.0.0.1:18080/api/health/live',
     timeout: 240_000,
     reuseExistingServer: !process.env.CI,
   },

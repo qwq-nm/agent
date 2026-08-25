@@ -164,6 +164,16 @@ class Critic:
                 recommended_next_focus.append("secret scanning evidence")
             if "config" not in contents and "cfg-" not in contents:
                 recommended_next_focus.append("configuration risk evidence")
+        elif scene is TaskScene.VULNERABILITY_HUNTING:
+            if "vulnerability" not in contents and "vuln-" not in contents:
+                required_missing.append("vulnerability finding or explicit no-finding evidence")
+            if "vuln-" not in contents:
+                recommended_next_focus.append("static vulnerability pattern evidence")
+        elif scene is TaskScene.REVERSE_ANALYSIS:
+            if "reverse" not in contents and "artifact=" not in contents:
+                required_missing.append("reverse artifact triage evidence")
+            if "artifact=" not in contents:
+                recommended_next_focus.append("artifact metadata and printable string evidence")
         return {
             "required_missing": required_missing,
             "recommended_next_focus": recommended_next_focus[:8],

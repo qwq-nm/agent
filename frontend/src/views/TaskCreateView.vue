@@ -7,7 +7,7 @@ import type { RouteMode, SafetyMode } from '../types'
 interface MissionTemplate {
   id: string
   title: string
-  scene: '' | 'ctf_web' | 'web_analysis' | 'incident_response' | 'source_audit'
+  scene: '' | 'ctf_web' | 'web_analysis' | 'incident_response' | 'source_audit' | 'vulnerability_hunting' | 'reverse_analysis'
   description: string
   prompt: string
   targetHint: string
@@ -65,6 +65,22 @@ const templates: MissionTemplate[] = [
     targetHint: '适合：源码目录、ZIP 包、小型 Web 项目',
     prompt:
       '对上传的源码或 ZIP 项目进行静态安全审计。识别项目类型、入口文件、配置风险、危险函数、敏感信息、鉴权薄弱点和可能的漏洞位置。只做静态读取，不执行项目代码，生成中文证据报告。',
+  },
+  {
+    id: 'vulnerability',
+    title: '漏洞挖掘',
+    scene: 'vulnerability_hunting',
+    description: '对授权源码和配置进行只读漏洞模式分析。',
+    targetHint: '适合：代码、配置、依赖和接口材料',
+    prompt: '请对授权上传的源码或配置进行只读漏洞挖掘，定位输入校验、命令执行、反序列化和调试配置等风险，所有结论必须引用文件和行号。',
+  },
+  {
+    id: 'reverse',
+    title: '逆向分析',
+    scene: 'reverse_analysis',
+    description: '对授权二进制、脚本或固件样本进行静态初筛。',
+    targetHint: '适合：二进制、脚本、固件和样本文件',
+    prompt: '请对授权上传的二进制、脚本或固件样本进行静态逆向初筛，提取文件元数据、可打印字符串和敏感线索，禁止导入或执行样本。',
   },
   {
     id: 'policy',
@@ -160,7 +176,7 @@ function chooseFile(event: Event) {
       <span class="safety-chip">人机协同审计</span>
     </header>
 
-    <form class="mission-form agent-create panel" :class="{ 'is-submitting': submitting }" @submit.prevent="submit">
+    <form class="mission-form agent-create panel" data-tour="task-prompt" :class="{ 'is-submitting': submitting }" @submit.prevent="submit">
       <label class="agent-prompt">
         <span>你想让 SecAgent-X 做什么？</span>
         <textarea
@@ -206,7 +222,7 @@ function chooseFile(event: Event) {
         </button>
       </section>
 
-      <section class="mode-row">
+      <section class="mode-row" data-tour="task-config">
         <div>
           <span>任务模式</span>
           <div class="segmented">
@@ -215,6 +231,8 @@ function chooseFile(event: Event) {
             <button type="button" :disabled="submitting" :class="{ active: form.scene_hint === 'web_analysis' }" @click="form.scene_hint = 'web_analysis'">Web 分析</button>
             <button type="button" :disabled="submitting" :class="{ active: form.scene_hint === 'incident_response' }" @click="form.scene_hint = 'incident_response'">日志分析</button>
             <button type="button" :disabled="submitting" :class="{ active: form.scene_hint === 'source_audit' }" @click="form.scene_hint = 'source_audit'">源码审计</button>
+            <button type="button" :disabled="submitting" :class="{ active: form.scene_hint === 'vulnerability_hunting' }" @click="form.scene_hint = 'vulnerability_hunting'">漏洞挖掘</button>
+            <button type="button" :disabled="submitting" :class="{ active: form.scene_hint === 'reverse_analysis' }" @click="form.scene_hint = 'reverse_analysis'">逆向分析</button>
           </div>
         </div>
         <div>

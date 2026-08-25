@@ -43,6 +43,10 @@ from secagent.tools.source_tools import (
     SecretScanner,
     SourceScanner,
 )
+from secagent.tools.specialized_tools import (
+    ReverseArtifactAnalyzer,
+    VulnerabilityScanner,
+)
 from secagent.tools.http_request import HttpRequest
 from secagent.tools.web_tools import (
     CookieAnalyzer,
@@ -117,6 +121,8 @@ def create_app(
             SourceScanner(),
             SecretScanner(),
             ConfigChecker(),
+            VulnerabilityScanner(),
+            ReverseArtifactAnalyzer(),
             UrlGuardTool(url_guard),
             HttpRequest(url_guard),
             BrowserSnapshot(url_guard),

@@ -21,6 +21,8 @@ EVIDENCE_TYPE_LABELS = {
     "attack_pattern": "攻击模式",
     "source_file": "源码文件",
     "secret_candidate": "疑似敏感信息",
+    "vulnerability_finding": "漏洞线索",
+    "reverse_artifact": "逆向样本分析",
     "runtime_error": "运行错误",
     "observation": "观察结果",
     "http_observation": "HTTP 观察结果",
@@ -36,6 +38,8 @@ TOOL_LABELS = {
     "source_scanner": "源码风险扫描",
     "secret_scanner": "敏感信息扫描",
     "config_checker": "配置风险检查",
+    "vulnerability_scanner": "漏洞模式扫描",
+    "reverse_artifact_analyzer": "逆向样本静态分析",
     "url_guard": "URL 安全边界检查",
     "http_fetch": "HTTP 页面获取",
     "header_check": "响应头安全检查",
@@ -154,7 +158,14 @@ class Reporter:
                 response_schema=ReportSections.model_json_schema(),
             ),
         )
-        sections = ReportSections.model_validate(response.data)
+        # Providers may return the evidence objects supplied in the prompt
+        # instead of the schema's requested strings (the deterministic mock
+        # does this intentionally). Normalize them before validation so a
+        # successful tool run cannot be turned into a failed task at report
+        # generation time.
+        sections = ReportSections.model_validate(
+            self._normalize_sections(response.data)
+        )
         artifact = self._compose_report(
             snapshot,
             parsed,
@@ -166,6 +177,24 @@ class Reporter:
             demo=response.is_demo or any(item["is_demo"] for item in snapshot["model_calls"]),
         )
         return artifact, response
+
+    @staticmethod
+    def _normalize_sections(data: dict) -> dict:
+        normalized = dict(data)
+        for key in ("findings", "recommendations", "uncertainties"):
+            values = normalized.get(key) or []
+            normalized[key] = [
+                value
+                if isinstance(value, str)
+                else str(value.get("content") or value.get("summary") or json.dumps(value, ensure_ascii=False))
+                if isinstance(value, dict)
+                else str(value)
+                for value in values
+            ]
+        normalized["evidence_ids"] = [
+            value for value in (normalized.get("evidence_ids") or []) if isinstance(value, str)
+        ]
+        return normalized
 
     def render_fallback(
         self,

@@ -92,6 +92,10 @@ class Planner:
             params_by_tool = {
                 name: {"project_path": "$project"} for name in allowed_tools
             }
+        elif parsed.scene.value in {"vulnerability_hunting", "reverse_analysis"}:
+            params_by_tool = {
+                name: {"project_path": "$project"} for name in allowed_tools
+            }
         elif parsed.scene in {TaskScene.WEB_ANALYSIS, TaskScene.CTF_WEB}:
             params_by_tool = {
                 "url_guard": {"url": task.target_url},

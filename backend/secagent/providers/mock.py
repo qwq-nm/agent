@@ -15,6 +15,10 @@ class MockProvider:
             scene = hint or (
                 "source_audit"
                 if "源码" in goal
+                else "vulnerability_hunting"
+                if any(item in goal.lower() for item in ("漏洞", "vulnerability", "cve", "脆弱性"))
+                else "reverse_analysis"
+                if any(item in goal.lower() for item in ("逆向", "reverse", "二进制", "binary", "固件"))
                 else "ctf_web"
                 if any(item in goal.lower() for item in ("ctf", "flag", "nssctf", "web题", "web 题", "靶场", "题目"))
                 else "web_analysis"
@@ -65,7 +69,10 @@ class MockProvider:
         elif title == "ReportSections":
             data = {
                 "summary": payload["goal"],
-                "findings": payload["findings"],
+                "findings": [
+                    finding.get("content", "")
+                    for finding in payload["findings"]
+                ],
                 "recommendations": payload["recommendations"],
                 "uncertainties": payload["errors"],
                 "evidence_ids": [

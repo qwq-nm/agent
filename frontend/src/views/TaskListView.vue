@@ -17,7 +17,7 @@ const filteredTasks = computed(() => store.tasks.filter((task) =>
 const statuses = computed(() => [...new Set(store.tasks.map((task) => task.status))])
 const scenes = computed(() => [...new Set(store.tasks.map((task) => task.scene || task.scene_hint).filter((scene): scene is string => Boolean(scene)))])
 const sceneNames: Record<string, string> = {
-  ctf_web: 'CTF Web', incident_response: '日志响应', source_audit: '源码审计', web_analysis: 'Web 分析',
+  ctf_web: 'CTF Web', incident_response: '日志响应', source_audit: '源码审计', web_analysis: 'Web 分析', vulnerability_hunting: '漏洞挖掘', reverse_analysis: '逆向分析',
 }
 </script>
 
