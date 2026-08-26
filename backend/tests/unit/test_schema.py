@@ -3,7 +3,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 
 from secagent import db_models  # noqa: F401 -- registers ORM tables for this contract
 from secagent.db import Base, make_engine
@@ -293,3 +293,91 @@ def test_model_call_attempt_migration_round_trips_from_task8_v3(tmp_path):
     assert alembic("upgrade", "head").returncode == 0
     drift = alembic("check")
     assert drift.returncode == 0, drift.stdout + drift.stderr
+
+
+def test_provider_route_timestamp_migration_backfills_and_round_trips(tmp_path):
+    repository_root = Path(__file__).resolve().parents[3]
+    database_path = tmp_path / "provider-route-timestamps.db"
+    environment = os.environ.copy()
+    environment["DATABASE_URL"] = f"sqlite:///{database_path.as_posix()}"
+
+    def alembic(*args: str):
+        return subprocess.run(
+            [sys.executable, "-m", "alembic", *args],
+            cwd=repository_root,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    assert alembic("upgrade", "20260821_07").returncode == 0
+    engine = make_engine(environment["DATABASE_URL"])
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO provider_routes (
+                    provider,
+                    base_url,
+                    model,
+                    api_style,
+                    reasoning_effort,
+                    updated_by,
+                    created_at,
+                    updated_at
+                ) VALUES (
+                    'legacy',
+                    'https://legacy.example/v1',
+                    'legacy-model',
+                    'openai',
+                    NULL,
+                    NULL,
+                    NULL,
+                    NULL
+                )
+                """
+            )
+        )
+
+    upgraded = alembic("upgrade", "head")
+    assert upgraded.returncode == 0, upgraded.stderr
+    upgraded_columns = {
+        column["name"]: column
+        for column in inspect(engine).get_columns("provider_routes")
+    }
+    assert upgraded_columns["created_at"]["nullable"] is False
+    assert upgraded_columns["updated_at"]["nullable"] is False
+    with engine.connect() as connection:
+        timestamps = connection.execute(
+            text(
+                """
+                SELECT created_at, updated_at
+                FROM provider_routes
+                WHERE provider = 'legacy'
+                """
+            )
+        ).one()
+    assert timestamps.created_at is not None
+    assert timestamps.updated_at is not None
+
+    downgraded = alembic("downgrade", "20260821_07")
+    assert downgraded.returncode == 0, downgraded.stderr
+    downgraded_inspector = inspect(engine)
+    downgraded_columns = {
+        column["name"]: column
+        for column in downgraded_inspector.get_columns("provider_routes")
+    }
+    assert downgraded_columns["created_at"]["nullable"] is True
+    assert downgraded_columns["updated_at"]["nullable"] is True
+    assert any(
+        foreign_key["constrained_columns"] == ["updated_by"]
+        and foreign_key["referred_table"] == "users"
+        and foreign_key["options"].get("ondelete") == "RESTRICT"
+        for foreign_key in downgraded_inspector.get_foreign_keys("provider_routes")
+    )
+    assert any(
+        index["name"] == "ix_provider_routes_updated_by"
+        and index["column_names"] == ["updated_by"]
+        for index in downgraded_inspector.get_indexes("provider_routes")
+    )
