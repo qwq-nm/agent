@@ -37,15 +37,7 @@ class ModelRouter:
 
     def provider_for(self, stage: ModelStage) -> ModelProvider:
         name = "mock" if self.mode == "mock" else FIXED_PROVIDER[stage]
-        try:
-            return self._require_provider(name)
-        except ProviderUnavailable:
-            if self.mode == "mock":
-                raise
-            for fallback in ("deepseek", "glm"):
-                if fallback != name and fallback in self.providers:
-                    return self.providers[fallback]
-            raise
+        return self._require_provider(name)
 
     async def complete(
         self,

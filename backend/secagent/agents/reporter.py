@@ -211,8 +211,14 @@ class Reporter:
         fallback: bool = False,
     ) -> ReportArtifact:
         allowed_ids = {item["id"] for item in snapshot["evidences"]}
-        cited_ids = sections.evidence_ids or [item["id"] for item in snapshot["evidences"]]
-        cited_ids = [item for item in cited_ids if item in allowed_ids]
+        if sections.evidence_ids:
+            cited_ids = sections.evidence_ids
+            if len(cited_ids) != len(set(cited_ids)) or any(
+                item not in allowed_ids for item in cited_ids
+            ):
+                raise ValueError("invalid evidence citation for current task")
+        else:
+            cited_ids = [item["id"] for item in snapshot["evidences"]]
         evidence_lines = self._evidence_lines(snapshot, cited_ids)
         finding_lines = [f"- {item}" for item in sections.findings] or ["- 暂无可独立确认的综合发现。"]
         recommendation_lines = [f"- {item}" for item in sections.recommendations] or ["- 暂无建议。"]

@@ -570,7 +570,10 @@ class AgentRunner:
                         report_type="partial",
                         stop_reason=f"budget exhausted: {exc.dimension}",
                         safety_mode=task.safety_mode.value,
-                        errors=[f"Execution stopped because {exc.dimension} was exhausted."],
+                        errors=[
+                            f"Execution stopped because {exc.dimension} was exhausted "
+                            f"(budget exhausted: {exc.dimension})."
+                        ],
                     )
                     self._save_report_artifact(task_id, lease, report_artifact)
                 except StaleJobLease as stale:

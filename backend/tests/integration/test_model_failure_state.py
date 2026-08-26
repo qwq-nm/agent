@@ -43,8 +43,10 @@ class FailingProvider:
 
 
 class ForgedCitationRouter:
-    def __init__(self, evidence_id: str) -> None:
-        self.evidence_id = evidence_id
+    def __init__(self, evidence_ids: str | list[str]) -> None:
+        self.evidence_ids = (
+            [evidence_ids] if isinstance(evidence_ids, str) else evidence_ids
+        )
 
     async def complete(self, stage, request, preferred=None):
         del stage, request, preferred
@@ -58,7 +60,7 @@ class ForgedCitationRouter:
                 "findings": [],
                 "recommendations": [],
                 "uncertainties": [],
-                "evidence_ids": [self.evidence_id],
+                "evidence_ids": self.evidence_ids,
             },
             latency_ms=1,
         )
@@ -282,6 +284,40 @@ def test_fenced_checkpoint_and_budget_reads_release_their_transactions(
     assert repository.session.in_transaction() is False
 
 
+def test_budget_state_preserves_a_non_null_persisted_deadline(
+    repository, fake_queue
+) -> None:
+    task = repository.create_task(
+        TaskCreate(goal="Preserve deadline", authorization_scope="Owned data")
+    )
+    repository.set_task_status(task.id, TaskStatus.QUEUED)
+    job = repository.add_job_run(task.id, "persisted-deadline-001")
+    job.status = "queued"
+    repository.commit()
+    lease = JobService(repository, fake_queue).claim(
+        task.id, job.command_id, "worker-persisted-deadline"
+    )
+    assert lease is not None
+    persisted_deadline = datetime.now(timezone.utc) - timedelta(minutes=5)
+    row = repository.session.get(TaskRow, task.id)
+    row.budget_deadline_at = persisted_deadline
+    repository.commit()
+
+    state = repository.budget_state(
+        task.id,
+        lease=lease,
+        timeout_seconds=30,
+        now=datetime.now(timezone.utc),
+    )
+
+    assert state["deadline"] == persisted_deadline
+    repository.session.refresh(row)
+    stored_deadline = row.budget_deadline_at
+    if stored_deadline.tzinfo is None:
+        stored_deadline = stored_deadline.replace(tzinfo=timezone.utc)
+    assert stored_deadline == persisted_deadline
+
+
 def test_budget_exhaustion_is_a_terminal_atomic_event(
     analyst_client, app, fake_queue
 ) -> None:
@@ -443,6 +479,65 @@ def test_report_rejects_foreign_evidence_id_and_repository_persists_exact_ids(
             is_demo=False,
             evidence_ids=[foreign_id],
         )
+
+
+def test_report_rejects_duplicate_explicit_evidence_citations(repository) -> None:
+    task = repository.create_task(
+        TaskCreate(goal="Duplicate citation", authorization_scope="Owned data")
+    )
+    evidence_id = LedgerService(repository).record_evidence(
+        task.id,
+        evidence_type="observation",
+        source="current",
+        content="current evidence",
+        confidence=1.0,
+    )
+    parsed = ParsedTask(
+        scene=TaskScene.INCIDENT_RESPONSE,
+        goal=task.goal,
+        authorization_scope=task.authorization_scope,
+        risk_level=RiskLevel.LOW,
+    )
+
+    with pytest.raises(ValueError, match="evidence citation"):
+        asyncio.run(
+            Reporter(
+                ForgedCitationRouter([evidence_id, evidence_id]),
+                LedgerService(repository),
+            ).render(task.id, parsed)
+        )
+
+
+def test_report_empty_evidence_citations_default_to_all_current_evidence(
+    repository,
+) -> None:
+    task = repository.create_task(
+        TaskCreate(goal="Default citations", authorization_scope="Owned data")
+    )
+    evidence_ids = [
+        LedgerService(repository).record_evidence(
+            task.id,
+            evidence_type="observation",
+            source=f"current-{index}",
+            content=f"evidence {index}",
+            confidence=1.0,
+        )
+        for index in range(2)
+    ]
+    parsed = ParsedTask(
+        scene=TaskScene.INCIDENT_RESPONSE,
+        goal=task.goal,
+        authorization_scope=task.authorization_scope,
+        risk_level=RiskLevel.LOW,
+    )
+
+    artifact, _ = asyncio.run(
+        Reporter(
+            ForgedCitationRouter([]), LedgerService(repository)
+        ).render(task.id, parsed)
+    )
+
+    assert artifact.evidence_ids == evidence_ids
 
 
 def test_evidence_hash_binds_canonical_json_and_safe_file_bytes(

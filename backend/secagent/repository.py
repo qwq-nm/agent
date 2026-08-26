@@ -910,7 +910,7 @@ class TaskRepository:
         current_deadline = row.budget_deadline_at
         if current_deadline is not None and current_deadline.tzinfo is None:
             current_deadline = current_deadline.replace(tzinfo=timezone.utc)
-        if current_deadline is None or current_deadline <= job_started_at:
+        if current_deadline is None:
             row.budget_deadline_at = now + timedelta(seconds=timeout_seconds)
             self.session.commit()
         deadline = row.budget_deadline_at

@@ -27,8 +27,10 @@ class StubProvider:
     def __init__(self, name: str, fail: bool = False) -> None:
         self.name = name
         self.fail = fail
+        self.complete_count = 0
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
+        self.complete_count += 1
         if self.fail:
             raise ProviderUnavailable(
                 self.name, ProviderErrorCode.NETWORK, retryable=True
@@ -92,6 +94,22 @@ async def test_auto_does_not_fall_back_to_another_provider_or_mock() -> None:
             ModelRequest(system="s", user="u", response_schema={}),
         )
     assert caught.value.provider == "deepseek"
+
+
+@pytest.mark.asyncio
+async def test_auto_missing_fixed_provider_does_not_call_other_live_provider() -> None:
+    deepseek = StubProvider("deepseek")
+    router = ModelRouter({"deepseek": deepseek}, mode="auto")
+
+    with pytest.raises(ProviderUnavailable) as caught:
+        await router.complete(
+            ModelStage.TASK_PARSE,
+            ModelRequest(system="s", user="u", response_schema={}),
+        )
+
+    assert caught.value.provider == "glm"
+    assert caught.value.code is ProviderErrorCode.AUTH
+    assert deepseek.complete_count == 0
 
 
 @pytest.mark.asyncio
