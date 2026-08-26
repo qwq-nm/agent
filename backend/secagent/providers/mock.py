@@ -65,7 +65,10 @@ class MockProvider:
         elif title == "ReportSections":
             data = {
                 "summary": payload["goal"],
-                "findings": payload["findings"],
+                "findings": [
+                    f"证据 {finding['id']}：{finding['content']}"
+                    for finding in payload["findings"]
+                ],
                 "recommendations": payload["recommendations"],
                 "uncertainties": payload["errors"],
                 "evidence_ids": [
