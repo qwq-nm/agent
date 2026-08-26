@@ -2,7 +2,9 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -10,6 +12,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    func,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -132,6 +135,259 @@ class TaskRow(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_utc, onupdate=now_utc
+    )
+
+
+class ConversationRow(Base):
+    __tablename__ = "conversations"
+    __table_args__ = (
+        CheckConstraint(
+            "next_message_sequence >= 1",
+            name="ck_conversations_next_message_sequence_ge_1",
+        ),
+        CheckConstraint(
+            "next_turn_plan_version >= 1",
+            name="ck_conversations_next_turn_plan_version_ge_1",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    owner_id: Mapped[str] = mapped_column(
+        ForeignKey(
+            "users.id",
+            name="fk_conversations_owner_id_users",
+            ondelete="RESTRICT",
+        ),
+        index=True,
+    )
+    title: Mapped[str] = mapped_column(String(160))
+    status: Mapped[str] = mapped_column(
+        String(32), default="active", server_default="active"
+    )
+    settings_json: Mapped[str] = mapped_column(
+        Text, default="{}", server_default="{}"
+    )
+    active_turn_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "conversation_turns.id",
+            name="fk_conversations_active_turn_id_conversation_turns",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
+    next_message_sequence: Mapped[int] = mapped_column(
+        Integer, default=1, server_default="1"
+    )
+    next_turn_plan_version: Mapped[int] = mapped_column(
+        Integer, default=1, server_default="1"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=now_utc,
+        onupdate=now_utc,
+        server_default=func.now(),
+    )
+
+
+class ConversationMessageRow(Base):
+    __tablename__ = "conversation_messages"
+    __table_args__ = (
+        CheckConstraint(
+            "sequence >= 1", name="ck_conversation_messages_sequence_ge_1"
+        ),
+        UniqueConstraint(
+            "conversation_id",
+            "sequence",
+            name="uq_conversation_messages_conversation_sequence",
+        ),
+        UniqueConstraint(
+            "conversation_id",
+            "idempotency_key",
+            name="uq_conversation_messages_conversation_idempotency_key",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey(
+            "conversations.id",
+            name="fk_conversation_messages_conversation_id_conversations",
+            ondelete="CASCADE",
+        ),
+        index=True,
+    )
+    sequence: Mapped[int] = mapped_column(Integer)
+    role: Mapped[str] = mapped_column(String(16))
+    kind: Mapped[str] = mapped_column(String(32))
+    content: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(
+        String(32), default="completed", server_default="completed"
+    )
+    turn_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "conversation_turns.id",
+            name="fk_conversation_messages_turn_id_conversation_turns",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
+    idempotency_key: Mapped[str | None] = mapped_column(
+        String(255), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=now_utc,
+        onupdate=now_utc,
+        server_default=func.now(),
+    )
+
+
+class MessageAttachmentRow(Base):
+    __tablename__ = "message_attachments"
+    __table_args__ = (
+        CheckConstraint(
+            "size_bytes >= 0", name="ck_message_attachments_size_bytes_ge_0"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    message_id: Mapped[str] = mapped_column(
+        ForeignKey(
+            "conversation_messages.id",
+            name="fk_message_attachments_message_id_conversation_messages",
+            ondelete="CASCADE",
+        ),
+        index=True,
+    )
+    original_name: Mapped[str] = mapped_column(String(255))
+    storage_ref: Mapped[str] = mapped_column(String(500))
+    relative_path: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    content_type: Mapped[str] = mapped_column(String(255))
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(
+        String(16), default="ready", server_default="ready"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, server_default=func.now()
+    )
+
+
+class ConversationTurnRow(Base):
+    __tablename__ = "conversation_turns"
+    __table_args__ = (
+        CheckConstraint(
+            "plan_version >= 1", name="ck_conversation_turns_plan_version_ge_1"
+        ),
+        UniqueConstraint(
+            "conversation_id",
+            "plan_version",
+            name="uq_conversation_turns_conversation_plan_version",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey(
+            "conversations.id",
+            name="fk_conversation_turns_conversation_id_conversations",
+            ondelete="CASCADE",
+        ),
+        index=True,
+    )
+    trigger_message_id: Mapped[str] = mapped_column(
+        ForeignKey(
+            "conversation_messages.id",
+            name="fk_conversation_turns_trigger_message_id_conversation_messages",
+            ondelete="NO ACTION",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        index=True,
+    )
+    task_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "tasks.id",
+            name="fk_conversation_turns_task_id_tasks",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
+    plan_version: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(
+        String(32), default="created", server_default="created"
+    )
+    budget_json: Mapped[str] = mapped_column(Text, default="{}", server_default="{}")
+    replan_from_turn_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "conversation_turns.id",
+            name="fk_conversation_turns_replan_from_turn_id_conversation_turns",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=now_utc,
+        onupdate=now_utc,
+        server_default=func.now(),
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class ConversationEventRow(Base):
+    __tablename__ = "conversation_events"
+    __table_args__ = {"sqlite_autoincrement": True}
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey(
+            "conversations.id",
+            name="fk_conversation_events_conversation_id_conversations",
+            ondelete="CASCADE",
+        ),
+        index=True,
+    )
+    turn_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "conversation_turns.id",
+            name="fk_conversation_events_turn_id_conversation_turns",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
+    subtask_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True, index=True
+    )
+    event_type: Mapped[str] = mapped_column(String(80))
+    payload_json: Mapped[str] = mapped_column(
+        Text, default="{}", server_default="{}"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, server_default=func.now()
     )
 
 
