@@ -1,5 +1,8 @@
+import json
 import math
+from collections import UserDict
 from datetime import datetime, timezone
+from types import MappingProxyType
 from uuid import uuid4
 
 import pytest
@@ -7,17 +10,22 @@ from pydantic import ValidationError
 
 from secagent.conversation_domain import (
     AttachmentMetadataCreate,
+    AttachmentRead,
     AttachmentStatus,
     ConversationCreate,
     ConversationEventCreate,
+    ConversationEventRead,
     ConversationMessageKind,
+    ConversationMessageRead,
     ConversationMessageRole,
     ConversationMessageStatus,
     ConversationMessageWrite,
     ConversationPatch,
+    ConversationRead,
     ConversationSettings,
     ConversationStatus,
     ConversationTurnCreate,
+    ConversationTurnRead,
     ConversationTurnStatus,
     TurnBudgetSnapshot,
     UserMessageCreate,
@@ -148,6 +156,12 @@ def test_create_patch_and_user_message_reject_server_fields_and_bad_boundaries()
         UserMessageCreate.model_validate({"content": "hello", "sequence": 1})
 
 
+@pytest.mark.parametrize("payload", [UserDict(), MappingProxyType({})])
+def test_patch_rejects_empty_mapping_implementations(payload) -> None:
+    with pytest.raises(ValidationError):
+        ConversationPatch.model_validate(payload)
+
+
 def test_uuid_fields_are_hyphenated_normalized_and_not_arbitrary() -> None:
     canonical = _uuid()
     upper = canonical.upper()
@@ -182,6 +196,14 @@ def test_uuid_fields_are_hyphenated_normalized_and_not_arbitrary() -> None:
 
 def test_budget_and_internal_message_boundaries_are_strict() -> None:
     assert _budget().max_context_tokens == 120_000
+    assert TurnBudgetSnapshot(
+        max_subtasks=0,
+        max_model_calls_per_subtask=0,
+        max_tool_calls_per_subtask=0,
+        timeout_seconds=0,
+        max_replans=0,
+        max_context_tokens=0,
+    ).max_subtasks == 0
     for field in TurnBudgetSnapshot.model_fields:
         values = _budget().model_dump()
         values[field] = -1
@@ -235,6 +257,12 @@ def test_attachment_paths_hash_and_metadata_are_strict() -> None:
         "./file.txt",
         "../file.txt",
         "folder/\x00file.txt",
+        "uploads/NUL",
+        "uploads/con.txt",
+        "uploads/COM1.log",
+        "uploads/file.txt:stream",
+        "uploads/trailing./x",
+        "uploads/trailing /x",
     )
     for path in invalid_paths:
         with pytest.raises(ValidationError):
@@ -259,7 +287,11 @@ def test_attachment_paths_hash_and_metadata_are_strict() -> None:
     for field, value in (
         ("original_name", ""),
         ("original_name", "x" * 256),
+        ("storage_ref", ""),
+        ("storage_ref", "x" * 501),
         ("content_type", "x" * 256),
+        ("content_type", ""),
+        ("relative_path", ""),
         ("relative_path", "x" * 1001),
         ("size_bytes", -1),
     ):
@@ -307,6 +339,18 @@ def test_event_payload_and_canonical_json_reject_non_json_values() -> None:
         ConversationEventCreate(event_type="x" * 81)
     with pytest.raises(ValidationError):
         ConversationEventCreate(event_type="ok", subtask_id="x" * 37)
+    with pytest.raises(ValidationError):
+        ConversationEventCreate(event_type="ok", subtask_id=" ")
+
+    surrogate = chr(0xD800)
+    with pytest.raises((ValidationError, TypeError, ValueError)):
+        ConversationEventCreate(event_type="event", payload={"value": surrogate})
+    with pytest.raises((TypeError, ValueError)):
+        canonical_json_dumps({"value": surrogate})
+    with pytest.raises(ValueError):
+        canonical_json_loads(
+            json.dumps({"value": surrogate}), dict[str, object]
+        )
 
 
 def test_canonical_json_round_trips_named_dtos() -> None:
@@ -323,3 +367,148 @@ def test_canonical_json_round_trips_named_dtos() -> None:
     now = datetime.now(timezone.utc)
     with pytest.raises(TypeError):
         canonical_json_dumps({"timestamp": now})
+
+
+def test_request_dtos_reject_bytes_and_non_list_target_containers() -> None:
+    with pytest.raises(ValidationError):
+        ConversationCreate(title=b"title")
+    with pytest.raises(ValidationError):
+        UserMessageCreate(content=b"message")
+    with pytest.raises(ValidationError):
+        ConversationSettings(allowed_targets=("target",))
+    with pytest.raises(ValidationError):
+        ConversationSettings(allowed_targets={"target"})
+    with pytest.raises(ValidationError):
+        ConversationSettings(safety_mode=b"standard")
+    with pytest.raises(ValidationError):
+        ConversationMessageWrite(
+            role=b"user",
+            kind="user_text",
+            content="message",
+        )
+    with pytest.raises(ValidationError):
+        ConversationMessageWrite(
+            role="user",
+            kind=b"user_text",
+            content="message",
+        )
+    with pytest.raises(ValidationError):
+        AttachmentMetadataCreate(
+            original_name="file.txt",
+            storage_ref="uploads/file.txt",
+            content_type="text/plain",
+            size_bytes=1,
+            sha256=b"a" * 64,
+        )
+    with pytest.raises(ValidationError):
+        AttachmentMetadataCreate(
+            original_name="file.txt",
+            storage_ref="uploads/file.txt",
+            content_type="text/plain",
+            size_bytes=1,
+            sha256="a" * 64,
+            status=b"ready",
+        )
+
+
+def test_exact_maximum_boundaries_and_all_read_dtos_are_valid() -> None:
+    conversation_id = _uuid()
+    owner_id = _uuid()
+    message_id = _uuid()
+    turn_id = _uuid()
+    attachment_id = _uuid()
+    now = datetime.now(timezone.utc)
+    targets = [f"{index:02d}" + "x" * 2046 for index in range(20)]
+    settings = ConversationSettings(
+        authorization_scope="s" * 4_000,
+        allowed_targets=targets,
+        requested_parallelism=3,
+    )
+    assert len(settings.allowed_targets) == 20
+    assert all(len(item) == 2_048 for item in settings.allowed_targets)
+    assert ConversationSettings(requested_parallelism=1).requested_parallelism == 1
+    assert len(ConversationCreate(title="t" * 160).title) == 160
+    assert len(UserMessageCreate(content="m" * 64_000).content) == 64_000
+
+    message_write = ConversationMessageWrite(
+        role="assistant",
+        kind="assistant_status",
+        content="status",
+        idempotency_key="i" * 255,
+    )
+    assert len(message_write.idempotency_key or "") == 255
+
+    storage_ref = "/".join(["a" * 100] * 4 + ["b" * 96])
+    relative_path = "/".join(["c" * 99] * 9 + ["d" * 100])
+    attachment = AttachmentRead(
+        id=attachment_id,
+        message_id=message_id,
+        original_name="o" * 255,
+        storage_ref=storage_ref,
+        relative_path=relative_path,
+        content_type="c" * 255,
+        size_bytes=0,
+        sha256="a" * 64,
+        status="ready",
+        created_at=now,
+    )
+    assert len(attachment.storage_ref) == 500
+    assert len(attachment.relative_path or "") == 1_000
+
+    conversation = ConversationRead(
+        id=conversation_id,
+        owner_id=owner_id,
+        title="Conversation",
+        status="active",
+        settings=settings,
+        active_turn_id=turn_id,
+        created_at=now,
+        updated_at=now,
+    )
+    message = ConversationMessageRead(
+        id=message_id,
+        conversation_id=conversation_id,
+        sequence=1,
+        role="user",
+        kind="user_text",
+        content="hello",
+        status="completed",
+        turn_id=turn_id,
+        created_at=now,
+        updated_at=now,
+    )
+    turn = ConversationTurnRead(
+        id=turn_id,
+        conversation_id=conversation_id,
+        trigger_message_id=message_id,
+        plan_version=1,
+        status="created",
+        budget=_budget(),
+        created_at=now,
+        updated_at=now,
+    )
+    event = ConversationEventRead(
+        cursor=1,
+        conversation_id=conversation_id,
+        event_type="e" * 80,
+        payload={"ok": True},
+        turn_id=turn_id,
+        subtask_id="s" * 36,
+        created_at=now,
+    )
+    assert conversation.active_turn_id == turn.id
+    assert message.sequence == turn.plan_version == event.cursor == 1
+
+    for model, field, value in (
+        (ConversationMessageRead, "sequence", 0),
+        (ConversationTurnRead, "plan_version", 0),
+        (ConversationEventRead, "cursor", 0),
+    ):
+        data = {
+            ConversationMessageRead: message.model_dump(),
+            ConversationTurnRead: turn.model_dump(),
+            ConversationEventRead: event.model_dump(),
+        }[model]
+        data[field] = value
+        with pytest.raises(ValidationError):
+            model.model_validate(data)

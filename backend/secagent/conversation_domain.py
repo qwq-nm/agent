@@ -28,6 +28,18 @@ _CANONICAL_UUID_RE = re.compile(
 )
 _LOWER_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
+_WINDOWS_RESERVED_NAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    "CLOCK$",
+    "CONIN$",
+    "CONOUT$",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
+_WINDOWS_FORBIDDEN_CHARACTERS = frozenset('<>:"|?*')
 
 
 def _canonical_uuid(value: object) -> str:
@@ -39,26 +51,40 @@ def _canonical_uuid(value: object) -> str:
         raise ValueError("must be a canonical hyphenated UUID") from exc
 
 
+def _require_string_enum(value: object) -> object:
+    if not isinstance(value, str):
+        raise ValueError("enum input must be a string")
+    return value
+
+
 CanonicalUUID = Annotated[str, BeforeValidator(_canonical_uuid)]
 TrimmedTitle = Annotated[
     str,
-    StringConstraints(strip_whitespace=True, min_length=1, max_length=160),
+    StringConstraints(
+        strict=True, strip_whitespace=True, min_length=1, max_length=160
+    ),
 ]
 TrimmedAuthorizationScope = Annotated[
     str,
-    StringConstraints(strip_whitespace=True, max_length=4_000),
+    StringConstraints(strict=True, strip_whitespace=True, max_length=4_000),
 ]
 TrimmedTarget = Annotated[
     str,
-    StringConstraints(strip_whitespace=True, min_length=1, max_length=2_048),
+    StringConstraints(
+        strict=True, strip_whitespace=True, min_length=1, max_length=2_048
+    ),
 ]
 EventType = Annotated[
     str,
-    StringConstraints(strip_whitespace=True, min_length=1, max_length=80),
+    StringConstraints(
+        strict=True, strip_whitespace=True, min_length=1, max_length=80
+    ),
 ]
 OpaqueSubtaskID = Annotated[
     str,
-    StringConstraints(strip_whitespace=True, min_length=1, max_length=36),
+    StringConstraints(
+        strict=True, strip_whitespace=True, min_length=1, max_length=36
+    ),
 ]
 
 
@@ -124,6 +150,18 @@ class ConversationSettings(_StrictModel):
     allowed_targets: list[TrimmedTarget] = Field(default_factory=list, max_length=20)
     requested_parallelism: int | None = Field(default=None, ge=1, le=3, strict=True)
 
+    @field_validator("safety_mode", mode="before")
+    @classmethod
+    def validate_safety_mode_input(cls, value: object) -> object:
+        return _require_string_enum(value)
+
+    @field_validator("allowed_targets", mode="before")
+    @classmethod
+    def require_target_list(cls, value: object) -> object:
+        if not isinstance(value, list):
+            raise ValueError("allowed targets must be a list")
+        return value
+
     @field_validator("allowed_targets")
     @classmethod
     def validate_unique_targets(cls, value: list[str]) -> list[str]:
@@ -141,17 +179,13 @@ class ConversationPatch(_StrictModel):
     title: TrimmedTitle | None = None
     settings: ConversationSettings | None = None
 
-    @model_validator(mode="before")
-    @classmethod
-    def require_non_null_patch(cls, value: object) -> object:
-        if not isinstance(value, dict):
-            return value
-        supplied = set(value).intersection({"title", "settings"})
-        if not supplied:
+    @model_validator(mode="after")
+    def require_non_null_patch(self) -> "ConversationPatch":
+        if not self.model_fields_set:
             raise ValueError("at least one patch field is required")
-        if any(value[field] is None for field in supplied):
+        if any(getattr(self, field) is None for field in self.model_fields_set):
             raise ValueError("patch fields cannot be null")
-        return value
+        return self
 
 
 class ConversationRead(_StrictModel):
@@ -166,16 +200,23 @@ class ConversationRead(_StrictModel):
 
 
 class UserMessageCreate(_StrictModel):
-    content: str = Field(min_length=1, max_length=64_000)
+    content: str = Field(min_length=1, max_length=64_000, strict=True)
 
 
 class ConversationMessageWrite(_StrictModel):
     role: ConversationMessageRole
     kind: ConversationMessageKind
-    content: str = Field(min_length=1, max_length=64_000)
+    content: str = Field(min_length=1, max_length=64_000, strict=True)
     status: ConversationMessageStatus = ConversationMessageStatus.COMPLETED
     turn_id: CanonicalUUID | None = None
-    idempotency_key: str | None = Field(default=None, min_length=1, max_length=255)
+    idempotency_key: str | None = Field(
+        default=None, min_length=1, max_length=255, strict=True
+    )
+
+    @field_validator("role", "kind", "status", mode="before")
+    @classmethod
+    def validate_enum_inputs(cls, value: object) -> object:
+        return _require_string_enum(value)
 
 
 class ConversationMessageRead(_StrictModel):
@@ -233,6 +274,17 @@ def _safe_relative_posix_path(value: object) -> str:
     segments = value.split("/")
     if any(segment in {"", ".", ".."} for segment in segments):
         raise ValueError("path contains an unsafe segment")
+    for segment in segments:
+        if segment.endswith((".", " ")):
+            raise ValueError("path contains a Windows-normalized alias")
+        if any(
+            character in _WINDOWS_FORBIDDEN_CHARACTERS or ord(character) < 32
+            for character in segment
+        ):
+            raise ValueError("path contains a Windows-forbidden character")
+        device_stem = segment.split(".", 1)[0].upper()
+        if device_stem in _WINDOWS_RESERVED_NAMES:
+            raise ValueError("path contains a reserved Windows device name")
     return value
 
 
@@ -249,13 +301,18 @@ SafeClientRelativePath = Annotated[
 
 
 class AttachmentMetadataCreate(_StrictModel):
-    original_name: str = Field(min_length=1, max_length=255)
+    original_name: str = Field(min_length=1, max_length=255, strict=True)
     storage_ref: SafeStorageRef
     relative_path: SafeClientRelativePath | None = None
-    content_type: str = Field(min_length=1, max_length=255)
+    content_type: str = Field(min_length=1, max_length=255, strict=True)
     size_bytes: int = Field(ge=0, strict=True)
-    sha256: str = Field(pattern=_LOWER_SHA256_RE.pattern)
+    sha256: str = Field(pattern=_LOWER_SHA256_RE.pattern, strict=True)
     status: AttachmentStatus = AttachmentStatus.READY
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def validate_status_input(cls, value: object) -> object:
+        return _require_string_enum(value)
 
 
 class AttachmentRead(AttachmentMetadataCreate):
@@ -265,7 +322,10 @@ class AttachmentRead(AttachmentMetadataCreate):
 
 
 def _validate_json_value(value: object, path: str = "$") -> None:
-    if value is None or isinstance(value, (str, bool, int)):
+    if value is None or isinstance(value, (bool, int)):
+        return
+    if isinstance(value, str):
+        _validate_utf8(value, path)
         return
     if isinstance(value, float):
         if not math.isfinite(value):
@@ -279,9 +339,17 @@ def _validate_json_value(value: object, path: str = "$") -> None:
         for key, item in value.items():
             if not isinstance(key, str):
                 raise TypeError(f"JSON object key at {path} must be a string")
+            _validate_utf8(key, path)
             _validate_json_value(item, f"{path}.{key}")
         return
     raise TypeError(f"unsupported JSON value at {path}: {type(value).__name__}")
+
+
+def _validate_utf8(value: str, path: str) -> None:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"invalid UTF-8 string at {path}") from exc
 
 
 def _validated_json_object(value: object) -> dict[str, Any]:
