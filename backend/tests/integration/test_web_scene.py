@@ -114,12 +114,12 @@ def test_approved_web_scene_records_passive_http_and_form_evidence(tmp_path) -> 
         assert "action=/search" in report
         assert "q" in report and "page" in report
         detail = client.get(f"/api/tasks/{task['id']}").json()
-        assert [call["stage"] for call in detail["model_calls"]] == [
-            "task_parse",
-            "plan",
-            "critic",
-            "report",
-        ]
+        stages = [call["stage"] for call in detail["model_calls"]]
+        assert stages[0] == "task_parse"
+        assert stages[-1] == "report"
+        planning_rounds = stages[1:-1]
+        assert planning_rounds
+        assert planning_rounds == ["plan", "critic"] * (len(planning_rounds) // 2)
         with app.state.session_factory() as session:
             steps = (
                 session.query(TaskStepRow)

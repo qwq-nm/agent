@@ -31,6 +31,18 @@ class MockProvider:
                 "expected_outputs": ["证据链", "处置建议", "报告"],
             }
         elif title == "PlanDocument":
+            successful_tools = {
+                call.get("tool_name")
+                for call in payload.get("execution_memory", {}).get(
+                    "successful_tool_calls", []
+                )
+                if isinstance(call, dict) and isinstance(call.get("tool_name"), str)
+            }
+            planned_tools = [
+                name
+                for name in payload["allowed_tools"]
+                if name not in successful_tools
+            ][: payload["max_plan_steps"]]
             data = {
                 "steps": [
                     {
@@ -42,24 +54,57 @@ class MockProvider:
                         "need_human_confirm": payload["risk_by_tool"][name]
                         == "medium",
                     }
-                    for name in payload["allowed_tools"]
+                    for name in planned_tools
                 ]
             }
         elif title == "CriticDecision":
             has_evidence = bool(payload["evidence_count"])
+            assessment = payload.get("scene_evidence_assessment", {})
+            observations = payload.get("observations", [])
+            has_demo_evidence = any(
+                isinstance(item, dict)
+                and (
+                    item.get("source") == "demo_evidence"
+                    or item.get("evidence_type") == "demo_evidence"
+                    or str(item.get("source", "")).startswith("demo:")
+                )
+                for item in observations
+            )
+            recommended = assessment.get("recommended_next_focus", [])
+            next_focus = [
+                item
+                for item in [*assessment.get("required_missing", []), *recommended]
+                if isinstance(item, str) and item
+            ]
+            blocking_recommended = {
+                "response header observation",
+                "public form observation",
+                "attack pattern evidence",
+                "secret scanning evidence",
+                "configuration risk evidence",
+            }
+            gaps = []
+            if not has_demo_evidence:
+                gaps = [
+                    item
+                    for item in next_focus
+                    if item in assessment.get("required_missing", [])
+                    or item in blocking_recommended
+                ]
+            if not has_evidence and "工具证据" not in gaps:
+                gaps.insert(0, "工具证据")
+            is_complete = has_evidence and not gaps
             data = {
-                "is_complete": has_evidence,
-                "confidence": 0.9 if has_evidence else 0.0,
-                "reason": "存在可追溯工具证据" if has_evidence else "缺少工具证据",
-                "goal_completed": has_evidence,
-                "should_continue": not has_evidence,
-                "should_report": has_evidence,
-                "next_focus": [] if has_evidence else ["补充白名单工具证据"],
-                "stop_reason": "evidence_sufficient" if has_evidence else None,
+                "is_complete": is_complete,
+                "confidence": 0.9 if is_complete else 0.0,
+                "reason": "存在可追溯工具证据" if is_complete else "缺少工具证据",
+                "goal_completed": is_complete,
+                "should_continue": bool(gaps),
+                "should_report": is_complete,
+                "next_focus": list(dict.fromkeys(next_focus)),
+                "stop_reason": "evidence_sufficient" if is_complete else None,
                 "missing_evidence": (
-                    []
-                    if has_evidence
-                    else [{"kind": "factual", "description": "工具证据"}]
+                    [{"kind": "factual", "description": item} for item in gaps]
                 ),
             }
         elif title == "ReportSections":
