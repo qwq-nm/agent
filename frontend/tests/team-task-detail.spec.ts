@@ -24,7 +24,8 @@ it('renders complete, safe model metrics', () => {
       }],
     },
   })
-  expect(wrapper.text()).toContain('12 / 8 tokens')
+  expect(wrapper.text()).toContain('Token 用量')
+  expect(wrapper.text()).toContain('12 / 8')
   expect(wrapper.text()).toContain('req-1')
   expect(wrapper.text()).toContain('rate_limited')
 })

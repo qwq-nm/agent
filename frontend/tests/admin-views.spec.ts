@@ -9,6 +9,8 @@ const api = vi.hoisted(() => ({
   listProviderCredentials: vi.fn(),
   saveProviderCredential: vi.fn(),
   clearProviderCredential: vi.fn(),
+  getDeepseekRoute: vi.fn(),
+  listDeepseekRouteOptions: vi.fn(),
   toolStatus: vi.fn(),
   listUsers: vi.fn(),
   createUser: vi.fn(),
@@ -45,6 +47,24 @@ beforeEach(() => {
   api.listProviderCredentials.mockResolvedValue([
     { provider: 'deepseek', configured: true, key_hint: '...abcd', updated_at: '2026-08-15T02:00:00Z' },
     { provider: 'glm', configured: false, key_hint: null, updated_at: null },
+  ])
+  api.getDeepseekRoute.mockResolvedValue({
+    provider: 'deepseek', route: 'opencode-go', display_name: 'OpenCode Go',
+    base_url: 'https://opencode.ai/zen/go/v1', model: 'deepseek-v4-flash',
+    api_style: 'opencode-go', reasoning_effort: 'high', configured: true,
+    updated_at: '2026-08-15T02:00:00Z',
+  })
+  api.listDeepseekRouteOptions.mockResolvedValue([
+    {
+      provider: 'deepseek', route: 'opencode-go', display_name: 'OpenCode Go',
+      base_url: 'https://opencode.ai/zen/go/v1', model: 'deepseek-v4-flash',
+      api_style: 'opencode-go', reasoning_effort: 'high',
+    },
+    {
+      provider: 'deepseek', route: 'deepseek', display_name: 'DeepSeek Official',
+      base_url: 'https://api.deepseek.com', model: 'deepseek-reasoner',
+      api_style: 'deepseek', reasoning_effort: null,
+    },
   ])
   api.toolStatus.mockResolvedValue([])
   api.listUsers.mockResolvedValue([

@@ -10,6 +10,8 @@ const api = vi.hoisted(() => ({
   listProviderCredentials: vi.fn(),
   saveProviderCredential: vi.fn(),
   clearProviderCredential: vi.fn(),
+  getDeepseekRoute: vi.fn(),
+  listDeepseekRouteOptions: vi.fn(),
 }))
 
 vi.mock('../src/api/client', () => ({ api }))
@@ -30,6 +32,24 @@ beforeEach(() => {
   ])
   api.saveProviderCredential.mockResolvedValue({ provider: 'deepseek', configured: true, key_hint: '...wxyz', updated_at: '2026-08-15T03:00:00Z' })
   api.clearProviderCredential.mockResolvedValue(undefined)
+  api.getDeepseekRoute.mockResolvedValue({
+    provider: 'deepseek', route: 'opencode-go', display_name: 'OpenCode Go',
+    base_url: 'https://opencode.ai/zen/go/v1', model: 'deepseek-v4-flash',
+    api_style: 'opencode-go', reasoning_effort: 'high', configured: true,
+    updated_at: '2026-08-15T02:00:00Z',
+  })
+  api.listDeepseekRouteOptions.mockResolvedValue([
+    {
+      provider: 'deepseek', route: 'opencode-go', display_name: 'OpenCode Go',
+      base_url: 'https://opencode.ai/zen/go/v1', model: 'deepseek-v4-flash',
+      api_style: 'opencode-go', reasoning_effort: 'high',
+    },
+    {
+      provider: 'deepseek', route: 'deepseek', display_name: 'DeepSeek Official',
+      base_url: 'https://api.deepseek.com', model: 'deepseek-reasoner',
+      api_style: 'deepseek', reasoning_effort: null,
+    },
+  ])
   api.providerCheck.mockResolvedValue({
     provider: 'deepseek', model: 'deepseek-v4-pro', status: 'ok', request_id: 'req-1', input_tokens: 12, output_tokens: 8, latency_ms: 120, error_code: null,
   })
