@@ -34,6 +34,15 @@ class Settings(BaseSettings):
     max_steps_per_task: int = 20
     max_replans: int = 2
     task_timeout_seconds: int = 1800
+    max_parallel_subtasks_per_conversation: int = 3
+    max_subtasks_per_turn: int = 12
+    max_model_calls_per_subtask: int = 4
+    max_tool_calls_per_subtask: int = 6
+    subtask_timeout_seconds: int = 180
+    max_replans_per_turn: int = 2
+    max_conversation_context_tokens: int = 32_000
+    max_attachments_per_message: int = 20
+    max_attachment_total_bytes: int = 209_715_200
 
     deepseek_api_key: str | None = None
     deepseek_api_key_file: Path | None = None
@@ -56,6 +65,50 @@ class Settings(BaseSettings):
     def validate_worker_concurrency(cls, value: int) -> int:
         if not 1 <= value <= 3:
             raise ValueError("worker_concurrency must be between 1 and 3")
+        return value
+
+    @field_validator(
+        "max_parallel_subtasks_per_conversation",
+        "max_subtasks_per_turn",
+        "max_model_calls_per_subtask",
+        "max_tool_calls_per_subtask",
+        "subtask_timeout_seconds",
+        "max_replans_per_turn",
+        "max_conversation_context_tokens",
+        "max_attachments_per_message",
+        "max_attachment_total_bytes",
+        mode="before",
+    )
+    @classmethod
+    def reject_boolean_conversation_limits(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("conversation limits must be positive integers")
+        return value
+
+    @field_validator(
+        "max_parallel_subtasks_per_conversation",
+        "max_subtasks_per_turn",
+        "max_model_calls_per_subtask",
+        "max_tool_calls_per_subtask",
+        "subtask_timeout_seconds",
+        "max_replans_per_turn",
+        "max_conversation_context_tokens",
+        "max_attachments_per_message",
+        "max_attachment_total_bytes",
+    )
+    @classmethod
+    def validate_positive_conversation_limits(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("conversation limits must be positive integers")
+        return value
+
+    @field_validator("max_parallel_subtasks_per_conversation")
+    @classmethod
+    def validate_conversation_parallelism(cls, value: int) -> int:
+        if value > 3:
+            raise ValueError(
+                "max_parallel_subtasks_per_conversation cannot exceed 3"
+            )
         return value
 
     def deepseek_key(self) -> str | None:

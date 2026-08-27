@@ -9,6 +9,7 @@ from typing import Annotated, Any, TypeVar
 from uuid import UUID
 
 from pydantic import (
+    AfterValidator,
     BaseModel,
     BeforeValidator,
     ConfigDict,
@@ -85,6 +86,19 @@ OpaqueSubtaskID = Annotated[
     StringConstraints(
         strict=True, strip_whitespace=True, min_length=1, max_length=36
     ),
+]
+
+
+def _non_whitespace(value: str) -> str:
+    if not value.strip():
+        raise ValueError("must not be whitespace-only")
+    return value
+
+
+IdempotencyKey = Annotated[
+    str,
+    StringConstraints(strict=True, min_length=1, max_length=255),
+    AfterValidator(_non_whitespace),
 ]
 
 
@@ -199,10 +213,6 @@ class ConversationRead(_StrictModel):
     updated_at: datetime
 
 
-class UserMessageCreate(_StrictModel):
-    content: str = Field(min_length=1, max_length=64_000, strict=True)
-
-
 class ConversationMessageWrite(_StrictModel):
     role: ConversationMessageRole
     kind: ConversationMessageKind
@@ -300,6 +310,19 @@ SafeClientRelativePath = Annotated[
 ]
 
 
+class MessageSubmission(_StrictModel):
+    content: Annotated[
+        str,
+        StringConstraints(strict=True, min_length=1, max_length=64_000),
+        AfterValidator(_non_whitespace),
+    ]
+    relative_paths: list[SafeClientRelativePath | None] = Field(default_factory=list)
+
+
+class UserMessageCreate(MessageSubmission):
+    """Backward-compatible name for the strict conversation submission DTO."""
+
+
 class AttachmentMetadataCreate(_StrictModel):
     original_name: str = Field(min_length=1, max_length=255, strict=True)
     storage_ref: SafeStorageRef
@@ -319,6 +342,25 @@ class AttachmentRead(AttachmentMetadataCreate):
     id: CanonicalUUID
     message_id: CanonicalUUID
     created_at: datetime
+
+
+class MessageWithAttachments(_StrictModel):
+    message: ConversationMessageRead
+    attachments: list[AttachmentRead] = Field(default_factory=list)
+
+
+class ConversationDetailRead(_StrictModel):
+    conversation: ConversationRead
+    messages: list[MessageWithAttachments] = Field(default_factory=list)
+    turns: list[ConversationTurnRead] = Field(default_factory=list)
+    active_turn: ConversationTurnRead | None = None
+
+
+class MessageSendRead(_StrictModel):
+    message: ConversationMessageRead
+    attachments: list[AttachmentRead] = Field(default_factory=list)
+    turn: ConversationTurnRead
+    replayed: bool
 
 
 def _validate_json_value(value: object, path: str = "$") -> None:

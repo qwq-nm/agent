@@ -143,7 +143,7 @@ class ConversationRepository:
         commit: bool = True,
     ) -> ConversationRead:
         def write() -> ConversationRead:
-            row = self._require_conversation(actor, conversation_id)
+            row = self._lock_conversation(actor, conversation_id)
             row.status = ConversationStatus.ARCHIVED.value
             self.session.flush()
             return self._conversation_read(row)
@@ -217,6 +217,21 @@ class ConversationRepository:
             select(ConversationMessageRow).where(
                 ConversationMessageRow.id == message_id,
                 ConversationMessageRow.conversation_id == conversation_id,
+            )
+        )
+        return self._message_read(row) if row is not None else None
+
+    def get_message_by_idempotency_key(
+        self,
+        actor: AuthenticatedUser,
+        conversation_id: str,
+        idempotency_key: str,
+    ) -> ConversationMessageRead | None:
+        self._require_conversation(actor, conversation_id)
+        row = self.session.scalar(
+            select(ConversationMessageRow).where(
+                ConversationMessageRow.conversation_id == conversation_id,
+                ConversationMessageRow.idempotency_key == idempotency_key,
             )
         )
         return self._message_read(row) if row is not None else None
