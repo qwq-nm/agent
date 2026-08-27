@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Callable, Sequence
 
 from fastapi import UploadFile
 from pydantic import TypeAdapter
-from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
 from secagent.config import Settings
@@ -66,6 +65,10 @@ class ConversationReplayCorruptState(RuntimeError):
 
 class ConversationCommitOutcomeUnknown(RuntimeError):
     """COMMIT outcome is uncertain and filesystem reconciliation is required."""
+
+
+class ConversationCommitNotApplied(RuntimeError):
+    """Controlled transaction adapter evidence that COMMIT was not attempted."""
 
 
 @dataclass(frozen=True)
@@ -586,9 +589,7 @@ class ConversationService:
             ) from exc
 
     def _commit_explicitly_not_applied(self, error: Exception) -> bool:
-        if isinstance(error, DBAPIError) and error.connection_invalidated:
-            return False
-        return self.session.in_transaction()
+        return isinstance(error, ConversationCommitNotApplied)
 
     def _require_clean_writer(self) -> None:
         meaningfully_dirty = any(

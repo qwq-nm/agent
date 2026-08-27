@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import unicodedata
 from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Any, TypeVar
@@ -41,6 +42,10 @@ _WINDOWS_RESERVED_NAMES = {
     *(f"LPT{index}" for index in range(1, 10)),
 }
 _WINDOWS_FORBIDDEN_CHARACTERS = frozenset('<>:"|?*')
+
+
+def contains_unicode_control_characters(value: str) -> bool:
+    return any(unicodedata.category(character).startswith("C") for character in value)
 
 
 def _canonical_uuid(value: object) -> str:
@@ -288,7 +293,8 @@ def _safe_relative_posix_path(value: object) -> str:
         if segment.endswith((".", " ")):
             raise ValueError("path contains a Windows-normalized alias")
         if any(
-            character in _WINDOWS_FORBIDDEN_CHARACTERS or ord(character) < 32
+            character in _WINDOWS_FORBIDDEN_CHARACTERS
+            or contains_unicode_control_characters(character)
             for character in segment
         ):
             raise ValueError("path contains a Windows-forbidden character")

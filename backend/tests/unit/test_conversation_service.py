@@ -52,6 +52,7 @@ from secagent.services.conversation_events import ConversationEventService
 from secagent.services.conversation_service import (
     ArchivedConversationError,
     AttachmentIdempotencyConflict,
+    ConversationCommitNotApplied,
     ConversationCommitOutcomeUnknown,
     ConversationReplayCorruptState,
     ConversationService,
@@ -735,10 +736,10 @@ async def test_explicit_commit_failure_compensates_but_uncertain_commit_keeps_fi
     original_commit = service.session.commit
 
     def fail_before_commit():
-        raise RuntimeError("explicitly not committed")
+        raise ConversationCommitNotApplied("explicitly not committed")
 
     monkeypatch.setattr(service.session, "commit", fail_before_commit)
-    with pytest.raises(RuntimeError, match="not committed"):
+    with pytest.raises(ConversationCommitNotApplied, match="not committed"):
         await service.send_message(
             service_env.alice,
             conversation.id,
@@ -799,6 +800,50 @@ async def test_connection_invalidated_during_commit_is_treated_as_uncertain(
             [_upload("uncertain.txt", b"keep for reconciliation")],
             "connection-invalidated",
         )
+    message_parent = (
+        service_env.settings.data_dir
+        / "conversations"
+        / conversation.id
+        / "messages"
+    )
+    assert message_parent.exists() and len(list(message_parent.iterdir())) == 1
+
+
+@pytest.mark.asyncio
+async def test_noninvalidated_driver_commit_error_defaults_to_uncertain(
+    service_env: ServiceEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = service_env.service()
+    conversation = service.create(service_env.alice, ConversationCreate())
+    invalidations = 0
+    original_invalidate = service.session.invalidate
+
+    def track_invalidate():
+        nonlocal invalidations
+        invalidations += 1
+        original_invalidate()
+
+    def driver_error_with_live_client_transaction():
+        assert service.session.in_transaction()
+        raise OperationalError(
+            "COMMIT",
+            {},
+            RuntimeError("driver timeout after COMMIT write"),
+            connection_invalidated=False,
+        )
+
+    monkeypatch.setattr(service.session, "invalidate", track_invalidate)
+    monkeypatch.setattr(service.session, "commit", driver_error_with_live_client_transaction)
+    with pytest.raises(ConversationCommitOutcomeUnknown):
+        await service.send_message(
+            service_env.alice,
+            conversation.id,
+            MessageSubmission(content="uncertain", relative_paths=[None]),
+            [_upload("uncertain.txt", b"keep for reconciliation")],
+            "noninvalidated-driver-error",
+        )
+    assert invalidations == 1
+    assert not service.session.in_transaction()
     message_parent = (
         service_env.settings.data_dir
         / "conversations"

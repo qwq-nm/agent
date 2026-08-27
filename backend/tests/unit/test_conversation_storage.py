@@ -2,6 +2,8 @@ import hashlib
 import io
 import os
 import asyncio
+import gc
+import weakref
 from pathlib import Path
 from uuid import uuid4
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -156,6 +158,7 @@ async def test_count_relative_path_and_size_limits_fail_without_residue(
         "nul.txt",
         "file.txt:stream",
         "control\x01.txt",
+        "control\u0085.txt",
         "trailing.",
         "trailing ",
         "x" * 256,
@@ -214,6 +217,7 @@ async def test_zip_is_preserved_detected_by_name_or_signature_and_isolated(
         [("trailing./file.txt", b"x")],
         [("trailing /file.txt", b"x")],
         [("control\x01.txt", b"x")],
+        [("control\u0085.txt", b"x")],
         [("x" * 256 + ".txt", b"x")],
         [("A.txt", b"a"), ("a.txt", b"b")],
         [("é.txt", b"a"), ("e\u0301.txt", b"b")],
@@ -346,3 +350,28 @@ async def test_cancelled_partial_staging_cleans_its_workspace(tmp_path: Path) ->
     with pytest.raises(asyncio.CancelledError):
         await service.stage_many([upload], [None])
     assert not service.staging_root.exists() or not any(service.staging_root.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_completed_batches_are_collectible_and_cleanup_remains_idempotent(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    references = []
+    for _index in range(10):
+        batch = await service.stage_many([], [])
+        service.cleanup_staged(batch)
+        service.cleanup_staged(batch)
+        references.append(weakref.ref(batch))
+
+    published = await service.stage_many([_upload("a.txt", b"a")], [None])
+    service.publish(published, _uuid(), _uuid())
+    service.cleanup_staged(published)
+    service.cleanup_staged(published)
+    references.append(weakref.ref(published))
+
+    del batch
+    del published
+    gc.collect()
+    assert all(reference() is None for reference in references)
+    assert len(service._issued_batches) == 0

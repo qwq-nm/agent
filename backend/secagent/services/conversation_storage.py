@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Sequence
 from uuid import uuid4
+from weakref import WeakKeyDictionary
 from zipfile import BadZipFile, ZipFile
 
 from fastapi import UploadFile
@@ -20,6 +21,7 @@ from secagent.conversation_domain import (
     AttachmentMetadataCreate,
     CanonicalUUID,
     SafeClientRelativePath,
+    contains_unicode_control_characters,
 )
 from secagent.security.files import UnsafeArchive, extract_zip_safely
 
@@ -65,7 +67,7 @@ class _StagedAttachment:
 class StagedAttachmentBatch:
     """Opaque capability representing one service-owned temporary batch."""
 
-    __slots__ = ("_batch_id", "_entries", "_owner")
+    __slots__ = ("_batch_id", "_entries", "_owner", "__weakref__")
 
     def __init__(
         self,
@@ -87,7 +89,9 @@ class ConversationStorageService:
         self.max_attachments_per_message = settings.max_attachments_per_message
         self.max_attachment_total_bytes = settings.max_attachment_total_bytes
         self._owner = object()
-        self._issued_batches: dict[StagedAttachmentBatch, str | None] = {}
+        self._issued_batches: WeakKeyDictionary[
+            StagedAttachmentBatch, str | None
+        ] = WeakKeyDictionary()
 
     @property
     def staging_root(self) -> Path:
@@ -320,7 +324,7 @@ class ConversationStorageService:
             raise AttachmentStorageError("filename must be one safe path segment")
         if name.endswith((".", " ")):
             raise AttachmentStorageError("filename has a trailing dot or space")
-        if ":" in name or any(unicodedata.category(char).startswith("C") for char in name):
+        if ":" in name or contains_unicode_control_characters(name):
             raise AttachmentStorageError("filename contains an unsafe character")
         if name.split(".", 1)[0].upper() in _WINDOWS_RESERVED_NAMES:
             raise AttachmentStorageError("filename uses a Windows device alias")
