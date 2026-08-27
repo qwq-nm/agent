@@ -30,6 +30,7 @@ from secagent.conversation_domain import (
 from secagent.conversation_repository import (
     ConversationInvariantError,
     ConversationRepository,
+    ConversationRepositoryStateError,
     MessageIdempotencyConflict,
 )
 from secagent.db import Base, make_engine
@@ -430,6 +431,115 @@ def test_allocator_first_statement_is_conditional_conversation_update(repository
     assert "OWNER_ID" in first_dml
 
 
+@pytest.mark.parametrize("allocator", ["message", "turn"])
+@pytest.mark.parametrize("state_kind", ["new", "dirty", "deleted"])
+def test_allocator_rejects_pending_caller_state_before_any_sql(
+    repository_env, allocator: str, state_kind: str
+):
+    factory, alice, bob, _admin = repository_env
+    conversation = _create_conversation(factory, alice)
+    with factory() as seed_session:
+        trigger_id = ConversationRepository(seed_session).add_message(
+            alice, conversation.id, _message("trigger")
+        ).message.id
+
+    with factory() as session:
+        if state_kind == "new":
+            pending = UserRow(
+                id=str(uuid4()),
+                username=f"pending-{uuid4()}",
+                password_hash="unused",
+                role=UserRole.ANALYST.value,
+            )
+            session.add(pending)
+        else:
+            pending = session.get(UserRow, bob.id)
+            assert pending is not None
+            if state_kind == "dirty":
+                pending.username = "bob-dirty"
+            else:
+                session.delete(pending)
+
+        statements: list[str] = []
+        engine = factory.kw["bind"]
+
+        def capture(_conn, _cursor, statement, _parameters, _context, _many):
+            statements.append(" ".join(statement.split()).upper())
+
+        event.listen(engine, "before_cursor_execute", capture)
+        try:
+            repository = ConversationRepository(session)
+            with pytest.raises(ConversationRepositoryStateError):
+                if allocator == "message":
+                    repository.add_message(
+                        alice, conversation.id, _message("must not flush")
+                    )
+                else:
+                    repository.create_turn(
+                        alice,
+                        conversation.id,
+                        ConversationTurnCreate(
+                            trigger_message_id=trigger_id, budget=_budget()
+                        ),
+                    )
+        finally:
+            event.remove(engine, "before_cursor_execute", capture)
+
+        assert statements == []
+        collection = {
+            "new": session.new,
+            "dirty": session.dirty,
+            "deleted": session.deleted,
+        }[state_kind]
+        assert pending in collection
+        session.rollback()
+
+
+def test_commit_failure_rolls_back_full_write_and_session_remains_usable(
+    repository_env, monkeypatch
+):
+    factory, alice, _bob, _admin = repository_env
+    conversation = _create_conversation(factory, alice)
+    with factory() as session:
+        repository = ConversationRepository(session)
+        original_commit = session.commit
+        original_rollback = session.rollback
+        rollback_calls = 0
+
+        def fail_commit() -> None:
+            raise RuntimeError("injected commit failure")
+
+        def track_rollback() -> None:
+            nonlocal rollback_calls
+            rollback_calls += 1
+            original_rollback()
+
+        monkeypatch.setattr(session, "commit", fail_commit)
+        monkeypatch.setattr(session, "rollback", track_rollback)
+        with pytest.raises(RuntimeError, match="injected commit failure"):
+            repository.add_message(
+                alice, conversation.id, _message("must roll back")
+            )
+
+        assert rollback_calls == 1
+        assert not session.in_transaction()
+        monkeypatch.setattr(session, "commit", original_commit)
+        created = repository.add_message(
+            alice, conversation.id, _message("usable afterward")
+        ).message
+        assert created.sequence == 1
+
+    with factory() as session:
+        row = session.get(ConversationRow, conversation.id)
+        assert row is not None
+        assert row.next_message_sequence == 2
+        assert session.scalar(
+            select(func.count()).select_from(ConversationMessageRow).where(
+                ConversationMessageRow.conversation_id == conversation.id
+            )
+        ) == 1
+
+
 def test_parallel_message_allocation_is_unique_contiguous_and_exact(repository_env):
     factory, alice, _bob, _admin = repository_env
     conversation = _create_conversation(factory, alice)
@@ -565,6 +675,51 @@ def test_parallel_turns_are_contiguous_highest_active_and_same_trigger_is_unique
                 ConversationTurnRow.conversation_id == conversation.id
             )
         ) == 11
+
+
+def test_stale_cached_trigger_cannot_create_second_turn_or_counter_gap(
+    repository_env,
+):
+    factory, alice, _bob, _admin = repository_env
+    conversation = _create_conversation(factory, alice)
+    with factory() as seed_session:
+        trigger = ConversationRepository(seed_session).add_message(
+            alice, conversation.id, _message("cached trigger")
+        ).message
+
+    with factory() as stale_session:
+        stale_row = stale_session.get(ConversationMessageRow, trigger.id)
+        assert stale_row is not None
+        assert stale_row.turn_id is None
+
+        with factory() as winning_session:
+            first_turn = ConversationRepository(winning_session).create_turn(
+                alice,
+                conversation.id,
+                ConversationTurnCreate(trigger_message_id=trigger.id, budget=_budget()),
+            )
+
+        assert stale_row.turn_id is None
+        with pytest.raises(ConversationInvariantError):
+            ConversationRepository(stale_session).create_turn(
+                alice,
+                conversation.id,
+                ConversationTurnCreate(trigger_message_id=trigger.id, budget=_budget()),
+            )
+
+    with factory() as session:
+        linked = session.get(ConversationMessageRow, trigger.id)
+        conversation_row = session.get(ConversationRow, conversation.id)
+        assert linked is not None
+        assert conversation_row is not None
+        assert linked.turn_id == first_turn.id
+        assert conversation_row.active_turn_id == first_turn.id
+        assert conversation_row.next_turn_plan_version == 2
+        assert session.scalar(
+            select(func.count()).select_from(ConversationTurnRow).where(
+                ConversationTurnRow.conversation_id == conversation.id
+            )
+        ) == 1
 
 
 def test_active_turn_highest_only_and_expected_clear_is_cas(repository_env):
@@ -739,6 +894,70 @@ def test_events_use_global_cursor_strict_boundary_order_and_isolation(repository
         assert repository.events_after(
             alice, first.id, cursor=events[-1].cursor
         ) == []
+
+
+def test_event_append_locks_owned_conversation_before_insert(repository_env):
+    factory, alice, _bob, _admin = repository_env
+    conversation = _create_conversation(factory, alice)
+    statements: list[str] = []
+    engine = factory.kw["bind"]
+
+    def capture(_conn, _cursor, statement, _parameters, _context, _many):
+        normalized = " ".join(statement.split()).upper()
+        if normalized.startswith(("SELECT", "UPDATE", "INSERT", "DELETE")):
+            statements.append(normalized)
+
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        with factory() as session:
+            ConversationRepository(session).append_event(
+                alice,
+                conversation.id,
+                ConversationEventCreate(event_type="serialized"),
+            )
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+
+    event_insert = next(
+        index
+        for index, statement in enumerate(statements)
+        if statement.startswith("INSERT INTO CONVERSATION_EVENTS")
+    )
+    assert event_insert > 0
+    assert statements[0].startswith("UPDATE CONVERSATIONS")
+    assert "RETURNING" in statements[0]
+    assert "OWNER_ID" in statements[0]
+
+
+def test_concurrent_same_conversation_events_have_exact_visible_cursor_order(
+    repository_env,
+):
+    factory, alice, _bob, _admin = repository_env
+    conversation = _create_conversation(factory, alice)
+    workers = 8
+    barrier = Barrier(workers)
+
+    def append(index: int) -> tuple[int, int]:
+        with factory() as session:
+            barrier.wait()
+            created = ConversationRepository(session).append_event(
+                alice,
+                conversation.id,
+                ConversationEventCreate(
+                    event_type="concurrent", payload={"index": index}
+                ),
+            )
+            return created.cursor, index
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        results = list(executor.map(append, range(workers)))
+
+    with factory() as session:
+        visible = ConversationRepository(session).events_after(
+            alice, conversation.id
+        )
+    assert [item.cursor for item in visible] == sorted(cursor for cursor, _ in results)
+    assert {item.payload["index"] for item in visible} == set(range(workers))
 
 
 def test_message_turn_attachment_pagination_and_validation(repository_env):

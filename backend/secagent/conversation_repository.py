@@ -43,6 +43,10 @@ class ConversationInvariantError(ValueError):
     """A child reference violates a conversation relationship invariant."""
 
 
+class ConversationRepositoryStateError(RuntimeError):
+    """The caller Session has pending state outside repository ownership."""
+
+
 class MessageIdempotencyConflict(RuntimeError):
     """An idempotency key was reused for a different immutable message."""
 
@@ -292,7 +296,7 @@ class ConversationRepository:
         def write() -> ConversationTurnRead:
             conversation = self._lock_conversation(actor, conversation_id)
             trigger = self._require_message(
-                conversation_id, payload.trigger_message_id
+                conversation_id, payload.trigger_message_id, populate_existing=True
             )
             if trigger.turn_id is not None:
                 raise ConversationInvariantError(
@@ -325,7 +329,20 @@ class ConversationRepository:
             )
             self.session.add(row)
             self.session.flush()
-            trigger.turn_id = row.id
+            linked_id = self.session.scalar(
+                update(ConversationMessageRow)
+                .where(
+                    ConversationMessageRow.id == payload.trigger_message_id,
+                    ConversationMessageRow.conversation_id == conversation_id,
+                    ConversationMessageRow.turn_id.is_(None),
+                )
+                .values(turn_id=row.id)
+                .returning(ConversationMessageRow.id)
+            )
+            if linked_id is None:
+                raise ConversationInvariantError(
+                    "trigger message is already linked to a turn"
+                )
             conversation.active_turn_id = row.id
             self.session.flush()
             return self._turn_read(row)
@@ -430,7 +447,7 @@ class ConversationRepository:
         commit: bool = True,
     ) -> ConversationEventRead:
         def write() -> ConversationEventRead:
-            self._require_conversation(actor, conversation_id)
+            self._lock_conversation(actor, conversation_id)
             if payload.turn_id is not None:
                 self._require_turn(conversation_id, payload.turn_id)
             row = ConversationEventRow(
@@ -469,19 +486,31 @@ class ConversationRepository:
         return [self._event_read(row) for row in rows]
 
     def _write(self, operation: Callable[[], T], *, commit: bool) -> T:
-        nested = self.session.begin_nested()
+        self._reject_pending_caller_state()
+        nested = None
         try:
+            nested = self.session.begin_nested()
             result = operation()
             self.session.flush()
+            if commit:
+                self.session.commit()
+            return result
         except Exception:
-            nested.rollback()
             if commit:
                 self.session.rollback()
+            elif nested is not None and nested.is_active:
+                nested.rollback()
             raise
-        if commit:
-            nested.commit()
-            self.session.commit()
-        return result
+
+    def _reject_pending_caller_state(self) -> None:
+        meaningfully_dirty = any(
+            self.session.is_modified(row, include_collections=True)
+            for row in self.session.dirty
+        )
+        if self.session.new or self.session.deleted or meaningfully_dirty:
+            raise ConversationRepositoryStateError(
+                "pending caller Session state must be flushed explicitly"
+            )
 
     def _lock_conversation(
         self, actor: AuthenticatedUser, conversation_id: str
@@ -544,14 +573,19 @@ class ConversationRepository:
             raise ForbiddenResource("conversation")
 
     def _require_message(
-        self, conversation_id: str, message_id: str
+        self,
+        conversation_id: str,
+        message_id: str,
+        *,
+        populate_existing: bool = False,
     ) -> ConversationMessageRow:
-        row = self.session.scalar(
-            select(ConversationMessageRow).where(
-                ConversationMessageRow.id == message_id,
-                ConversationMessageRow.conversation_id == conversation_id,
-            )
+        statement = select(ConversationMessageRow).where(
+            ConversationMessageRow.id == message_id,
+            ConversationMessageRow.conversation_id == conversation_id,
         )
+        if populate_existing:
+            statement = statement.execution_options(populate_existing=True)
+        row = self.session.scalar(statement)
         if row is None:
             raise ConversationInvariantError(
                 "message must belong to the conversation"
