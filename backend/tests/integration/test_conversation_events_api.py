@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from fastapi.testclient import TestClient
 
 from secagent.api import conversation_events as conversation_events_module
 from secagent.api.conversation_events import stream_conversation_events
@@ -11,13 +12,46 @@ from secagent.auth import stream_tickets as stream_ticket_module
 from secagent.auth.stream_tickets import ConversationStreamTicketService
 from secagent.conversation_domain import ConversationCreate, ConversationEventCreate
 from secagent.conversation_repository import ConversationRepository
+from secagent.db import Base
 from secagent.db_models import ConversationRow, UserRow
 from secagent.domain import UserRole
+from secagent.main import create_app
+from secagent.queue.fake import FakeJobQueue
 
 
 def _assert_error(response, status: int, code: str) -> None:
     assert response.status_code == status
     assert response.json()["error"]["code"] == code
+
+
+@pytest.mark.parametrize("configuration", ["absent", "unreadable", "malformed"])
+def test_real_signing_configuration_failure_maps_only_event_ticket_to_stream_503(
+    settings, tmp_path: Path, configuration: str
+) -> None:
+    secret_file = None
+    if configuration == "unreadable":
+        secret_file = tmp_path / "missing-signing-key"
+    elif configuration == "malformed":
+        secret_file = tmp_path / "malformed-signing-key"
+        secret_file.write_bytes(b"\xff\xfe\xfa")
+    candidate = settings.model_copy(
+        update={"jwt_signing_key": None, "jwt_signing_key_file": secret_file}
+    )
+    application = create_app(candidate, job_queue=FakeJobQueue())
+    Base.metadata.create_all(application.state.session_factory.kw["bind"])
+
+    with TestClient(application) as test_client:
+        headers = {"Authorization": "Bearer syntactically-valid-credential"}
+        issuance = test_client.post(
+            "/api/conversations/00000000-0000-0000-0000-000000000099/event-ticket",
+            headers=headers,
+        )
+        conversation_rest = test_client.get("/api/conversations", headers=headers)
+        legacy_task = test_client.get("/api/tasks", headers=headers)
+
+    _assert_error(issuance, 503, "event_stream_unavailable")
+    _assert_error(conversation_rest, 503, "service_unavailable")
+    _assert_error(legacy_task, 503, "service_unavailable")
 
 
 def test_conversation_stream_generator_emits_exact_canonical_resumable_frames(
@@ -268,6 +302,51 @@ def test_invalid_cursor_and_invalid_bearer_do_not_burn_ticket(
     assert ticket_only.status_code == 200
 
 
+@pytest.mark.parametrize(
+    ("source", "raw_cursor"),
+    [
+        ("query", "9" * 5_000),
+        ("header", str(2**63)),
+    ],
+)
+def test_decimal_cursor_beyond_db_bigint_is_safe_and_burns_normally(
+    alice_client, client, app, monkeypatch, source: str, raw_cursor: str
+) -> None:
+    conversation = alice_client.post("/api/conversations", json={}).json()
+    ticket = alice_client.post(
+        f"/api/conversations/{conversation['id']}/event-ticket"
+    ).json()["ticket"]
+    app.state.conversation_event_stream_max_polls = 1
+    observed: list[int] = []
+
+    def no_events(self, _actor, _conversation_id, *, cursor, limit):
+        assert limit == 1_000
+        observed.append(cursor)
+        return []
+
+    monkeypatch.setattr(ConversationRepository, "events_after", no_events)
+    params = {"ticket": ticket}
+    headers = None
+    if source == "query":
+        params["after"] = raw_cursor
+    else:
+        headers = {"Last-Event-ID": raw_cursor}
+
+    streamed = client.get(
+        f"/api/conversations/{conversation['id']}/events",
+        params=params,
+        headers=headers,
+    )
+    replay = client.get(
+        f"/api/conversations/{conversation['id']}/events",
+        params={"ticket": ticket},
+    )
+
+    assert streamed.status_code == 200
+    assert observed == [2**63 - 1]
+    _assert_error(replay, 401, "invalid_stream_ticket")
+
+
 def test_conversation_ticket_owner_admin_forbidden_and_missing(
     alice_client, bob_client, admin_client
 ) -> None:
@@ -382,6 +461,29 @@ def test_wrong_valid_bearer_scope_does_not_burn_and_matching_bearer_consumes(
     assert matching.status_code == 200
 
 
+def test_cryptographically_invalid_bearer_does_not_burn_ticket(
+    alice_client, client, app
+) -> None:
+    conversation = alice_client.post("/api/conversations", json={}).json()
+    ticket = alice_client.post(
+        f"/api/conversations/{conversation['id']}/event-ticket"
+    ).json()["ticket"]
+    app.state.conversation_event_stream_max_polls = 1
+
+    invalid = client.get(
+        f"/api/conversations/{conversation['id']}/events",
+        params={"ticket": ticket},
+        headers={"Authorization": "Bearer abc.def.ghi"},
+    )
+    valid = client.get(
+        f"/api/conversations/{conversation['id']}/events",
+        params={"ticket": ticket},
+    )
+
+    _assert_error(invalid, 401, "invalid_stream_ticket")
+    assert valid.status_code == 200
+
+
 def test_authentication_configuration_failure_does_not_burn_ticket(
     alice_client, client, app, tmp_path: Path
 ) -> None:
@@ -481,6 +583,7 @@ def test_inactive_ticket_subject_burns_ticket(alice_client, client, app) -> None
     ticket = alice_client.post(
         f"/api/conversations/{conversation['id']}/event-ticket"
     ).json()["ticket"]
+    app.state.conversation_event_stream_max_polls = 1
     with app.state.session_factory() as session:
         user = session.get(UserRow, conversation["owner_id"])
         user.is_active = False
@@ -489,6 +592,37 @@ def test_inactive_ticket_subject_burns_ticket(alice_client, client, app) -> None
     inactive = client.get(
         f"/api/conversations/{conversation['id']}/events",
         params={"ticket": ticket},
+    )
+    with app.state.session_factory() as session:
+        user = session.get(UserRow, conversation["owner_id"])
+        user.is_active = True
+        session.commit()
+    replay = client.get(
+        f"/api/conversations/{conversation['id']}/events",
+        params={"ticket": ticket},
+    )
+
+    _assert_error(inactive, 401, "invalid_stream_ticket")
+    _assert_error(replay, 401, "invalid_stream_ticket")
+
+
+def test_inactive_ticket_subject_with_matching_bearer_burns_ticket(
+    alice_client, client, app
+) -> None:
+    conversation = alice_client.post("/api/conversations", json={}).json()
+    ticket = alice_client.post(
+        f"/api/conversations/{conversation['id']}/event-ticket"
+    ).json()["ticket"]
+    app.state.conversation_event_stream_max_polls = 1
+    with app.state.session_factory() as session:
+        user = session.get(UserRow, conversation["owner_id"])
+        user.is_active = False
+        session.commit()
+
+    inactive = client.get(
+        f"/api/conversations/{conversation['id']}/events",
+        params={"ticket": ticket},
+        headers={"Authorization": alice_client.headers["Authorization"]},
     )
     with app.state.session_factory() as session:
         user = session.get(UserRow, conversation["owner_id"])
@@ -532,6 +666,55 @@ class _FailingReplayStore:
     def consume(self, _jti_hash: str, _ttl_seconds: int) -> bool:
         self.calls += 1
         raise RuntimeError("redis://secret-host/replay")
+
+
+class _ReplayBeforeApply(RuntimeError):
+    pass
+
+
+class _ReplayOutcomeUnknown(RuntimeError):
+    pass
+
+
+class _SemanticFailingReplayStore:
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+        self.calls = 0
+        self.applied_before_error = False
+
+    def consume(self, _jti_hash: str, _ttl_seconds: int) -> bool:
+        self.calls += 1
+        if isinstance(self.error, _ReplayOutcomeUnknown):
+            self.applied_before_error = True
+        raise self.error
+
+
+@pytest.mark.parametrize(
+    ("error", "applied_before_error"),
+    [
+        (_ReplayBeforeApply("before-apply-secret"), False),
+        (_ReplayOutcomeUnknown("outcome-unknown-secret"), True),
+    ],
+)
+def test_distinct_replay_store_exceptions_are_503_without_automatic_retry(
+    alice_client, client, app, error: Exception, applied_before_error: bool
+) -> None:
+    conversation = alice_client.post("/api/conversations", json={}).json()
+    store = _SemanticFailingReplayStore(error)
+    service = ConversationStreamTicketService(app.state.settings.jwt_key(), store)
+    ticket = service.issue(conversation["owner_id"], conversation["id"])
+    app.state.conversation_stream_ticket_service = service
+
+    response = client.get(
+        f"/api/conversations/{conversation['id']}/events",
+        params={"ticket": ticket},
+    )
+
+    _assert_error(response, 503, "event_stream_unavailable")
+    assert store.calls == 1
+    assert store.applied_before_error is applied_before_error
+    assert ticket not in response.text
+    assert str(error) not in response.text
 
 
 def test_ticket_infrastructure_failures_are_sanitized_503(

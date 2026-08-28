@@ -187,20 +187,23 @@ def test_multipart_preserves_file_order_metadata_and_bytes(
     alice_client, app
 ) -> None:
     conversation = alice_client.post("/api/conversations", json={}).json()
-    response = alice_client.post(
-        f"/api/conversations/{conversation['id']}/messages",
-        data={
-            "payload": '{"content":"inspect attachments","relative_paths":["a/one.txt","b/two.txt"]}'
-        },
-        files=[
-            ("files", ("one.txt", b"first bytes", "text/plain")),
-            ("files", ("two.txt", b"second bytes", "text/plain")),
-        ],
-        headers={"Idempotency-Key": "multipart-1"},
-    )
+    path = f"/api/conversations/{conversation['id']}/messages"
+    data = {
+        "payload": '{"content":"inspect attachments","relative_paths":["a/one.txt","b/two.txt"]}'
+    }
+    files = [
+        ("files", ("one.txt", b"first bytes", "text/plain")),
+        ("files", ("two.txt", b"second bytes", "text/plain")),
+    ]
+    headers = {"Idempotency-Key": "multipart-1"}
 
-    assert response.status_code == 201
-    attachments = response.json()["attachments"]
+    first = alice_client.post(path, data=data, files=files, headers=headers)
+    replay = alice_client.post(path, data=data, files=files, headers=headers)
+
+    assert first.status_code == 201
+    assert replay.status_code == 200
+    assert replay.json() == first.json() | {"replayed": True}
+    attachments = first.json()["attachments"]
     assert [item["original_name"] for item in attachments] == ["one.txt", "two.txt"]
     assert [item["relative_path"] for item in attachments] == [
         "a/one.txt",
@@ -210,8 +213,44 @@ def test_multipart_preserves_file_order_metadata_and_bytes(
         (Path(app.state.settings.data_dir) / item["storage_ref"]).read_bytes()
         for item in attachments
     ] == [b"first bytes", b"second bytes"]
+    assert {
+        path.relative_to(app.state.settings.data_dir).as_posix()
+        for path in Path(app.state.settings.data_dir).rglob("*")
+        if path.is_file()
+    } == {item["storage_ref"] for item in attachments}
     with app.state.session_factory() as session:
-        assert session.scalar(select(func.count()).select_from(MessageAttachmentRow)) == 2
+        counts = {
+            "messages": session.scalar(
+                select(func.count()).select_from(ConversationMessageRow)
+            ),
+            "attachments": session.scalar(
+                select(func.count()).select_from(MessageAttachmentRow)
+            ),
+            "tasks": session.scalar(select(func.count()).select_from(TaskRow)),
+            "turns": session.scalar(
+                select(func.count()).select_from(ConversationTurnRow)
+            ),
+            "events": session.scalar(
+                select(func.count()).select_from(ConversationEventRow)
+            ),
+            "audits": session.scalar(
+                select(func.count())
+                .select_from(AuditEventRow)
+                .where(AuditEventRow.action == "conversation.message.send")
+            ),
+        }
+        attachment_ids = set(
+            session.scalars(select(MessageAttachmentRow.id)).all()
+        )
+    assert counts == {
+        "messages": 1,
+        "attachments": 2,
+        "tasks": 1,
+        "turns": 1,
+        "events": 1,
+        "audits": 1,
+    }
+    assert attachment_ids == {item["id"] for item in attachments}
 
 
 @pytest.mark.parametrize(
@@ -870,3 +909,63 @@ def test_request_writer_closes_on_mapped_exception_and_response_validation_failu
     assert set(writer_ids) <= tracking.closed
     assert "private-exception" not in mapped.text
     assert "invalid-response" not in invalid.text
+
+
+def test_all_new_routes_make_zero_queue_provider_or_model_calls(
+    alice_client, client, app, fake_queue, monkeypatch
+) -> None:
+    calls: list[str] = []
+
+    def unexpected_runtime_build(*_args, **_kwargs):
+        calls.append("provider_runtime_factory.build")
+        raise AssertionError("conversation route built provider runtime")
+
+    async def unexpected_model_complete(*_args, **_kwargs):
+        calls.append("model_router.complete")
+        raise AssertionError("conversation route called model router")
+
+    async def unexpected_provider_complete(*_args, **_kwargs):
+        calls.append("provider.complete")
+        raise AssertionError("conversation route called provider")
+
+    monkeypatch.setattr(
+        app.state.provider_runtime_factory, "build", unexpected_runtime_build
+    )
+    monkeypatch.setattr(app.state.model_router, "complete", unexpected_model_complete)
+    for provider in app.state.model_router.providers.values():
+        monkeypatch.setattr(provider, "complete", unexpected_provider_complete)
+
+    created = alice_client.post("/api/conversations", json={})
+    conversation_id = created.json()["id"]
+    listed = alice_client.get("/api/conversations")
+    detail = alice_client.get(f"/api/conversations/{conversation_id}")
+    patched = alice_client.patch(
+        f"/api/conversations/{conversation_id}", json={"title": "No model"}
+    )
+    sent = alice_client.post(
+        f"/api/conversations/{conversation_id}/messages",
+        json={"content": "No provider call", "relative_paths": []},
+        headers={"Idempotency-Key": "zero-provider-model"},
+    )
+    issued = alice_client.post(
+        f"/api/conversations/{conversation_id}/event-ticket"
+    )
+    app.state.conversation_event_stream_max_polls = 1
+    streamed = client.get(
+        f"/api/conversations/{conversation_id}/events",
+        params={"ticket": issued.json()["ticket"]},
+    )
+    archived = alice_client.delete(f"/api/conversations/{conversation_id}")
+
+    assert [
+        created.status_code,
+        listed.status_code,
+        detail.status_code,
+        patched.status_code,
+        sent.status_code,
+        issued.status_code,
+        streamed.status_code,
+        archived.status_code,
+    ] == [201, 200, 200, 200, 201, 200, 200, 200]
+    assert calls == []
+    assert fake_queue.enqueued == []
