@@ -68,6 +68,9 @@ class ModelStage(StrEnum):
     PLAN = "plan"
     CRITIC = "critic"
     REPORT = "report"
+    DECOMPOSE = "decompose"
+    SUBTASK_EXECUTE = "subtask_execute"
+    SYNTHESIZE = "synthesize"
 
 
 class RouteMode(StrEnum):
@@ -117,6 +120,8 @@ class ModelResponse(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     retry_count: int = 0
+    emulated_provider: str | None = None
+    emulated_model: str | None = None
 
     @field_validator("finish_reason", mode="before")
     @classmethod

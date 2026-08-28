@@ -44,7 +44,7 @@ services:
       DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
       DEEPSEEK_API_STYLE: ${DEEPSEEK_API_STYLE:-auto}
       DEEPSEEK_REASONING_EFFORT: ${DEEPSEEK_REASONING_EFFORT:-high}
-      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-pro}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-flash}
       GLM_BASE_URL: ${GLM_BASE_URL:-https://open.bigmodel.cn/api/paas/v4}
       GLM_MODEL: ${GLM_MODEL:-glm-5.2}
     volumes:
@@ -83,7 +83,7 @@ services:
       DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
       DEEPSEEK_API_STYLE: ${DEEPSEEK_API_STYLE:-auto}
       DEEPSEEK_REASONING_EFFORT: ${DEEPSEEK_REASONING_EFFORT:-high}
-      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-pro}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-flash}
       GLM_BASE_URL: ${GLM_BASE_URL:-https://open.bigmodel.cn/api/paas/v4}
       GLM_MODEL: ${GLM_MODEL:-glm-5.2}
     volumes:

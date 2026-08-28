@@ -44,6 +44,7 @@ def deepseek_provider(
     base_url: str = "https://deepseek.invalid/v1",
     api_style: str = "deepseek",
     reasoning_effort: str = "high",
+    model: str = "deepseek-v4-pro",
     sleep: Callable[[float], Awaitable[None]] = _no_sleep,
     jitter: Callable[[], float] = lambda: 0.0,
 ) -> DeepSeekProvider:
@@ -51,7 +52,7 @@ def deepseek_provider(
     return DeepSeekProvider(
         base_url=base_url,
         api_key="deepseek-test-key",
-        model="deepseek-v4-pro",
+        model=model,
         client=_client(sequence, capture),
         api_style=api_style,
         reasoning_effort=reasoning_effort,

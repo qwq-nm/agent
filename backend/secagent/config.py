@@ -47,7 +47,7 @@ class Settings(BaseSettings):
     deepseek_api_key: str | None = None
     deepseek_api_key_file: Path | None = None
     deepseek_base_url: str = "https://api.deepseek.com/v1"
-    deepseek_model: str = "deepseek-v4-pro"
+    deepseek_model: str = "deepseek-v4-flash"
     deepseek_api_style: str = "auto"
     deepseek_reasoning_effort: str = "high"
 

@@ -24,6 +24,7 @@ from secagent.providers.validation import (
 )
 
 MAX_OUTPUT_TOKEN_RETRY_LIMIT = 8192
+DEEPSEEK_V4_FLASH_MODEL = "deepseek-v4-flash"
 
 
 class _StructuredProvider:
@@ -284,8 +285,22 @@ class _StructuredProvider:
 
 class DeepSeekProvider(_StructuredProvider):
     name = "deepseek"
-    allowed_stages = frozenset({ModelStage.PLAN, ModelStage.CRITIC})
-    max_tokens = {ModelStage.PLAN: 4096, ModelStage.CRITIC: 4096}
+    allowed_stages = frozenset(
+        {
+            ModelStage.PLAN,
+            ModelStage.CRITIC,
+            ModelStage.DECOMPOSE,
+            ModelStage.SUBTASK_EXECUTE,
+            ModelStage.SYNTHESIZE,
+        }
+    )
+    max_tokens = {
+        ModelStage.PLAN: 4096,
+        ModelStage.CRITIC: 4096,
+        ModelStage.DECOMPOSE: 4096,
+        ModelStage.SUBTASK_EXECUTE: 4096,
+        ModelStage.SYNTHESIZE: 8192,
+    }
 
     def _provider_options(self) -> dict[str, Any]:
         if self.api_style == "opencode-go":

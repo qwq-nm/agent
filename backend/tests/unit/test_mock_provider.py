@@ -4,6 +4,10 @@ import pytest
 
 from secagent.agents.planner import PlanDocument
 from secagent.agents.reporter import ReportSections
+from secagent.conversation_decomposition import (
+    DecompositionDocument,
+    validate_decomposition,
+)
 from secagent.domain import CriticDecision, ModelRequest, ModelStage
 from secagent.providers.mock import MockProvider
 
@@ -200,3 +204,82 @@ async def test_mock_replan_skips_successful_tools_and_preserves_input_payload() 
         {"tool_name": "url_guard"},
         {"tool_name": "http_fetch"},
     ]
+
+
+def decomposition_request(*, plan_version: int, max_subtasks: int) -> ModelRequest:
+    return ModelRequest(
+        stage=ModelStage.DECOMPOSE,
+        system="分解任务",
+        user=json.dumps(
+            {
+                "plan_version": plan_version,
+                "budget_limits": {"max_subtasks": max_subtasks},
+                "context": {
+                    "current_message": "分析材料和代码",
+                    "available_tools": [
+                        {
+                            "name": "source_scanner",
+                            "risk_level": "low",
+                            "description": "扫描源码",
+                        }
+                    ],
+                },
+            },
+            ensure_ascii=False,
+        ),
+        response_schema=DecompositionDocument.model_json_schema(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_mock_decomposition_emulates_flash_with_stable_two_provider_plan() -> None:
+    response = await MockProvider().complete(
+        decomposition_request(plan_version=7, max_subtasks=4)
+    )
+    document = DecompositionDocument.model_validate(response.data)
+
+    assert validate_decomposition(
+        document, expected_plan_version=7, max_subtasks=4
+    ) is document
+    assert [item.proposed_provider.value for item in document.subtasks] == [
+        "glm",
+        "deepseek",
+    ]
+    assert document.subtasks[1].dependency_keys == [document.subtasks[0].key]
+    assert document.subtasks[1].allowed_tools == ["source_scanner"]
+    assert response.provider == "mock"
+    assert response.model == "deterministic-mock"
+    assert response.emulated_provider == "deepseek"
+    assert response.emulated_model == "deepseek-v4-flash"
+    assert response.is_demo is True
+
+
+@pytest.mark.asyncio
+async def test_mock_decomposition_respects_exact_single_subtask_budget() -> None:
+    response = await MockProvider().complete(
+        decomposition_request(plan_version=9, max_subtasks=1)
+    )
+    document = DecompositionDocument.model_validate(response.data)
+
+    assert validate_decomposition(
+        document, expected_plan_version=9, max_subtasks=1
+    ) is document
+    assert len(document.subtasks) == 1
+    assert document.subtasks[0].required is True
+
+
+@pytest.mark.asyncio
+async def test_legacy_mock_response_does_not_claim_decomposition_emulation() -> None:
+    response = await MockProvider().complete(
+        ModelRequest(
+            stage=ModelStage.REPORT,
+            system="生成报告",
+            user=json.dumps(
+                {"goal": "g", "findings": [], "recommendations": [], "errors": []}
+            ),
+            response_schema=ReportSections.model_json_schema(),
+        )
+    )
+
+    assert response.emulated_provider is None
+    assert response.emulated_model is None

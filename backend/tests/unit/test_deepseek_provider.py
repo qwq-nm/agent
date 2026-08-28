@@ -3,7 +3,7 @@ import json
 import httpx
 import pytest
 
-from secagent.domain import ModelStage
+from secagent.domain import ModelRequest, ModelStage
 from secagent.providers.base import ProviderErrorCode, ProviderUnavailable
 from tests.provider_fakes import deepseek_provider, parse_request, plan_request
 
@@ -56,6 +56,42 @@ async def test_deepseek_payload_is_non_streaming_json_with_thinking() -> None:
     assert payload["thinking"] == {"type": "enabled"}
     assert "JSON" in payload["messages"][0]["content"]
     assert "Example" in payload["messages"][0]["content"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stage", "expected_max_tokens"),
+    [
+        (ModelStage.DECOMPOSE, 4096),
+        (ModelStage.SUBTASK_EXECUTE, 4096),
+        (ModelStage.SYNTHESIZE, 8192),
+    ],
+)
+async def test_deepseek_supports_new_stages_with_bounded_output_tokens(
+    stage: ModelStage, expected_max_tokens: int
+) -> None:
+    requests: list[httpx.Request] = []
+    provider = deepseek_provider(
+        returning={
+            "choices": [
+                {"finish_reason": "stop", "message": {"content": '{"ok":true}'}}
+            ]
+        },
+        capture=requests,
+        model="deepseek-v4-flash",
+    )
+
+    response = await provider.complete(
+        ModelRequest(
+            stage=stage,
+            system="s",
+            user="{}",
+            response_schema={"type": "object"},
+        )
+    )
+
+    assert response.data == {"ok": True}
+    assert json.loads(requests[0].content)["max_tokens"] == expected_max_tokens
 
 
 @pytest.mark.asyncio

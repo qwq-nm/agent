@@ -3,7 +3,7 @@ import json
 import httpx
 import pytest
 
-from secagent.domain import ModelStage
+from secagent.domain import ModelRequest, ModelStage
 from secagent.providers.base import ProviderErrorCode, ProviderUnavailable
 from tests.provider_fakes import glm_provider, parse_request, plan_request
 
@@ -44,6 +44,31 @@ async def test_glm_payload_has_no_thinking_and_uses_parse_token_limit() -> None:
     assert payload["stream"] is False
     assert payload["max_tokens"] == provider.max_tokens[ModelStage.TASK_PARSE]
     assert "JSON" in payload["messages"][0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_glm_supports_subtask_execute_with_bounded_output_tokens() -> None:
+    requests: list[httpx.Request] = []
+    provider = glm_provider(
+        returning={
+            "choices": [
+                {"finish_reason": "stop", "message": {"content": '{"ok":true}'}}
+            ]
+        },
+        capture=requests,
+    )
+
+    response = await provider.complete(
+        ModelRequest(
+            stage=ModelStage.SUBTASK_EXECUTE,
+            system="s",
+            user="{}",
+            response_schema={"type": "object"},
+        )
+    )
+
+    assert response.data == {"ok": True}
+    assert json.loads(requests[0].content)["max_tokens"] == 4096
 
 
 @pytest.mark.asyncio

@@ -9,7 +9,61 @@ class MockProvider:
     async def complete(self, request: ModelRequest) -> ModelResponse:
         payload = json.loads(request.user)
         title = request.response_schema.get("title")
-        if title == "ParsedTask":
+        emulation: dict[str, str] = {}
+        if title == "DecompositionDocument":
+            plan_version = payload["plan_version"]
+            max_subtasks = payload["budget_limits"]["max_subtasks"]
+            available_tools = [
+                tool["name"]
+                for tool in payload.get("context", {}).get(
+                    "available_tools", []
+                )
+                if isinstance(tool, dict) and isinstance(tool.get("name"), str)
+            ]
+            subtasks = [
+                {
+                    "key": "extract_context",
+                    "title": "提炼材料",
+                    "objective": "提取对话和中文材料中的关键事实与约束。",
+                    "dependency_keys": [],
+                    "required_capabilities": ["chinese_semantic"],
+                    "proposed_provider": "glm",
+                    "route_reason_code": "glm_chinese_strength",
+                    "allowed_tools": [],
+                    "expected_output": "结构化事实摘要",
+                    "required": True,
+                }
+            ]
+            if max_subtasks >= 2:
+                capabilities = ["code_security_reasoning"]
+                allowed_tools = available_tools[:1]
+                if allowed_tools:
+                    capabilities.append("tool_request")
+                subtasks.append(
+                    {
+                        "key": "assess_risk",
+                        "title": "评估代码风险",
+                        "objective": "基于已提炼事实判断代码与安全风险。",
+                        "dependency_keys": ["extract_context"],
+                        "required_capabilities": capabilities,
+                        "proposed_provider": "deepseek",
+                        "route_reason_code": "deepseek_code_security_strength",
+                        "allowed_tools": allowed_tools,
+                        "expected_output": "带依据的风险列表",
+                        "required": True,
+                    }
+                )
+            data = {
+                "plan_version": plan_version,
+                "goal_summary": "分析对话材料并识别关键风险",
+                "subtasks": subtasks,
+                "synthesis_requirements": ["区分事实和推断"],
+            }
+            emulation = {
+                "emulated_provider": "deepseek",
+                "emulated_model": "deepseek-v4-flash",
+            }
+        elif title == "ParsedTask":
             hint = payload.get("scene_hint")
             goal = payload["goal"]
             scene = hint or (
@@ -128,4 +182,5 @@ class MockProvider:
             data=data,
             latency_ms=0,
             is_demo=True,
+            **emulation,
         )

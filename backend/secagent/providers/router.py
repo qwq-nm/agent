@@ -4,6 +4,7 @@ from secagent.providers.base import (
     ProviderErrorCode,
     ProviderUnavailable,
 )
+from secagent.providers.deepseek import DEEPSEEK_V4_FLASH_MODEL
 from secagent.security.redaction import redact_text
 
 
@@ -12,7 +13,14 @@ FIXED_PROVIDER = {
     ModelStage.PLAN: "deepseek",
     ModelStage.CRITIC: "deepseek",
     ModelStage.REPORT: "glm",
+    ModelStage.DECOMPOSE: "deepseek",
+    ModelStage.SYNTHESIZE: "deepseek",
 }
+
+_FLASH_FIXED_STAGES = frozenset(
+    {ModelStage.DECOMPOSE, ModelStage.SYNTHESIZE}
+)
+_LOGICAL_ASSIGNMENT_PROVIDERS = frozenset({"glm", "deepseek"})
 
 
 class ModelRouter:
@@ -35,9 +43,30 @@ class ModelRouter:
         elif mode == "mock":
             self._require_provider("mock")
 
-    def provider_for(self, stage: ModelStage) -> ModelProvider:
-        name = "mock" if self.mode == "mock" else FIXED_PROVIDER[stage]
-        return self._require_provider(name)
+    def provider_for(
+        self, stage: ModelStage, preferred: str | None = None
+    ) -> ModelProvider:
+        if (
+            stage is ModelStage.SUBTASK_EXECUTE
+            and preferred not in _LOGICAL_ASSIGNMENT_PROVIDERS
+        ):
+            raise ProviderUnavailable(
+                "router", ProviderErrorCode.INVALID_SCHEMA, retryable=False
+            )
+        if self.mode == "mock":
+            return self._require_provider("mock")
+        if stage is ModelStage.SUBTASK_EXECUTE:
+            assert preferred is not None
+            return self._require_provider(preferred)
+        provider = self._require_provider(FIXED_PROVIDER[stage])
+        if (
+            stage in _FLASH_FIXED_STAGES
+            and getattr(provider, "model", None) != DEEPSEEK_V4_FLASH_MODEL
+        ):
+            raise ProviderUnavailable(
+                "deepseek", ProviderErrorCode.INVALID_SCHEMA, retryable=False
+            )
+        return provider
 
     async def complete(
         self,
@@ -45,9 +74,15 @@ class ModelRouter:
         request: ModelRequest,
         preferred: str | None = None,
     ) -> ModelResponse:
-        del preferred  # Stage ownership is fixed; manual input cannot override it.
         staged_request = request.model_copy(update={"stage": stage})
-        return await self.provider_for(stage).complete(staged_request)
+        return await self.provider_for(stage, preferred).complete(staged_request)
+
+    def logical_assignment_providers(self) -> frozenset[str]:
+        if self.mode == "mock":
+            return _LOGICAL_ASSIGNMENT_PROVIDERS
+        return frozenset(self.providers).intersection(
+            _LOGICAL_ASSIGNMENT_PROVIDERS
+        )
 
     def describe(self) -> list[dict[str, str | bool | None]]:
         result = []

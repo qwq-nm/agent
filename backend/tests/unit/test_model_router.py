@@ -24,9 +24,12 @@ from secagent.worker import (
 
 
 class StubProvider:
-    def __init__(self, name: str, fail: bool = False) -> None:
+    def __init__(
+        self, name: str, fail: bool = False, *, model: str = "stub"
+    ) -> None:
         self.name = name
         self.fail = fail
+        self.model = model
         self.complete_count = 0
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
@@ -37,7 +40,7 @@ class StubProvider:
             )
         return ModelResponse(
             provider=self.name,
-            model="stub",
+            model=self.model,
             data={"ok": True},
             latency_ms=1,
             is_demo=self.name == "mock",
@@ -150,6 +153,172 @@ async def test_preferred_model_cannot_override_fixed_stage_route() -> None:
     )
 
     assert response.provider == "deepseek"
+
+
+@pytest.mark.asyncio
+async def test_new_fixed_stages_use_flash_deepseek_despite_caller_preference() -> None:
+    glm = StubProvider("glm", model="glm-5.2")
+    deepseek = StubProvider("deepseek", model="deepseek-v4-flash")
+    router = ModelRouter({"glm": glm, "deepseek": deepseek}, mode="auto")
+    request = ModelRequest(system="s", user="u", response_schema={})
+
+    decompose = await router.complete(
+        ModelStage.DECOMPOSE, request, preferred="glm"
+    )
+    synthesize = await router.complete(
+        ModelStage.SYNTHESIZE, request, preferred="glm"
+    )
+
+    assert FIXED_PROVIDER[ModelStage.DECOMPOSE] == "deepseek"
+    assert FIXED_PROVIDER[ModelStage.SYNTHESIZE] == "deepseek"
+    assert decompose.provider == "deepseek"
+    assert synthesize.provider == "deepseek"
+    assert glm.complete_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("preferred", ["glm", "deepseek"])
+async def test_subtask_execute_uses_required_logical_preference(preferred: str) -> None:
+    router = ModelRouter(
+        {
+            "glm": StubProvider("glm", model="glm-5.2"),
+            "deepseek": StubProvider("deepseek", model="deepseek-v4-flash"),
+        },
+        mode="auto",
+    )
+
+    response = await router.complete(
+        ModelStage.SUBTASK_EXECUTE,
+        ModelRequest(system="s", user="u", response_schema={}),
+        preferred=preferred,
+    )
+
+    assert response.provider == preferred
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("preferred", [None, "mock", "unknown"])
+async def test_subtask_execute_rejects_missing_or_non_logical_preference(
+    preferred: str | None,
+) -> None:
+    router = ModelRouter(
+        {
+            "glm": StubProvider("glm", model="glm-5.2"),
+            "deepseek": StubProvider("deepseek", model="deepseek-v4-flash"),
+            "mock": StubProvider("mock"),
+        },
+        mode="auto",
+    )
+
+    with pytest.raises(ProviderUnavailable) as caught:
+        await router.complete(
+            ModelStage.SUBTASK_EXECUTE,
+            ModelRequest(system="s", user="u", response_schema={}),
+            preferred=preferred,
+        )
+
+    assert caught.value.code is ProviderErrorCode.INVALID_SCHEMA
+    assert all(provider.complete_count == 0 for provider in router.providers.values())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["auto", "live"])
+async def test_decompose_missing_deepseek_never_calls_glm_or_mock(mode: str) -> None:
+    glm = StubProvider("glm", model="glm-5.2")
+    mock = StubProvider("mock")
+    router = ModelRouter(
+        {"glm": glm, "mock": mock}, mode=mode, allow_missing=True
+    )
+
+    with pytest.raises(ProviderUnavailable) as caught:
+        await router.complete(
+            ModelStage.DECOMPOSE,
+            ModelRequest(system="s", user="u", response_schema={}),
+        )
+
+    assert caught.value.provider == "deepseek"
+    assert glm.complete_count == 0
+    assert mock.complete_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", [ModelStage.DECOMPOSE, ModelStage.SYNTHESIZE])
+async def test_fixed_deepseek_stage_rejects_non_flash_adapter_before_call(
+    stage: ModelStage,
+) -> None:
+    deepseek = StubProvider("deepseek", model="deepseek-v4-pro")
+    router = ModelRouter({"deepseek": deepseek}, mode="auto")
+
+    with pytest.raises(ProviderUnavailable) as caught:
+        await router.complete(
+            stage,
+            ModelRequest(system="s", user="u", response_schema={}),
+        )
+
+    assert caught.value.provider == "deepseek"
+    assert caught.value.code is ProviderErrorCode.INVALID_SCHEMA
+    assert caught.value.retryable is False
+    assert deepseek.complete_count == 0
+
+
+@pytest.mark.asyncio
+async def test_explicit_mock_mode_emulates_fixed_decompose_with_mock_only() -> None:
+    mock = StubProvider("mock")
+    deepseek = StubProvider("deepseek", model="deepseek-v4-flash")
+    router = ModelRouter({"mock": mock, "deepseek": deepseek}, mode="mock")
+
+    response = await router.complete(
+        ModelStage.DECOMPOSE,
+        ModelRequest(system="s", user="u", response_schema={}),
+        preferred="glm",
+    )
+
+    assert response.provider == "mock"
+    assert mock.complete_count == 1
+    assert deepseek.complete_count == 0
+
+
+@pytest.mark.asyncio
+async def test_explicit_mock_subtask_still_requires_logical_preference() -> None:
+    mock = StubProvider("mock")
+    router = ModelRouter({"mock": mock}, mode="mock")
+
+    with pytest.raises(ProviderUnavailable) as caught:
+        await router.complete(
+            ModelStage.SUBTASK_EXECUTE,
+            ModelRequest(system="s", user="u", response_schema={}),
+        )
+
+    assert caught.value.code is ProviderErrorCode.INVALID_SCHEMA
+    assert mock.complete_count == 0
+
+
+@pytest.mark.asyncio
+async def test_decompose_does_not_require_glm_before_model_call() -> None:
+    deepseek = StubProvider("deepseek", model="deepseek-v4-flash")
+    router = ModelRouter({"deepseek": deepseek}, mode="auto")
+
+    response = await router.complete(
+        ModelStage.DECOMPOSE,
+        ModelRequest(system="s", user="u", response_schema={}),
+    )
+
+    assert response.provider == "deepseek"
+    assert deepseek.complete_count == 1
+
+
+def test_logical_assignment_providers_are_derived_from_mode_and_configuration() -> None:
+    auto = ModelRouter(
+        {
+            "deepseek": StubProvider("deepseek", model="deepseek-v4-flash"),
+            "mock": StubProvider("mock"),
+        },
+        mode="auto",
+    )
+    explicit_mock = ModelRouter({"mock": StubProvider("mock")}, mode="mock")
+
+    assert auto.logical_assignment_providers() == {"deepseek"}
+    assert explicit_mock.logical_assignment_providers() == {"glm", "deepseek"}
 
 
 @pytest.mark.asyncio

@@ -98,7 +98,7 @@ def test_settings_uses_required_production_defaults(monkeypatch: pytest.MonkeyPa
     assert settings.jwt_access_minutes == 15
     assert settings.jwt_refresh_days == 7
     assert settings.cookie_secure is False
-    assert settings.deepseek_model == "deepseek-v4-pro"
+    assert settings.deepseek_model == "deepseek-v4-flash"
     assert settings.deepseek_api_style == "auto"
     assert settings.deepseek_reasoning_effort == "high"
     assert settings.glm_model == "glm-5.2"
@@ -116,10 +116,20 @@ def test_docker_compose_provider_defaults_match_settings() -> None:
     repository_root = Path(__file__).resolve().parents[3]
     compose = (repository_root / "docker-compose.yml").read_text(encoding="utf-8")
 
-    assert "DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-pro}" in compose
+    assert compose.count(
+        "DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-flash}"
+    ) == 2
     assert "GLM_MODEL: ${GLM_MODEL:-glm-5.2}" in compose
     assert "deepseek-chat" not in compose
     assert "glm-4-flash" not in compose
+
+
+def test_example_environment_uses_flash_decomposition_model_default() -> None:
+    repository_root = Path(__file__).resolve().parents[3]
+    example = (repository_root / ".env.example").read_text(encoding="utf-8")
+
+    assert "DEEPSEEK_MODEL=deepseek-v4-flash" in example
+    assert "deepseek-v4-pro" not in example
 
 
 def test_docker_compose_passes_runtime_model_configuration_to_both_services() -> None:
