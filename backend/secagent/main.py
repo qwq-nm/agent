@@ -7,15 +7,19 @@ from secagent import db_models  # noqa: F401 -- registers SQLAlchemy tables
 from secagent.agents.executor import DemoEvidenceTool
 from secagent.api.admin import router as admin_router
 from secagent.api.auth import router as auth_router
+from secagent.api.conversations import router as conversations_router
+from secagent.api.conversation_events import router as conversation_events_router
 from secagent.api.errors import install_error_handlers
 from secagent.api.events import router as events_router
 from secagent.api.tasks import router as tasks_router
 from secagent.api.system import router as system_router
 from secagent.auth.stream_tickets import (
+    ConversationStreamTicketService,
     FakeTicketReplayStore,
     RedisTicketReplayStore,
     StreamTicketService,
 )
+from secagent.security.access_log import install_access_log_redaction
 from secagent.config import Settings, get_settings
 from secagent.db import make_session_factory
 from secagent.providers import build_providers
@@ -62,6 +66,7 @@ def create_app(
     settings: Settings | None = None, job_queue: JobQueue | None = None
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
+    install_access_log_redaction()
     session_factory = make_session_factory(resolved_settings.database_url)
 
     @asynccontextmanager
@@ -89,8 +94,15 @@ def create_app(
         if resolved_settings.database_url.startswith("sqlite")
         else RedisTicketReplayStore(Redis.from_url(resolved_settings.redis_url))
     )
+    try:
+        ticket_signing_key = resolved_settings.jwt_key()
+    except (OSError, ValueError):
+        ticket_signing_key = None
     app.state.stream_ticket_service = StreamTicketService(
-        resolved_settings.jwt_key(), replay_store
+        ticket_signing_key, replay_store
+    )
+    app.state.conversation_stream_ticket_service = ConversationStreamTicketService(
+        ticket_signing_key, replay_store
     )
     app.state.model_router = ModelRouter(
         build_providers(
@@ -139,6 +151,8 @@ def create_app(
     app.include_router(admin_router)
     app.include_router(tasks_router)
     app.include_router(events_router)
+    app.include_router(conversations_router)
+    app.include_router(conversation_events_router)
     return app
 
 

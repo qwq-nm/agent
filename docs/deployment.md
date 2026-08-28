@@ -120,6 +120,8 @@ python scripts\migrate_sqlite_to_postgres.py `
 
 ## 日志与故障定位
 
+浏览器通过 `/api/conversations/{id}/events?ticket=...` 建立对话事件流。应用会在 Uvicorn access logger 中把所有 percent-decoded 名称恰为 `ticket` 的查询参数值替换为 `[REDACTED]`，但它无法配置外部组件。生产部署必须对每一层上游反向代理、负载均衡器、Ingress、CDN 和 access logger 禁止记录该事件流路由，或实施同等的完整 `ticket` 查询值净化（包括重复参数和 `%74icket` 等编码名称）。不得把原始 stream-ticket JWT 或 JTI 写入持久日志、审计记录或追踪系统；仅记录不含凭据的路由、状态码和应用 trace ID。
+
 ```powershell
 docker compose logs --tail 200 api
 docker compose logs --tail 200 worker

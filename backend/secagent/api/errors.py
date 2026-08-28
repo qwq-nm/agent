@@ -43,6 +43,57 @@ class CredentialStorageUnavailable(ApiError):
         )
 
 
+class ConversationNotFound(ApiError):
+    def __init__(self) -> None:
+        super().__init__(404, "conversation_not_found", "Conversation not found")
+
+
+class InvalidIdempotencyKey(ApiError):
+    def __init__(self) -> None:
+        super().__init__(
+            400,
+            "invalid_idempotency_key",
+            "A valid Idempotency-Key header is required",
+        )
+
+
+class ConversationRequestValidationError(ApiError):
+    def __init__(self) -> None:
+        super().__init__(
+            422, "validation_error", "Request validation failed", fields=None
+        )
+
+
+class UnsupportedConversationMediaType(ApiError):
+    def __init__(self) -> None:
+        super().__init__(
+            415,
+            "unsupported_media_type",
+            "Use application/json or multipart/form-data",
+        )
+
+
+class AttachmentValidationFailed(ApiError):
+    def __init__(self) -> None:
+        super().__init__(
+            422,
+            "attachment_validation_failed",
+            "One or more attachments failed validation",
+        )
+
+
+class InvalidStreamTicket(ApiError):
+    def __init__(self) -> None:
+        super().__init__(401, "invalid_stream_ticket", "Invalid stream ticket")
+
+
+class EventStreamUnavailable(ApiError):
+    def __init__(self) -> None:
+        super().__init__(
+            503, "event_stream_unavailable", "Event streaming is unavailable"
+        )
+
+
 _STATUS_CODES = {
     400: "bad_request",
     401: "unauthorized",
