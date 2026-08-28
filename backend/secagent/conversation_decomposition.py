@@ -124,7 +124,7 @@ class SubtaskSpec(_StrictModel):
 
 
 class DecompositionDocument(_StrictModel):
-    plan_version: int
+    plan_version: int = Field(ge=1, strict=True)
     goal_summary: Annotated[
         str,
         StringConstraints(strict=True, min_length=1, max_length=2_000),

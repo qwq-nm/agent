@@ -156,6 +156,15 @@ def test_decomposition_document_rejects_non_strict_scalar_coercion():
         DecompositionDocument.model_validate(data)
 
 
+@pytest.mark.parametrize("plan_version", [0, -1])
+def test_decomposition_document_rejects_non_positive_plan_versions(plan_version):
+    data = valid_document()
+    data["plan_version"] = plan_version
+
+    with pytest.raises(ValidationError):
+        DecompositionDocument.model_validate(data)
+
+
 def test_validate_decomposition_rejects_document_larger_than_supplied_limit():
     data = valid_document()
     data["subtasks"].extend(
