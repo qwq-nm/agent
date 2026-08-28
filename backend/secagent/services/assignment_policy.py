@@ -58,23 +58,24 @@ def _immutable_matrix() -> Mapping[LogicalProvider, Mapping[Capability, Capabili
 CAPABILITY_MATRIX = _immutable_matrix()
 
 
-_REASON_TEXT = {
-    RouteReasonCode.GLM_CHINESE_STRENGTH: "中文语义任务优先使用 GLM。",
-    RouteReasonCode.GLM_LONG_DOCUMENT_STRENGTH: "长文档摘要任务优先使用 GLM。",
-    RouteReasonCode.GLM_EXTRACTION_STRENGTH: "分类与字段提取任务优先使用 GLM。",
-    RouteReasonCode.DEEPSEEK_DECOMPOSITION_FIXED: "任务分解固定使用 DeepSeek。",
-    RouteReasonCode.DEEPSEEK_CODE_SECURITY_STRENGTH: "代码与安全推理任务优先使用 DeepSeek。",
-    RouteReasonCode.DEEPSEEK_REVERSE_CAUSAL_STRENGTH: "逆向与因果分析任务优先使用 DeepSeek。",
-    RouteReasonCode.DEEPSEEK_EVIDENCE_CONFLICT_STRENGTH: "证据冲突分析任务优先使用 DeepSeek。",
-    RouteReasonCode.DEEPSEEK_SYNTHESIS_FIXED: "最终综合固定使用 DeepSeek。",
-    RouteReasonCode.BALANCED_MODEL_SUGGESTION: "能力匹配均衡，保留有效的模型建议。",
-    RouteReasonCode.TOOL_COMPATIBLE: "工具请求能力由兼容提供方处理。",
-    RouteReasonCode.POLICY_PREFERRED_CAPABILITY: "策略按能力偏好纠正提供方。",
-    RouteReasonCode.POLICY_PROVIDER_UNAVAILABLE: "模型建议的提供方当前不可用。",
-    RouteReasonCode.POLICY_CAPABILITY_MISMATCH: "模型建议的提供方不支持所需能力。",
-    RouteReasonCode.POLICY_TOOL_FILTERED: "工具请求已按注册与授权范围过滤。",
-}
-ROUTE_REASON_TEXT_ZH = MappingProxyType(_REASON_TEXT)
+ROUTE_REASON_TEXT_ZH = MappingProxyType(
+    {
+        RouteReasonCode.GLM_CHINESE_STRENGTH: "中文语义任务优先使用 GLM。",
+        RouteReasonCode.GLM_LONG_DOCUMENT_STRENGTH: "长文档摘要任务优先使用 GLM。",
+        RouteReasonCode.GLM_EXTRACTION_STRENGTH: "分类与字段提取任务优先使用 GLM。",
+        RouteReasonCode.DEEPSEEK_DECOMPOSITION_FIXED: "任务分解固定使用 DeepSeek。",
+        RouteReasonCode.DEEPSEEK_CODE_SECURITY_STRENGTH: "代码与安全推理任务优先使用 DeepSeek。",
+        RouteReasonCode.DEEPSEEK_REVERSE_CAUSAL_STRENGTH: "逆向与因果分析任务优先使用 DeepSeek。",
+        RouteReasonCode.DEEPSEEK_EVIDENCE_CONFLICT_STRENGTH: "证据冲突分析任务优先使用 DeepSeek。",
+        RouteReasonCode.DEEPSEEK_SYNTHESIS_FIXED: "最终综合固定使用 DeepSeek。",
+        RouteReasonCode.BALANCED_MODEL_SUGGESTION: "能力匹配均衡，保留有效的模型建议。",
+        RouteReasonCode.TOOL_COMPATIBLE: "工具请求能力由兼容提供方处理。",
+        RouteReasonCode.POLICY_PREFERRED_CAPABILITY: "策略按能力偏好纠正提供方。",
+        RouteReasonCode.POLICY_PROVIDER_UNAVAILABLE: "模型建议的提供方当前不可用。",
+        RouteReasonCode.POLICY_CAPABILITY_MISMATCH: "模型建议的提供方不支持所需能力。",
+        RouteReasonCode.POLICY_TOOL_FILTERED: "工具请求已按注册与授权范围过滤。",
+    }
+)
 
 
 _POLICY_CODES = frozenset(
@@ -124,6 +125,8 @@ class AssignmentDecision(BaseModel):
 
     @model_validator(mode="after")
     def require_backend_reason(self) -> AssignmentDecision:
+        if self.corrected != bool(self.correction_codes):
+            raise ValueError("corrected must match correction_codes")
         if self.route_reason != ROUTE_REASON_TEXT_ZH[self.route_reason_code]:
             raise ValueError("route_reason must be backend-owned text")
         return self

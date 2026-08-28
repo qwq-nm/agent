@@ -5,6 +5,7 @@ from types import MappingProxyType
 import pytest
 from pydantic import ValidationError
 
+import secagent.services.assignment_policy as assignment_policy_module
 from secagent.conversation_decomposition import (
     Capability,
     DecompositionDocument,
@@ -120,6 +121,24 @@ def test_capability_matrix_and_reason_text_are_immutable():
         ROUTE_REASON_TEXT_ZH[RouteReasonCode.BALANCED_MODEL_SUGGESTION] = "篡改"  # type: ignore[index]
 
 
+def test_reason_registry_has_no_mutable_module_alias():
+    code = RouteReasonCode.BALANCED_MODEL_SUGGESTION
+    original = ROUTE_REASON_TEXT_ZH[code]
+    mutable_aliases = [
+        value
+        for value in vars(assignment_policy_module).values()
+        if isinstance(value, dict) and code in value
+    ]
+
+    try:
+        for alias in mutable_aliases:
+            alias[code] = "篡改"
+        assert ROUTE_REASON_TEXT_ZH[code] == original
+    finally:
+        for alias in mutable_aliases:
+            alias[code] = original
+
+
 def test_unavailable_proposed_provider_is_corrected_without_mutating_document():
     document = document_with(subtask("cn", [Capability.CHINESE_SEMANTIC], "glm"))
     before = document.model_dump()
@@ -220,6 +239,32 @@ def test_assignment_decision_accepts_enum_values_as_wire_strings():
     assert decision.correction_codes == [RouteReasonCode.POLICY_PREFERRED_CAPABILITY]
 
 
+@pytest.mark.parametrize(
+    ("corrected", "correction_codes"),
+    [
+        (False, [RouteReasonCode.POLICY_TOOL_FILTERED]),
+        (True, []),
+    ],
+)
+def test_assignment_decision_rejects_contradictory_correction_state(
+    corrected, correction_codes
+):
+    code = RouteReasonCode.GLM_CHINESE_STRENGTH
+    with pytest.raises(ValidationError, match="corrected"):
+        AssignmentDecision.model_validate(
+            {
+                "key": "cn",
+                "proposed_provider": "glm",
+                "assigned_provider": "glm",
+                "route_reason_code": code.value,
+                "route_reason": ROUTE_REASON_TEXT_ZH[code],
+                "allowed_tools": [],
+                "corrected": corrected,
+                "correction_codes": [item.value for item in correction_codes],
+            }
+        )
+
+
 def test_assignment_never_touches_provider_or_model_objects():
     class ExplodingProvider:
         def __getattr__(self, name):
@@ -229,7 +274,7 @@ def test_assignment_never_touches_provider_or_model_objects():
     _provider = ExplodingProvider()
     decisions = AssignmentPolicy().assign(
         document,
-        available_providers={"glm", "deepseek"},
+        available_providers={"glm", "deepseek", _provider},  # type: ignore[arg-type]
         registered_tools=set(),
         authorized_tools=set(),
     )
