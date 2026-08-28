@@ -131,7 +131,7 @@ class RouteReasonCode(StrEnum):
     POLICY_TOOL_FILTERED = "policy_tool_filtered"
 ```
 
-Use these bounds: key pattern `^[a-z][a-z0-9_-]{0,63}$`; title 1..80; objective 1..2,000; goal summary 1..2,000; expected output 1..1,000; each synthesis requirement 1..1,000; at most 64 dependency keys, 9 unique capabilities, 64 unique tools, 64 subtasks, and 32 synthesis requirements. Reject whitespace-only strings, duplicate dependencies/capabilities/tools, and self-dependencies.
+Use these bounds: key pattern `^[a-z][a-z0-9_-]{0,63}$`; title 1..80; objective 1..2,000; goal summary 1..2,000; expected output 1..1,000; each synthesis requirement 1..1,000; at most 64 dependency keys, 9 unique capabilities, 64 unique tools, 1..64 subtasks, and 1..32 synthesis requirements. Reject whitespace-only strings, duplicate dependencies/capabilities/tools, and self-dependencies.
 `SubtaskSpec.route_reason_code` accepts only the ten non-`POLICY_*` codes;
 policy correction codes are backend output and a model cannot claim that a
 correction already occurred.
@@ -298,11 +298,15 @@ The coordinator call shape is:
 result = await CoordinatorAgent(router, AssignmentPolicy()).decompose(
     context,
     plan_version=turn.plan_version,
-    available_providers={"glm", "deepseek"},
     registered_tools={"source_scanner"},
     authorized_tools={"source_scanner"},
 )
 ```
+
+The coordinator never trusts a caller-supplied provider-availability set.
+`ModelRouter.logical_assignment_providers()` returns configured logical
+providers in live/auto mode and `{glm, deepseek}` only in explicit mock mode;
+the coordinator passes that derived set to `AssignmentPolicy`.
 
 Before serialization, replace `context.available_tools` with the ordered subset
 whose names are in both `registered_tools` and `authorized_tools`.
@@ -331,7 +335,15 @@ Do not persist, emit events, enqueue, call tools, or catch `ProviderFailure` in 
 
 - [ ] **Step 5: Add explicit deterministic Mock decomposition**
 
-When `request.response_schema["title"] == "DecompositionDocument"`, `MockProvider` returns a stable dependency-valid document that assigns at least one Chinese/material task to GLM and one code/security task to DeepSeek, respects `plan_version` and `max_subtasks`, and uses only payload-authorized tools. Its `ModelResponse` must be `provider="mock"`, `model="deterministic-mock"`, `emulated_provider="deepseek"`, `emulated_model="deepseek-v4-flash"`, `is_demo=True`. Legacy mock schemas keep their current output.
+When `request.response_schema["title"] == "DecompositionDocument"`,
+`MockProvider` returns a stable dependency-valid document that, when
+`max_subtasks >= 2`, assigns at least one Chinese/material task to GLM and one
+code/security task to DeepSeek. When the budget is exactly one, it returns one
+valid required task. It always respects `plan_version` and `max_subtasks` and
+uses only payload-authorized tools. Its `ModelResponse` must be
+`provider="mock"`, `model="deterministic-mock"`,
+`emulated_provider="deepseek"`, `emulated_model="deepseek-v4-flash"`,
+`is_demo=True`. Legacy mock schemas keep their current output.
 
 - [ ] **Step 6: Align configured defaults without weakening route enforcement**
 
