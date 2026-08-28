@@ -1,0 +1,1741 @@
+# Review package: a54a761b..73f884d4
+
+## Commits
+73f884d4 feat: add DeepSeek decomposition coordinator
+
+## Files changed
+ .env.example                                 |   2 +-
+ backend/secagent/agents/coordinator.py       | 253 ++++++++++++++++
+ backend/secagent/config.py                   |   2 +-
+ backend/secagent/domain.py                   |   5 +
+ backend/secagent/providers/deepseek.py       |  19 +-
+ backend/secagent/providers/glm.py            |  10 +-
+ backend/secagent/providers/mock.py           |  57 +++-
+ backend/secagent/providers/router.py         |  45 ++-
+ backend/tests/provider_fakes.py              |   3 +-
+ backend/tests/unit/test_config_secrets.py    |  14 +-
+ backend/tests/unit/test_coordinator.py       | 423 +++++++++++++++++++++++++++
+ backend/tests/unit/test_deepseek_provider.py |  38 ++-
+ backend/tests/unit/test_glm_provider.py      |  27 +-
+ backend/tests/unit/test_mock_provider.py     |  83 ++++++
+ backend/tests/unit/test_model_router.py      | 173 ++++++++++-
+ docker-compose.yml                           |   4 +-
+ 16 files changed, 1137 insertions(+), 21 deletions(-)
+
+## Diff
+diff --git a/.env.example b/.env.example
+index dcb9f89d..7b3edf0f 100644
+--- a/.env.example
++++ b/.env.example
+@@ -1,20 +1,20 @@
+ # Model routing: mock | auto | live
+ MODEL_MODE=mock
+ MODEL_TIMEOUT_SECONDS=30
+ SECAGENT_PORT=18080
+ 
+ # DeepSeek (leave empty for Mock mode)
+ DEEPSEEK_API_KEY=
+ DEEPSEEK_API_KEY_FILE=
+ DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
+-DEEPSEEK_MODEL=deepseek-v4-pro
++DEEPSEEK_MODEL=deepseek-v4-flash
+ DEEPSEEK_API_STYLE=auto
+ DEEPSEEK_REASONING_EFFORT=high
+ 
+ # Zhipu GLM (leave empty for Mock mode)
+ GLM_API_KEY=
+ GLM_API_KEY_FILE=
+ GLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4
+ GLM_MODEL=glm-5.2
+ 
+ # PostgreSQL, Redis, workers, and job leases
+diff --git a/backend/secagent/agents/coordinator.py b/backend/secagent/agents/coordinator.py
+new file mode 100644
+index 00000000..1307020a
+--- /dev/null
++++ b/backend/secagent/agents/coordinator.py
+@@ -0,0 +1,253 @@
++from __future__ import annotations
++
++from typing import Annotated, Iterable, Literal
++
++from pydantic import (
++    AfterValidator,
++    BaseModel,
++    ConfigDict,
++    Field,
++    StringConstraints,
++    field_validator,
++)
++
++from secagent.conversation_decomposition import (
++    DecompositionDocument,
++    LogicalProvider,
++    SubtaskKey,
++    validate_decomposition,
++)
++from secagent.conversation_domain import (
++    ConversationSettings,
++    SafeClientRelativePath,
++    TurnBudgetSnapshot,
++    canonical_json_dumps,
++)
++from secagent.domain import ModelRequest, ModelResponse, ModelStage, RiskLevel
++from secagent.providers.router import ModelRouter
++from secagent.security.redaction import redact_mapping
++from secagent.services.assignment_policy import (
++    CAPABILITY_MATRIX,
++    AssignmentDecision,
++    AssignmentPolicy,
++)
++
++
++def _non_whitespace(value: str) -> str:
++    if not value.strip():
++        raise ValueError("must not be whitespace-only")
++    return value
++
++
++def _unique(values: list[str]) -> list[str]:
++    if len(values) != len(set(values)):
++        raise ValueError("values must be unique")
++    return values
++
++
++def _bounded_text(max_length: int):
++    return Annotated[
++        str,
++        StringConstraints(strict=True, min_length=1, max_length=max_length),
++        AfterValidator(_non_whitespace),
++    ]
++
++
++Text128 = _bounded_text(128)
++Text255 = _bounded_text(255)
++Text500 = _bounded_text(500)
++Text1000 = _bounded_text(1_000)
++Text2000 = _bounded_text(2_000)
++Text4000 = _bounded_text(4_000)
++Text16000 = _bounded_text(16_000)
++Text64000 = _bounded_text(64_000)
++ToolName = Annotated[
++    str,
++    StringConstraints(
++        strict=True,
++        min_length=1,
++        max_length=120,
++        pattern=r"^[a-z][a-z0-9_]{0,119}$",
++    ),
++]
++
++
++class StrictModel(BaseModel):
++    model_config = ConfigDict(extra="forbid", strict=True)
++
++
++class CoordinatorRecentMessage(StrictModel):
++    role: Literal["user", "assistant"]
++    content: Text16000
++
++
++class CoordinatorAttachment(StrictModel):
++    original_name: Text255
++    relative_path: SafeClientRelativePath | None
++    content_type: Text255
++    sha256: str = Field(pattern=r"^[0-9a-f]{64}$", strict=True)
++    scan_summary: Text2000
++
++
++class CoordinatorCompletedSubtask(StrictModel):
++    key: SubtaskKey
++    provider: LogicalProvider = Field(strict=False)
++    summary: Text4000
++    evidence_refs: list[Text128] = Field(max_length=64)
++
++    @field_validator("evidence_refs")
++    @classmethod
++    def unique_evidence_refs(cls, value: list[str]) -> list[str]:
++        return _unique(value)
++
++
++class CoordinatorEvidence(StrictModel):
++    ref: Text128
++    summary: Text4000
++    confidence: float = Field(ge=0, le=1, strict=True)
++
++
++class CoordinatorTool(StrictModel):
++    name: ToolName
++    risk_level: RiskLevel = Field(strict=False)
++    description: Text500
++
++
++class DecompositionContext(StrictModel):
++    current_message: Text64000
++    conversation_summary: Annotated[
++        str, StringConstraints(strict=True, max_length=16_000)
++    ]
++    recent_messages: list[CoordinatorRecentMessage] = Field(max_length=40)
++    attachments: list[CoordinatorAttachment] = Field(max_length=20)
++    settings: ConversationSettings
++    completed_subtasks: list[CoordinatorCompletedSubtask] = Field(max_length=64)
++    evidence: list[CoordinatorEvidence] = Field(max_length=128)
++    unresolved_questions: list[Text1000] = Field(max_length=32)
++    available_tools: list[CoordinatorTool] = Field(max_length=128)
++    budget: TurnBudgetSnapshot
++
++    @field_validator("conversation_summary")
++    @classmethod
++    def reject_whitespace_summary(cls, value: str) -> str:
++        if value and not value.strip():
++            raise ValueError("must be empty or contain non-whitespace text")
++        return value
++
++    @field_validator("unresolved_questions")
++    @classmethod
++    def unique_questions(cls, value: list[str]) -> list[str]:
++        return _unique(value)
++
++    @field_validator("available_tools")
++    @classmethod
++    def unique_tool_names(
++        cls, value: list[CoordinatorTool]
++    ) -> list[CoordinatorTool]:
++        if len(value) != len({tool.name for tool in value}):
++            raise ValueError("tool names must be unique")
++        return value
++
++
++class CoordinatorResult(StrictModel):
++    document: DecompositionDocument
++    assignments: list[AssignmentDecision]
++    model_response: ModelResponse
++
++
++class CoordinatorAgent:
++    def __init__(
++        self, router: ModelRouter, assignment_policy: AssignmentPolicy
++    ) -> None:
++        self.router = router
++        self.assignment_policy = assignment_policy
++
++    async def decompose(
++        self,
++        context: DecompositionContext,
++        *,
++        plan_version: int,
++        registered_tools: Iterable[str],
++        authorized_tools: Iterable[str],
++    ) -> CoordinatorResult:
++        if not isinstance(context, DecompositionContext):
++            raise TypeError("context must be a DecompositionContext")
++        if (
++            not isinstance(plan_version, int)
++            or isinstance(plan_version, bool)
++            or plan_version < 1
++        ):
++            raise ValueError("plan_version must be a positive integer")
++        if context.budget.max_subtasks < 1:
++            raise ValueError("max_subtasks budget must be at least 1")
++
++        registered = frozenset(registered_tools)
++        authorized = frozenset(authorized_tools)
++        context_data = context.model_dump(mode="json")
++        context_data["available_tools"] = [
++            tool.model_dump(mode="json")
++            for tool in context.available_tools
++            if tool.name in registered and tool.name in authorized
++        ]
++        encoded_context = canonical_json_dumps(context_data)
++        if (
++            len(encoded_context.encode("utf-8"))
++            > context.budget.max_context_tokens * 4
++        ):
++            raise ValueError("context budget exceeded")
++        safe_context = redact_mapping(context_data)
++
++        payload = redact_mapping(
++            {
++                "context": safe_context,
++                "capability_matrix": {
++                    provider.value: {
++                        capability.value: level.value
++                        for capability, level in capabilities.items()
++                    }
++                    for provider, capabilities in CAPABILITY_MATRIX.items()
++                },
++                "plan_version": plan_version,
++                "budget_limits": context.budget.model_dump(mode="json"),
++            }
++        )
++        request = ModelRequest(
++            system=(
++                "Decompose the bounded authorized conversation context into a "
++                "strict dependency-valid plan. Return only the requested JSON."
++            ),
++            user=canonical_json_dumps(payload),
++            response_schema=DecompositionDocument.model_json_schema(),
++        )
++
++        response = await self.router.complete(ModelStage.DECOMPOSE, request)
++        safe_data = redact_mapping(response.data)
++        document = DecompositionDocument.model_validate(safe_data)
++        validate_decomposition(
++            document,
++            expected_plan_version=plan_version,
++            max_subtasks=context.budget.max_subtasks,
++        )
++        assignments = self.assignment_policy.assign(
++            document,
++            available_providers=self.router.logical_assignment_providers(),
++            registered_tools=registered,
++            authorized_tools=authorized,
++        )
++        return CoordinatorResult(
++            document=document,
++            assignments=assignments,
++            model_response=response.model_copy(update={"data": safe_data}),
++        )
++
++
++__all__ = [
++    "CoordinatorAgent",
++    "CoordinatorAttachment",
++    "CoordinatorCompletedSubtask",
++    "CoordinatorEvidence",
++    "CoordinatorRecentMessage",
++    "CoordinatorResult",
++    "CoordinatorTool",
++    "DecompositionContext",
++]
+diff --git a/backend/secagent/config.py b/backend/secagent/config.py
+index 55f20b88..f7845a9b 100644
+--- a/backend/secagent/config.py
++++ b/backend/secagent/config.py
+@@ -40,21 +40,21 @@ class Settings(BaseSettings):
+     max_tool_calls_per_subtask: int = 6
+     subtask_timeout_seconds: int = 180
+     max_replans_per_turn: int = 2
+     max_conversation_context_tokens: int = 32_000
+     max_attachments_per_message: int = 20
+     max_attachment_total_bytes: int = 209_715_200
+ 
+     deepseek_api_key: str | None = None
+     deepseek_api_key_file: Path | None = None
+     deepseek_base_url: str = "https://api.deepseek.com/v1"
+-    deepseek_model: str = "deepseek-v4-pro"
++    deepseek_model: str = "deepseek-v4-flash"
+     deepseek_api_style: str = "auto"
+     deepseek_reasoning_effort: str = "high"
+ 
+     glm_api_key: str | None = None
+     glm_api_key_file: Path | None = None
+     glm_base_url: str = "https://open.bigmodel.cn/api/paas/v4"
+     glm_model: str = "glm-5.2"
+ 
+     max_model_calls_per_task: int = 8
+     max_input_tokens_per_task: int = 120_000
+diff --git a/backend/secagent/domain.py b/backend/secagent/domain.py
+index cddea6e6..0a648416 100644
+--- a/backend/secagent/domain.py
++++ b/backend/secagent/domain.py
+@@ -61,20 +61,23 @@ class RiskLevel(StrEnum):
+     MEDIUM = "medium"
+     HIGH = "high"
+     FORBIDDEN = "forbidden"
+ 
+ 
+ class ModelStage(StrEnum):
+     TASK_PARSE = "task_parse"
+     PLAN = "plan"
+     CRITIC = "critic"
+     REPORT = "report"
++    DECOMPOSE = "decompose"
++    SUBTASK_EXECUTE = "subtask_execute"
++    SYNTHESIZE = "synthesize"
+ 
+ 
+ class RouteMode(StrEnum):
+     AUTO = "auto"
+     MANUAL = "manual"
+ 
+ 
+ class SafetyMode(StrEnum):
+     CONSERVATIVE = "conservative"
+     STANDARD = "standard"
+@@ -110,20 +113,22 @@ class ModelResponse(BaseModel):
+     provider: str
+     model: str
+     data: dict[str, Any]
+     latency_ms: int
+     is_demo: bool = False
+     request_id: str | None = None
+     finish_reason: str | None = None
+     prompt_tokens: int = 0
+     completion_tokens: int = 0
+     retry_count: int = 0
++    emulated_provider: str | None = None
++    emulated_model: str | None = None
+ 
+     @field_validator("finish_reason", mode="before")
+     @classmethod
+     def validate_finish_reason(cls, value: object) -> str | None:
+         return normalize_finish_reason(value)
+ 
+     @field_validator("prompt_tokens", "completion_tokens", mode="before")
+     @classmethod
+     def validate_token_count(cls, value: object) -> int:
+         return normalize_token_count(value)
+diff --git a/backend/secagent/providers/deepseek.py b/backend/secagent/providers/deepseek.py
+index b45dadeb..8622a0a2 100644
+--- a/backend/secagent/providers/deepseek.py
++++ b/backend/secagent/providers/deepseek.py
+@@ -17,20 +17,21 @@ from secagent.domain import (
+ )
+ from secagent.providers.base import ProviderErrorCode, ProviderUnavailable
+ from secagent.providers.http_client import JSONResponse, ProviderHTTPClient
+ from secagent.providers.validation import (
+     OutputValidationError,
+     repair_context,
+     validate_output,
+ )
+ 
+ MAX_OUTPUT_TOKEN_RETRY_LIMIT = 8192
++DEEPSEEK_V4_FLASH_MODEL = "deepseek-v4-flash"
+ 
+ 
+ class _StructuredProvider:
+     """Shared structured-output flow; concrete providers own their payload policy."""
+ 
+     name: str
+     allowed_stages: frozenset[ModelStage]
+     max_tokens: dict[ModelStage, int]
+ 
+     def __init__(
+@@ -277,22 +278,36 @@ class _StructuredProvider:
+                 self.name,
+                 ProviderErrorCode.EMPTY_CONTENT,
+                 True,
+                 response.request_id,
+             )
+         return content, finish_reason
+ 
+ 
+ class DeepSeekProvider(_StructuredProvider):
+     name = "deepseek"
+-    allowed_stages = frozenset({ModelStage.PLAN, ModelStage.CRITIC})
+-    max_tokens = {ModelStage.PLAN: 4096, ModelStage.CRITIC: 4096}
++    allowed_stages = frozenset(
++        {
++            ModelStage.PLAN,
++            ModelStage.CRITIC,
++            ModelStage.DECOMPOSE,
++            ModelStage.SUBTASK_EXECUTE,
++            ModelStage.SYNTHESIZE,
++        }
++    )
++    max_tokens = {
++        ModelStage.PLAN: 4096,
++        ModelStage.CRITIC: 4096,
++        ModelStage.DECOMPOSE: 4096,
++        ModelStage.SUBTASK_EXECUTE: 4096,
++        ModelStage.SYNTHESIZE: 8192,
++    }
+ 
+     def _provider_options(self) -> dict[str, Any]:
+         if self.api_style == "opencode-go":
+             return {"reasoning_effort": self.reasoning_effort}
+         return {"thinking": {"type": "enabled"}}
+ 
+ 
+ def _safe_token_count(value: object) -> int:
+     return normalize_token_count(value)
+ 
+diff --git a/backend/secagent/providers/glm.py b/backend/secagent/providers/glm.py
+index 6657a47a..4e760dce 100644
+--- a/backend/secagent/providers/glm.py
++++ b/backend/secagent/providers/glm.py
+@@ -1,8 +1,14 @@
+ from secagent.domain import ModelStage
+ from secagent.providers.deepseek import _StructuredProvider
+ 
+ 
+ class GLMProvider(_StructuredProvider):
+     name = "glm"
+-    allowed_stages = frozenset({ModelStage.TASK_PARSE, ModelStage.REPORT})
+-    max_tokens = {ModelStage.TASK_PARSE: 4096, ModelStage.REPORT: 4096}
++    allowed_stages = frozenset(
++        {ModelStage.TASK_PARSE, ModelStage.REPORT, ModelStage.SUBTASK_EXECUTE}
++    )
++    max_tokens = {
++        ModelStage.TASK_PARSE: 4096,
++        ModelStage.REPORT: 4096,
++        ModelStage.SUBTASK_EXECUTE: 4096,
++    }
+diff --git a/backend/secagent/providers/mock.py b/backend/secagent/providers/mock.py
+index fe64c616..5c993c33 100644
+--- a/backend/secagent/providers/mock.py
++++ b/backend/secagent/providers/mock.py
+@@ -2,21 +2,75 @@ import json
+ 
+ from secagent.domain import ModelRequest, ModelResponse
+ 
+ 
+ class MockProvider:
+     name = "mock"
+ 
+     async def complete(self, request: ModelRequest) -> ModelResponse:
+         payload = json.loads(request.user)
+         title = request.response_schema.get("title")
+-        if title == "ParsedTask":
++        emulation: dict[str, str] = {}
++        if title == "DecompositionDocument":
++            plan_version = payload["plan_version"]
++            max_subtasks = payload["budget_limits"]["max_subtasks"]
++            available_tools = [
++                tool["name"]
++                for tool in payload.get("context", {}).get(
++                    "available_tools", []
++                )
++                if isinstance(tool, dict) and isinstance(tool.get("name"), str)
++            ]
++            subtasks = [
++                {
++                    "key": "extract_context",
++                    "title": "提炼材料",
++                    "objective": "提取对话和中文材料中的关键事实与约束。",
++                    "dependency_keys": [],
++                    "required_capabilities": ["chinese_semantic"],
++                    "proposed_provider": "glm",
++                    "route_reason_code": "glm_chinese_strength",
++                    "allowed_tools": [],
++                    "expected_output": "结构化事实摘要",
++                    "required": True,
++                }
++            ]
++            if max_subtasks >= 2:
++                capabilities = ["code_security_reasoning"]
++                allowed_tools = available_tools[:1]
++                if allowed_tools:
++                    capabilities.append("tool_request")
++                subtasks.append(
++                    {
++                        "key": "assess_risk",
++                        "title": "评估代码风险",
++                        "objective": "基于已提炼事实判断代码与安全风险。",
++                        "dependency_keys": ["extract_context"],
++                        "required_capabilities": capabilities,
++                        "proposed_provider": "deepseek",
++                        "route_reason_code": "deepseek_code_security_strength",
++                        "allowed_tools": allowed_tools,
++                        "expected_output": "带依据的风险列表",
++                        "required": True,
++                    }
++                )
++            data = {
++                "plan_version": plan_version,
++                "goal_summary": "分析对话材料并识别关键风险",
++                "subtasks": subtasks,
++                "synthesis_requirements": ["区分事实和推断"],
++            }
++            emulation = {
++                "emulated_provider": "deepseek",
++                "emulated_model": "deepseek-v4-flash",
++            }
++        elif title == "ParsedTask":
+             hint = payload.get("scene_hint")
+             goal = payload["goal"]
+             scene = hint or (
+                 "source_audit"
+                 if "源码" in goal
+                 else "ctf_web"
+                 if any(item in goal.lower() for item in ("ctf", "flag", "nssctf", "web题", "web 题", "靶场", "题目"))
+                 else "web_analysis"
+                 if "Web" in goal or "网站" in goal or payload.get("target_url")
+                 else "incident_response"
+@@ -121,11 +175,12 @@ class MockProvider:
+                 ],
+             }
+         else:
+             raise ValueError(f"unsupported mock schema: {title}")
+         return ModelResponse(
+             provider="mock",
+             model="deterministic-mock",
+             data=data,
+             latency_ms=0,
+             is_demo=True,
++            **emulation,
+         )
+diff --git a/backend/secagent/providers/router.py b/backend/secagent/providers/router.py
+index 2f8994b7..f671bb04 100644
+--- a/backend/secagent/providers/router.py
++++ b/backend/secagent/providers/router.py
+@@ -1,26 +1,34 @@
+ from secagent.domain import ModelRequest, ModelResponse, ModelStage
+ from secagent.providers.base import (
+     ModelProvider,
+     ProviderErrorCode,
+     ProviderUnavailable,
+ )
++from secagent.providers.deepseek import DEEPSEEK_V4_FLASH_MODEL
+ from secagent.security.redaction import redact_text
+ 
+ 
+ FIXED_PROVIDER = {
+     ModelStage.TASK_PARSE: "glm",
+     ModelStage.PLAN: "deepseek",
+     ModelStage.CRITIC: "deepseek",
+     ModelStage.REPORT: "glm",
++    ModelStage.DECOMPOSE: "deepseek",
++    ModelStage.SYNTHESIZE: "deepseek",
+ }
+ 
++_FLASH_FIXED_STAGES = frozenset(
++    {ModelStage.DECOMPOSE, ModelStage.SYNTHESIZE}
++)
++_LOGICAL_ASSIGNMENT_PROVIDERS = frozenset({"glm", "deepseek"})
++
+ 
+ class ModelRouter:
+     defaults = FIXED_PROVIDER
+ 
+     def __init__(
+         self,
+         providers: dict[str, ModelProvider],
+         mode: str = "auto",
+         *,
+         allow_missing: bool = False,
+@@ -28,33 +36,60 @@ class ModelRouter:
+         if mode not in {"auto", "live", "mock"}:
+             raise ValueError(f"unsupported model mode: {mode}")
+         self.providers = providers
+         self.mode = mode
+         if mode == "live" and not allow_missing:
+             for name in dict.fromkeys(FIXED_PROVIDER.values()):
+                 self._require_provider(name)
+         elif mode == "mock":
+             self._require_provider("mock")
+ 
+-    def provider_for(self, stage: ModelStage) -> ModelProvider:
+-        name = "mock" if self.mode == "mock" else FIXED_PROVIDER[stage]
+-        return self._require_provider(name)
++    def provider_for(
++        self, stage: ModelStage, preferred: str | None = None
++    ) -> ModelProvider:
++        if (
++            stage is ModelStage.SUBTASK_EXECUTE
++            and preferred not in _LOGICAL_ASSIGNMENT_PROVIDERS
++        ):
++            raise ProviderUnavailable(
++                "router", ProviderErrorCode.INVALID_SCHEMA, retryable=False
++            )
++        if self.mode == "mock":
++            return self._require_provider("mock")
++        if stage is ModelStage.SUBTASK_EXECUTE:
++            assert preferred is not None
++            return self._require_provider(preferred)
++        provider = self._require_provider(FIXED_PROVIDER[stage])
++        if (
++            stage in _FLASH_FIXED_STAGES
++            and getattr(provider, "model", None) != DEEPSEEK_V4_FLASH_MODEL
++        ):
++            raise ProviderUnavailable(
++                "deepseek", ProviderErrorCode.INVALID_SCHEMA, retryable=False
++            )
++        return provider
+ 
+     async def complete(
+         self,
+         stage: ModelStage,
+         request: ModelRequest,
+         preferred: str | None = None,
+     ) -> ModelResponse:
+-        del preferred  # Stage ownership is fixed; manual input cannot override it.
+         staged_request = request.model_copy(update={"stage": stage})
+-        return await self.provider_for(stage).complete(staged_request)
++        return await self.provider_for(stage, preferred).complete(staged_request)
++
++    def logical_assignment_providers(self) -> frozenset[str]:
++        if self.mode == "mock":
++            return _LOGICAL_ASSIGNMENT_PROVIDERS
++        return frozenset(self.providers).intersection(
++            _LOGICAL_ASSIGNMENT_PROVIDERS
++        )
+ 
+     def describe(self) -> list[dict[str, str | bool | None]]:
+         result = []
+         for name, provider in self.providers.items():
+             api_style = getattr(provider, "api_style", None)
+             base_url = getattr(provider, "base_url", None)
+             display_name = name
+             if name == "deepseek":
+                 display_name = (
+                     "OpenCode Go (DeepSeek route)"
+diff --git a/backend/tests/provider_fakes.py b/backend/tests/provider_fakes.py
+index f9747e07..c66619ad 100644
+--- a/backend/tests/provider_fakes.py
++++ b/backend/tests/provider_fakes.py
+@@ -37,28 +37,29 @@ async def _no_sleep(_: float) -> None:
+ 
+ 
+ def deepseek_provider(
+     returning: ResponseSpec | None = None,
+     *,
+     responses: list[ResponseSpec] | None = None,
+     capture: list[httpx.Request] | None = None,
+     base_url: str = "https://deepseek.invalid/v1",
+     api_style: str = "deepseek",
+     reasoning_effort: str = "high",
++    model: str = "deepseek-v4-pro",
+     sleep: Callable[[float], Awaitable[None]] = _no_sleep,
+     jitter: Callable[[], float] = lambda: 0.0,
+ ) -> DeepSeekProvider:
+     sequence = responses or [returning or {}]
+     return DeepSeekProvider(
+         base_url=base_url,
+         api_key="deepseek-test-key",
+-        model="deepseek-v4-pro",
++        model=model,
+         client=_client(sequence, capture),
+         api_style=api_style,
+         reasoning_effort=reasoning_effort,
+         sleep=sleep,
+         jitter=jitter,
+     )
+ 
+ 
+ def glm_provider(
+     returning: ResponseSpec | None = None,
+diff --git a/backend/tests/unit/test_config_secrets.py b/backend/tests/unit/test_config_secrets.py
+index 468a5afc..ce18bc2a 100644
+--- a/backend/tests/unit/test_config_secrets.py
++++ b/backend/tests/unit/test_config_secrets.py
+@@ -91,44 +91,54 @@ def test_settings_uses_required_production_defaults(monkeypatch: pytest.MonkeyPa
+ 
+     assert settings.database_url == "postgresql+psycopg://secagent:secagent@postgres/secagent"
+     assert settings.redis_url == "redis://redis:6379/0"
+     assert settings.worker_concurrency == 3
+     assert settings.job_lease_seconds == 90
+     assert settings.job_heartbeat_seconds == 15
+     assert settings.job_auto_retries == 1
+     assert settings.jwt_access_minutes == 15
+     assert settings.jwt_refresh_days == 7
+     assert settings.cookie_secure is False
+-    assert settings.deepseek_model == "deepseek-v4-pro"
++    assert settings.deepseek_model == "deepseek-v4-flash"
+     assert settings.deepseek_api_style == "auto"
+     assert settings.deepseek_reasoning_effort == "high"
+     assert settings.glm_model == "glm-5.2"
+     assert settings.max_model_calls_per_task == 8
+     assert settings.max_input_tokens_per_task == 120_000
+     assert settings.max_output_tokens_per_task == 24_000
+ 
+ 
+ def test_worker_concurrency_cannot_exceed_three():
+     with pytest.raises(ValueError, match="worker_concurrency must be between 1 and 3"):
+         Settings(worker_concurrency=4)
+ 
+ 
+ def test_docker_compose_provider_defaults_match_settings() -> None:
+     repository_root = Path(__file__).resolve().parents[3]
+     compose = (repository_root / "docker-compose.yml").read_text(encoding="utf-8")
+ 
+-    assert "DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-pro}" in compose
++    assert compose.count(
++        "DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-flash}"
++    ) == 2
+     assert "GLM_MODEL: ${GLM_MODEL:-glm-5.2}" in compose
+     assert "deepseek-chat" not in compose
+     assert "glm-4-flash" not in compose
+ 
+ 
++def test_example_environment_uses_flash_decomposition_model_default() -> None:
++    repository_root = Path(__file__).resolve().parents[3]
++    example = (repository_root / ".env.example").read_text(encoding="utf-8")
++
++    assert "DEEPSEEK_MODEL=deepseek-v4-flash" in example
++    assert "deepseek-v4-pro" not in example
++
++
+ def test_docker_compose_passes_runtime_model_configuration_to_both_services() -> None:
+     repository_root = Path(__file__).resolve().parents[3]
+     compose = (repository_root / "docker-compose.yml").read_text(encoding="utf-8")
+ 
+     assert compose.count("MODEL_MODE: ${MODEL_MODE:-mock}") == 2
+     assert compose.count(
+         "DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}"
+     ) == 2
+     assert compose.count("DEEPSEEK_API_STYLE: ${DEEPSEEK_API_STYLE:-auto}") == 2
+     assert compose.count("WEB_ALLOWED_HOSTS: ${WEB_ALLOWED_HOSTS:-web-demo}") == 2
+diff --git a/backend/tests/unit/test_coordinator.py b/backend/tests/unit/test_coordinator.py
+new file mode 100644
+index 00000000..96d6478d
+--- /dev/null
++++ b/backend/tests/unit/test_coordinator.py
+@@ -0,0 +1,423 @@
++from __future__ import annotations
++
++import json
++from copy import deepcopy
++
++import pytest
++from pydantic import ValidationError
++
++from secagent.agents.coordinator import (
++    CoordinatorAgent,
++    CoordinatorAttachment,
++    CoordinatorCompletedSubtask,
++    CoordinatorEvidence,
++    CoordinatorRecentMessage,
++    CoordinatorTool,
++    DecompositionContext,
++)
++from secagent.conversation_decomposition import LogicalProvider, RouteReasonCode
++from secagent.conversation_domain import ConversationSettings, TurnBudgetSnapshot
++from secagent.domain import ModelRequest, ModelResponse, ModelStage
++from secagent.providers.router import ModelRouter
++from secagent.services.assignment_policy import AssignmentPolicy
++
++
++def decomposition_data(*, plan_version: int = 3) -> dict:
++    return {
++        "plan_version": plan_version,
++        "goal_summary": "分析项目材料与代码风险",
++        "subtasks": [
++            {
++                "key": "extract_context",
++                "title": "提炼材料",
++                "objective": "提取中文材料中的关键事实。",
++                "dependency_keys": [],
++                "required_capabilities": ["chinese_semantic"],
++                "proposed_provider": "glm",
++                "route_reason_code": "glm_chinese_strength",
++                "allowed_tools": ["source_scanner", "admin_tool"],
++                "expected_output": "事实摘要",
++                "required": True,
++            },
++            {
++                "key": "assess_risk",
++                "title": "评估代码风险",
++                "objective": "根据事实判断代码与安全风险。",
++                "dependency_keys": ["extract_context"],
++                "required_capabilities": ["code_security_reasoning"],
++                "proposed_provider": "deepseek",
++                "route_reason_code": "deepseek_code_security_strength",
++                "allowed_tools": ["source_scanner"],
++                "expected_output": "风险列表",
++                "required": True,
++            },
++        ],
++        "synthesis_requirements": ["区分事实和推断"],
++    }
++
++
++def valid_context(**changes) -> DecompositionContext:
++    data = {
++        "current_message": "请分析这份项目材料",
++        "conversation_summary": "用户要求在授权范围内检查代码。",
++        "recent_messages": [
++            {"role": "user", "content": "先梳理中文需求。"},
++            {"role": "assistant", "content": "我会先提取约束。"},
++        ],
++        "attachments": [
++            {
++                "original_name": "project.zip",
++                "relative_path": "uploads/project.zip",
++                "content_type": "application/zip",
++                "sha256": "a" * 64,
++                "scan_summary": "归档已完成安全扫描。",
++            }
++        ],
++        "settings": {
++            "authorization_scope": "仅检查已上传项目",
++            "safety_mode": "conservative",
++            "allowed_targets": [],
++            "requested_parallelism": 2,
++        },
++        "completed_subtasks": [
++            {
++                "key": "prior_check",
++                "provider": "glm",
++                "summary": "已确认项目语言。",
++                "evidence_refs": ["evidence-1"],
++            }
++        ],
++        "evidence": [
++            {"ref": "evidence-1", "summary": "项目包含 Python。", "confidence": 0.9}
++        ],
++        "unresolved_questions": ["是否包含部署配置？"],
++        "available_tools": [
++            {
++                "name": "source_scanner",
++                "risk_level": "low",
++                "description": "扫描源码，api_key=sk-tool-secret",
++            },
++            {
++                "name": "admin_tool",
++                "risk_level": "high",
++                "description": "需要额外授权",
++            },
++        ],
++        "budget": {
++            "max_subtasks": 4,
++            "max_model_calls_per_subtask": 2,
++            "max_tool_calls_per_subtask": 2,
++            "timeout_seconds": 180,
++            "max_replans": 1,
++            "max_context_tokens": 8_000,
++        },
++    }
++    data.update(changes)
++    return DecompositionContext.model_validate(data)
++
++
++class CapturingProvider:
++    name = "deepseek"
++    model = "deepseek-v4-flash"
++
++    def __init__(self, data: dict | None = None) -> None:
++        self.data = data or decomposition_data()
++        self.requests: list[ModelRequest] = []
++
++    async def complete(self, request: ModelRequest) -> ModelResponse:
++        self.requests.append(request)
++        return ModelResponse(
++            provider=self.name,
++            model=self.model,
++            data=deepcopy(self.data),
++            latency_ms=1,
++        )
++
++
++def test_coordinator_context_dtos_accept_exact_bounded_contract() -> None:
++    context = valid_context()
++
++    assert context.recent_messages == [
++        CoordinatorRecentMessage(role="user", content="先梳理中文需求。"),
++        CoordinatorRecentMessage(role="assistant", content="我会先提取约束。"),
++    ]
++    assert isinstance(context.attachments[0], CoordinatorAttachment)
++    assert isinstance(context.completed_subtasks[0], CoordinatorCompletedSubtask)
++    assert isinstance(context.evidence[0], CoordinatorEvidence)
++    assert isinstance(context.available_tools[0], CoordinatorTool)
++    assert isinstance(context.settings, ConversationSettings)
++    assert isinstance(context.budget, TurnBudgetSnapshot)
++
++
++@pytest.mark.parametrize(
++    ("field", "value"),
++    [
++        ("current_message", " "),
++        ("current_message", "x" * 64_001),
++        ("conversation_summary", "x" * 16_001),
++        ("recent_messages", [{"role": "user", "content": "x"}] * 41),
++        ("attachments", []),
++        ("completed_subtasks", []),
++        ("evidence", []),
++        ("unresolved_questions", ["same", "same"]),
++        (
++            "available_tools",
++            [
++                {"name": "same", "risk_level": "low", "description": "first"},
++                {"name": "same", "risk_level": "low", "description": "second"},
++            ],
++        ),
++    ],
++    ids=[
++        "blank-current-message",
++        "oversized-current-message",
++        "oversized-summary",
++        "too-many-recent-messages",
++        "too-many-attachments",
++        "too-many-completed-subtasks",
++        "too-much-evidence",
++        "duplicate-questions",
++        "duplicate-tool-names",
++    ],
++)
++def test_coordinator_context_rejects_invalid_bounds_and_duplicates(field, value) -> None:
++    changes = {field: value}
++    if field in {"attachments", "completed_subtasks", "evidence"}:
++        limits = {"attachments": 21, "completed_subtasks": 65, "evidence": 129}
++        base = valid_context().model_dump(mode="json")[field]
++        changes[field] = base * limits[field]
++
++    with pytest.raises(ValidationError):
++        valid_context(**changes)
++
++
++@pytest.mark.parametrize(
++    "model_type,data",
++    [
++        (CoordinatorRecentMessage, {"role": "system", "content": "x"}),
++        (
++            CoordinatorAttachment,
++            {
++                "original_name": "x",
++                "relative_path": "../secret",
++                "content_type": "text/plain",
++                "sha256": "A" * 64,
++                "scan_summary": "ok",
++            },
++        ),
++        (
++            CoordinatorCompletedSubtask,
++            {
++                "key": "bad key",
++                "provider": "mock",
++                "summary": "ok",
++                "evidence_refs": [],
++            },
++        ),
++        (CoordinatorEvidence, {"ref": "x", "summary": "ok", "confidence": 1.1}),
++        (
++            CoordinatorTool,
++            {"name": "Bad-Tool", "risk_level": "low", "description": "ok"},
++        ),
++    ],
++)
++def test_coordinator_nested_dtos_reject_invalid_values(model_type, data) -> None:
++    with pytest.raises(ValidationError):
++        model_type.model_validate(data)
++
++
++def test_coordinator_context_is_strict_and_forbids_extras_or_scalar_coercion() -> None:
++    data = valid_context().model_dump(mode="json")
++    data["extra"] = True
++    with pytest.raises(ValidationError):
++        DecompositionContext.model_validate(data)
++
++    data.pop("extra")
++    data["current_message"] = 123
++    with pytest.raises(ValidationError):
++        DecompositionContext.model_validate(data)
++
++
++def test_empty_conversation_summary_is_the_only_empty_context_text() -> None:
++    assert valid_context(conversation_summary="").conversation_summary == ""
++    with pytest.raises(ValidationError):
++        valid_context(conversation_summary="   ")
++
++
++@pytest.mark.asyncio
++async def test_context_over_token_budget_is_rejected_before_model_call() -> None:
++    provider = CapturingProvider()
++    router = ModelRouter({"deepseek": provider}, mode="auto")
++    context = valid_context(
++        current_message="x" * 1_000,
++        budget={
++            "max_subtasks": 4,
++            "max_model_calls_per_subtask": 2,
++            "max_tool_calls_per_subtask": 2,
++            "timeout_seconds": 180,
++            "max_replans": 1,
++            "max_context_tokens": 100,
++        },
++    )
++
++    with pytest.raises(ValueError, match="context budget"):
++        await CoordinatorAgent(router, AssignmentPolicy()).decompose(
++            context,
++            plan_version=3,
++            registered_tools={"source_scanner"},
++            authorized_tools={"source_scanner"},
++        )
++
++    assert provider.requests == []
++
++
++@pytest.mark.asyncio
++async def test_context_budget_is_measured_before_secret_redaction_shrinks_it() -> None:
++    provider = CapturingProvider()
++    router = ModelRouter({"deepseek": provider}, mode="auto")
++    context = valid_context(
++        current_message="api_key=" + ("s" * 1_000),
++        budget={
++            "max_subtasks": 4,
++            "max_model_calls_per_subtask": 2,
++            "max_tool_calls_per_subtask": 2,
++            "timeout_seconds": 180,
++            "max_replans": 1,
++            "max_context_tokens": 400,
++        },
++    )
++
++    with pytest.raises(ValueError, match="context budget"):
++        await CoordinatorAgent(router, AssignmentPolicy()).decompose(
++            context,
++            plan_version=3,
++            registered_tools={"source_scanner"},
++            authorized_tools={"source_scanner"},
++        )
++
++    assert provider.requests == []
++
++
++@pytest.mark.asyncio
++async def test_coordinator_redacts_and_filters_bounded_canonical_request() -> None:
++    provider = CapturingProvider()
++    router = ModelRouter({"deepseek": provider}, mode="auto")
++    context = valid_context(
++        current_message="token=Bearer current-secret",
++        conversation_summary="api_key=sk-summary-secret",
++    )
++
++    await CoordinatorAgent(router, AssignmentPolicy()).decompose(
++        context,
++        plan_version=3,
++        registered_tools={"source_scanner", "admin_tool"},
++        authorized_tools={"source_scanner"},
++    )
++
++    assert len(provider.requests) == 1
++    request = provider.requests[0]
++    payload = json.loads(request.user)
++    assert request.stage is ModelStage.DECOMPOSE
++    assert request.response_schema["title"] == "DecompositionDocument"
++    assert request.user == json.dumps(
++        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
++    )
++    assert [tool["name"] for tool in payload["context"]["available_tools"]] == [
++        "source_scanner"
++    ]
++    assert "admin_tool" not in request.user
++    assert "current-secret" not in request.user
++    assert "summary-secret" not in request.user
++    assert "tool-secret" not in request.user
++    assert set(payload) == {
++        "budget_limits",
++        "capability_matrix",
++        "context",
++        "plan_version",
++    }
++
++
++@pytest.mark.asyncio
++async def test_coordinator_uses_router_derived_provider_availability() -> None:
++    provider = CapturingProvider()
++    router = ModelRouter({"deepseek": provider}, mode="auto")
++
++    result = await CoordinatorAgent(router, AssignmentPolicy()).decompose(
++        valid_context(),
++        plan_version=3,
++        registered_tools={"source_scanner"},
++        authorized_tools={"source_scanner"},
++    )
++
++    first = result.assignments[0]
++    assert first.assigned_provider is LogicalProvider.DEEPSEEK
++    assert RouteReasonCode.POLICY_PROVIDER_UNAVAILABLE in first.correction_codes
++
++
++@pytest.mark.asyncio
++async def test_coordinator_calls_decompose_once_and_returns_only_redacted_mapping() -> None:
++    raw = decomposition_data()
++    raw["goal_summary"] = "检查 token=Bearer returned-secret"
++    provider = CapturingProvider(raw)
++    router = ModelRouter({"deepseek": provider}, mode="auto")
++
++    result = await CoordinatorAgent(router, AssignmentPolicy()).decompose(
++        valid_context(),
++        plan_version=3,
++        registered_tools={"source_scanner"},
++        authorized_tools={"source_scanner"},
++    )
++
++    assert len(provider.requests) == 1
++    assert "returned-secret" not in result.document.goal_summary
++    assert "returned-secret" not in result.model_response.model_dump_json()
++    assert result.model_response.data == result.document.model_dump(mode="json")
++    assert [item.allowed_tools for item in result.assignments] == [
++        ["source_scanner"],
++        ["source_scanner"],
++    ]
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize(
++    ("data", "message"),
++    [
++        (decomposition_data(plan_version=4), "plan version"),
++        (
++            decomposition_data()
++            | {
++                "subtasks": decomposition_data()["subtasks"]
++                + [
++                    decomposition_data()["subtasks"][0]
++                    | {"key": "extra_task", "dependency_keys": []}
++                ]
++            },
++            "subtask count",
++        ),
++    ],
++)
++async def test_coordinator_validates_plan_version_and_turn_subtask_budget(
++    data: dict, message: str
++) -> None:
++    provider = CapturingProvider(data)
++    context = valid_context(
++        budget={
++            "max_subtasks": 2,
++            "max_model_calls_per_subtask": 2,
++            "max_tool_calls_per_subtask": 2,
++            "timeout_seconds": 180,
++            "max_replans": 1,
++            "max_context_tokens": 8_000,
++        }
++    )
++
++    with pytest.raises(ValueError, match=message):
++        await CoordinatorAgent(
++            ModelRouter({"deepseek": provider}, mode="auto"),
++            AssignmentPolicy(),
++        ).decompose(
++            context,
++            plan_version=3,
++            registered_tools={"source_scanner"},
++            authorized_tools={"source_scanner"},
++        )
+diff --git a/backend/tests/unit/test_deepseek_provider.py b/backend/tests/unit/test_deepseek_provider.py
+index f91e713f..a4f43972 100644
+--- a/backend/tests/unit/test_deepseek_provider.py
++++ b/backend/tests/unit/test_deepseek_provider.py
+@@ -1,16 +1,16 @@
+ import json
+ 
+ import httpx
+ import pytest
+ 
+-from secagent.domain import ModelStage
++from secagent.domain import ModelRequest, ModelStage
+ from secagent.providers.base import ProviderErrorCode, ProviderUnavailable
+ from tests.provider_fakes import deepseek_provider, parse_request, plan_request
+ 
+ 
+ @pytest.mark.asyncio
+ async def test_deepseek_records_usage_and_never_exposes_reasoning() -> None:
+     provider = deepseek_provider(
+         returning={
+             "id": "ds-req-1",
+             "choices": [
+@@ -51,20 +51,56 @@ async def test_deepseek_payload_is_non_streaming_json_with_thinking() -> None:
+ 
+     payload = json.loads(requests[0].content)
+     assert payload["stream"] is False
+     assert payload["response_format"] == {"type": "json_object"}
+     assert payload["max_tokens"] == provider.max_tokens[ModelStage.PLAN]
+     assert payload["thinking"] == {"type": "enabled"}
+     assert "JSON" in payload["messages"][0]["content"]
+     assert "Example" in payload["messages"][0]["content"]
+ 
+ 
++@pytest.mark.asyncio
++@pytest.mark.parametrize(
++    ("stage", "expected_max_tokens"),
++    [
++        (ModelStage.DECOMPOSE, 4096),
++        (ModelStage.SUBTASK_EXECUTE, 4096),
++        (ModelStage.SYNTHESIZE, 8192),
++    ],
++)
++async def test_deepseek_supports_new_stages_with_bounded_output_tokens(
++    stage: ModelStage, expected_max_tokens: int
++) -> None:
++    requests: list[httpx.Request] = []
++    provider = deepseek_provider(
++        returning={
++            "choices": [
++                {"finish_reason": "stop", "message": {"content": '{"ok":true}'}}
++            ]
++        },
++        capture=requests,
++        model="deepseek-v4-flash",
++    )
++
++    response = await provider.complete(
++        ModelRequest(
++            stage=stage,
++            system="s",
++            user="{}",
++            response_schema={"type": "object"},
++        )
++    )
++
++    assert response.data == {"ok": True}
++    assert json.loads(requests[0].content)["max_tokens"] == expected_max_tokens
++
++
+ @pytest.mark.asyncio
+ async def test_opencode_go_payload_uses_reasoning_effort() -> None:
+     requests: list[httpx.Request] = []
+     provider = deepseek_provider(
+         returning={
+             "choices": [
+                 {"finish_reason": "stop", "message": {"content": '{"steps": []}'}}
+             ]
+         },
+         capture=requests,
+diff --git a/backend/tests/unit/test_glm_provider.py b/backend/tests/unit/test_glm_provider.py
+index 02a4de11..28759a64 100644
+--- a/backend/tests/unit/test_glm_provider.py
++++ b/backend/tests/unit/test_glm_provider.py
+@@ -1,16 +1,16 @@
+ import json
+ 
+ import httpx
+ import pytest
+ 
+-from secagent.domain import ModelStage
++from secagent.domain import ModelRequest, ModelStage
+ from secagent.providers.base import ProviderErrorCode, ProviderUnavailable
+ from tests.provider_fakes import glm_provider, parse_request, plan_request
+ 
+ 
+ @pytest.mark.asyncio
+ async def test_glm_empty_content_is_retryable_failure() -> None:
+     provider = glm_provider(
+         returning={
+             "id": "glm-1",
+             "choices": [
+@@ -39,20 +39,45 @@ async def test_glm_payload_has_no_thinking_and_uses_parse_token_limit() -> None:
+ 
+     await provider.complete(parse_request())
+ 
+     payload = json.loads(requests[0].content)
+     assert "thinking" not in payload
+     assert payload["stream"] is False
+     assert payload["max_tokens"] == provider.max_tokens[ModelStage.TASK_PARSE]
+     assert "JSON" in payload["messages"][0]["content"]
+ 
+ 
++@pytest.mark.asyncio
++async def test_glm_supports_subtask_execute_with_bounded_output_tokens() -> None:
++    requests: list[httpx.Request] = []
++    provider = glm_provider(
++        returning={
++            "choices": [
++                {"finish_reason": "stop", "message": {"content": '{"ok":true}'}}
++            ]
++        },
++        capture=requests,
++    )
++
++    response = await provider.complete(
++        ModelRequest(
++            stage=ModelStage.SUBTASK_EXECUTE,
++            system="s",
++            user="{}",
++            response_schema={"type": "object"},
++        )
++    )
++
++    assert response.data == {"ok": True}
++    assert json.loads(requests[0].content)["max_tokens"] == 4096
++
++
+ @pytest.mark.asyncio
+ async def test_glm_rejects_deepseek_stage_before_transport() -> None:
+     requests: list[httpx.Request] = []
+     provider = glm_provider(capture=requests)
+ 
+     with pytest.raises(ProviderUnavailable) as caught:
+         await provider.complete(plan_request())
+ 
+     assert caught.value.code is ProviderErrorCode.INVALID_SCHEMA
+     assert requests == []
+diff --git a/backend/tests/unit/test_mock_provider.py b/backend/tests/unit/test_mock_provider.py
+index 53ab1a1a..d0d3a9bf 100644
+--- a/backend/tests/unit/test_mock_provider.py
++++ b/backend/tests/unit/test_mock_provider.py
+@@ -1,16 +1,20 @@
+ import json
+ 
+ import pytest
+ 
+ from secagent.agents.planner import PlanDocument
+ from secagent.agents.reporter import ReportSections
++from secagent.conversation_decomposition import (
++    DecompositionDocument,
++    validate_decomposition,
++)
+ from secagent.domain import CriticDecision, ModelRequest, ModelStage
+ from secagent.providers.mock import MockProvider
+ 
+ 
+ @pytest.mark.asyncio
+ async def test_mock_report_sections_turn_evidence_into_traceable_narratives() -> None:
+     payload = {
+         "goal": "检查目标页面的安全配置",
+         "findings": [
+             {
+@@ -193,10 +197,89 @@ async def test_mock_replan_skips_successful_tools_and_preserves_input_payload()
+         "header_check",
+         "form_extract",
+     ]
+     assert PlanDocument.model_validate(response.data).steps[0].params == {
+         "response": "$http"
+     }
+     assert payload["execution_memory"]["successful_tool_calls"] == [
+         {"tool_name": "url_guard"},
+         {"tool_name": "http_fetch"},
+     ]
++
++
++def decomposition_request(*, plan_version: int, max_subtasks: int) -> ModelRequest:
++    return ModelRequest(
++        stage=ModelStage.DECOMPOSE,
++        system="分解任务",
++        user=json.dumps(
++            {
++                "plan_version": plan_version,
++                "budget_limits": {"max_subtasks": max_subtasks},
++                "context": {
++                    "current_message": "分析材料和代码",
++                    "available_tools": [
++                        {
++                            "name": "source_scanner",
++                            "risk_level": "low",
++                            "description": "扫描源码",
++                        }
++                    ],
++                },
++            },
++            ensure_ascii=False,
++        ),
++        response_schema=DecompositionDocument.model_json_schema(),
++    )
++
++
++@pytest.mark.asyncio
++async def test_mock_decomposition_emulates_flash_with_stable_two_provider_plan() -> None:
++    response = await MockProvider().complete(
++        decomposition_request(plan_version=7, max_subtasks=4)
++    )
++    document = DecompositionDocument.model_validate(response.data)
++
++    assert validate_decomposition(
++        document, expected_plan_version=7, max_subtasks=4
++    ) is document
++    assert [item.proposed_provider.value for item in document.subtasks] == [
++        "glm",
++        "deepseek",
++    ]
++    assert document.subtasks[1].dependency_keys == [document.subtasks[0].key]
++    assert document.subtasks[1].allowed_tools == ["source_scanner"]
++    assert response.provider == "mock"
++    assert response.model == "deterministic-mock"
++    assert response.emulated_provider == "deepseek"
++    assert response.emulated_model == "deepseek-v4-flash"
++    assert response.is_demo is True
++
++
++@pytest.mark.asyncio
++async def test_mock_decomposition_respects_exact_single_subtask_budget() -> None:
++    response = await MockProvider().complete(
++        decomposition_request(plan_version=9, max_subtasks=1)
++    )
++    document = DecompositionDocument.model_validate(response.data)
++
++    assert validate_decomposition(
++        document, expected_plan_version=9, max_subtasks=1
++    ) is document
++    assert len(document.subtasks) == 1
++    assert document.subtasks[0].required is True
++
++
++@pytest.mark.asyncio
++async def test_legacy_mock_response_does_not_claim_decomposition_emulation() -> None:
++    response = await MockProvider().complete(
++        ModelRequest(
++            stage=ModelStage.REPORT,
++            system="生成报告",
++            user=json.dumps(
++                {"goal": "g", "findings": [], "recommendations": [], "errors": []}
++            ),
++            response_schema=ReportSections.model_json_schema(),
++        )
++    )
++
++    assert response.emulated_provider is None
++    assert response.emulated_model is None
+diff --git a/backend/tests/unit/test_model_router.py b/backend/tests/unit/test_model_router.py
+index 2585e139..d7d85ba2 100644
+--- a/backend/tests/unit/test_model_router.py
++++ b/backend/tests/unit/test_model_router.py
+@@ -17,34 +17,37 @@ from secagent.providers.glm import GLMProvider
+ from secagent.providers.router import FIXED_PROVIDER, ModelRouter
+ from secagent.queue.fake import FakeJobQueue
+ from secagent.worker import (
+     _get_worker_runtime,
+     _run_worker_coroutine,
+     _shutdown_worker_runtime,
+ )
+ 
+ 
+ class StubProvider:
+-    def __init__(self, name: str, fail: bool = False) -> None:
++    def __init__(
++        self, name: str, fail: bool = False, *, model: str = "stub"
++    ) -> None:
+         self.name = name
+         self.fail = fail
++        self.model = model
+         self.complete_count = 0
+ 
+     async def complete(self, request: ModelRequest) -> ModelResponse:
+         self.complete_count += 1
+         if self.fail:
+             raise ProviderUnavailable(
+                 self.name, ProviderErrorCode.NETWORK, retryable=True
+             )
+         return ModelResponse(
+             provider=self.name,
+-            model="stub",
++            model=self.model,
+             data={"ok": True},
+             latency_ms=1,
+             is_demo=self.name == "mock",
+         )
+ 
+ 
+ @pytest.mark.asyncio
+ async def test_auto_routes_parse_to_glm_and_plan_to_deepseek() -> None:
+     router = ModelRouter(
+         {
+@@ -145,20 +148,186 @@ async def test_preferred_model_cannot_override_fixed_stage_route() -> None:
+ 
+     response = await router.complete(
+         ModelStage.PLAN,
+         ModelRequest(system="s", user="u", response_schema={}),
+         preferred="glm",
+     )
+ 
+     assert response.provider == "deepseek"
+ 
+ 
++@pytest.mark.asyncio
++async def test_new_fixed_stages_use_flash_deepseek_despite_caller_preference() -> None:
++    glm = StubProvider("glm", model="glm-5.2")
++    deepseek = StubProvider("deepseek", model="deepseek-v4-flash")
++    router = ModelRouter({"glm": glm, "deepseek": deepseek}, mode="auto")
++    request = ModelRequest(system="s", user="u", response_schema={})
++
++    decompose = await router.complete(
++        ModelStage.DECOMPOSE, request, preferred="glm"
++    )
++    synthesize = await router.complete(
++        ModelStage.SYNTHESIZE, request, preferred="glm"
++    )
++
++    assert FIXED_PROVIDER[ModelStage.DECOMPOSE] == "deepseek"
++    assert FIXED_PROVIDER[ModelStage.SYNTHESIZE] == "deepseek"
++    assert decompose.provider == "deepseek"
++    assert synthesize.provider == "deepseek"
++    assert glm.complete_count == 0
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("preferred", ["glm", "deepseek"])
++async def test_subtask_execute_uses_required_logical_preference(preferred: str) -> None:
++    router = ModelRouter(
++        {
++            "glm": StubProvider("glm", model="glm-5.2"),
++            "deepseek": StubProvider("deepseek", model="deepseek-v4-flash"),
++        },
++        mode="auto",
++    )
++
++    response = await router.complete(
++        ModelStage.SUBTASK_EXECUTE,
++        ModelRequest(system="s", user="u", response_schema={}),
++        preferred=preferred,
++    )
++
++    assert response.provider == preferred
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("preferred", [None, "mock", "unknown"])
++async def test_subtask_execute_rejects_missing_or_non_logical_preference(
++    preferred: str | None,
++) -> None:
++    router = ModelRouter(
++        {
++            "glm": StubProvider("glm", model="glm-5.2"),
++            "deepseek": StubProvider("deepseek", model="deepseek-v4-flash"),
++            "mock": StubProvider("mock"),
++        },
++        mode="auto",
++    )
++
++    with pytest.raises(ProviderUnavailable) as caught:
++        await router.complete(
++            ModelStage.SUBTASK_EXECUTE,
++            ModelRequest(system="s", user="u", response_schema={}),
++            preferred=preferred,
++        )
++
++    assert caught.value.code is ProviderErrorCode.INVALID_SCHEMA
++    assert all(provider.complete_count == 0 for provider in router.providers.values())
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("mode", ["auto", "live"])
++async def test_decompose_missing_deepseek_never_calls_glm_or_mock(mode: str) -> None:
++    glm = StubProvider("glm", model="glm-5.2")
++    mock = StubProvider("mock")
++    router = ModelRouter(
++        {"glm": glm, "mock": mock}, mode=mode, allow_missing=True
++    )
++
++    with pytest.raises(ProviderUnavailable) as caught:
++        await router.complete(
++            ModelStage.DECOMPOSE,
++            ModelRequest(system="s", user="u", response_schema={}),
++        )
++
++    assert caught.value.provider == "deepseek"
++    assert glm.complete_count == 0
++    assert mock.complete_count == 0
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("stage", [ModelStage.DECOMPOSE, ModelStage.SYNTHESIZE])
++async def test_fixed_deepseek_stage_rejects_non_flash_adapter_before_call(
++    stage: ModelStage,
++) -> None:
++    deepseek = StubProvider("deepseek", model="deepseek-v4-pro")
++    router = ModelRouter({"deepseek": deepseek}, mode="auto")
++
++    with pytest.raises(ProviderUnavailable) as caught:
++        await router.complete(
++            stage,
++            ModelRequest(system="s", user="u", response_schema={}),
++        )
++
++    assert caught.value.provider == "deepseek"
++    assert caught.value.code is ProviderErrorCode.INVALID_SCHEMA
++    assert caught.value.retryable is False
++    assert deepseek.complete_count == 0
++
++
++@pytest.mark.asyncio
++async def test_explicit_mock_mode_emulates_fixed_decompose_with_mock_only() -> None:
++    mock = StubProvider("mock")
++    deepseek = StubProvider("deepseek", model="deepseek-v4-flash")
++    router = ModelRouter({"mock": mock, "deepseek": deepseek}, mode="mock")
++
++    response = await router.complete(
++        ModelStage.DECOMPOSE,
++        ModelRequest(system="s", user="u", response_schema={}),
++        preferred="glm",
++    )
++
++    assert response.provider == "mock"
++    assert mock.complete_count == 1
++    assert deepseek.complete_count == 0
++
++
++@pytest.mark.asyncio
++async def test_explicit_mock_subtask_still_requires_logical_preference() -> None:
++    mock = StubProvider("mock")
++    router = ModelRouter({"mock": mock}, mode="mock")
++
++    with pytest.raises(ProviderUnavailable) as caught:
++        await router.complete(
++            ModelStage.SUBTASK_EXECUTE,
++            ModelRequest(system="s", user="u", response_schema={}),
++        )
++
++    assert caught.value.code is ProviderErrorCode.INVALID_SCHEMA
++    assert mock.complete_count == 0
++
++
++@pytest.mark.asyncio
++async def test_decompose_does_not_require_glm_before_model_call() -> None:
++    deepseek = StubProvider("deepseek", model="deepseek-v4-flash")
++    router = ModelRouter({"deepseek": deepseek}, mode="auto")
++
++    response = await router.complete(
++        ModelStage.DECOMPOSE,
++        ModelRequest(system="s", user="u", response_schema={}),
++    )
++
++    assert response.provider == "deepseek"
++    assert deepseek.complete_count == 1
++
++
++def test_logical_assignment_providers_are_derived_from_mode_and_configuration() -> None:
++    auto = ModelRouter(
++        {
++            "deepseek": StubProvider("deepseek", model="deepseek-v4-flash"),
++            "mock": StubProvider("mock"),
++        },
++        mode="auto",
++    )
++    explicit_mock = ModelRouter({"mock": StubProvider("mock")}, mode="mock")
++
++    assert auto.logical_assignment_providers() == {"deepseek"}
++    assert explicit_mock.logical_assignment_providers() == {"glm", "deepseek"}
++
++
+ @pytest.mark.asyncio
+ async def test_build_providers_uses_specific_adapters_and_one_shared_client() -> None:
+     providers = build_providers(
+         Settings(
+             deepseek_api_key="ds-key",
+             glm_api_key="glm-key",
+             deepseek_model="deepseek-v4-pro",
+             glm_model="glm-5.2",
+         )
+     )
+diff --git a/docker-compose.yml b/docker-compose.yml
+index 783e5092..eb5a3045 100644
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -37,21 +37,21 @@ services:
+       MODEL_TIMEOUT_SECONDS: ${MODEL_TIMEOUT_SECONDS:-600}
+       TASK_TIMEOUT_SECONDS: ${TASK_TIMEOUT_SECONDS:-1800}
+       JWT_SIGNING_KEY: ${JWT_SIGNING_KEY:-local-development-signing-key-change-me}
+       PROVIDER_CREDENTIAL_ENCRYPTION_KEY: ${PROVIDER_CREDENTIAL_ENCRYPTION_KEY:-}
+       PROVIDER_CREDENTIAL_ENCRYPTION_KEY_FILE: /run/secrets/provider_credential_encryption_key
+       WORKER_CONCURRENCY: 3
+       WEB_ALLOWED_HOSTS: ${WEB_ALLOWED_HOSTS:-web-demo}
+       DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
+       DEEPSEEK_API_STYLE: ${DEEPSEEK_API_STYLE:-auto}
+       DEEPSEEK_REASONING_EFFORT: ${DEEPSEEK_REASONING_EFFORT:-high}
+-      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-pro}
++      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-flash}
+       GLM_BASE_URL: ${GLM_BASE_URL:-https://open.bigmodel.cn/api/paas/v4}
+       GLM_MODEL: ${GLM_MODEL:-glm-5.2}
+     volumes:
+       - secagent-data:/data
+       - ./secrets/provider_credential_encryption_key.txt:/run/secrets/provider_credential_encryption_key:ro
+     depends_on:
+       postgres:
+         condition: service_healthy
+       redis:
+         condition: service_healthy
+@@ -76,21 +76,21 @@ services:
+       MODEL_TIMEOUT_SECONDS: ${MODEL_TIMEOUT_SECONDS:-600}
+       TASK_TIMEOUT_SECONDS: ${TASK_TIMEOUT_SECONDS:-1800}
+       JWT_SIGNING_KEY: ${JWT_SIGNING_KEY:-local-development-signing-key-change-me}
+       PROVIDER_CREDENTIAL_ENCRYPTION_KEY: ${PROVIDER_CREDENTIAL_ENCRYPTION_KEY:-}
+       PROVIDER_CREDENTIAL_ENCRYPTION_KEY_FILE: /run/secrets/provider_credential_encryption_key
+       WORKER_CONCURRENCY: 3
+       WEB_ALLOWED_HOSTS: ${WEB_ALLOWED_HOSTS:-web-demo}
+       DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
+       DEEPSEEK_API_STYLE: ${DEEPSEEK_API_STYLE:-auto}
+       DEEPSEEK_REASONING_EFFORT: ${DEEPSEEK_REASONING_EFFORT:-high}
+-      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-pro}
++      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-flash}
+       GLM_BASE_URL: ${GLM_BASE_URL:-https://open.bigmodel.cn/api/paas/v4}
+       GLM_MODEL: ${GLM_MODEL:-glm-5.2}
+     volumes:
+       - secagent-data:/data
+       - ./secrets/provider_credential_encryption_key.txt:/run/secrets/provider_credential_encryption_key:ro
+     depends_on:
+       api:
+         condition: service_healthy
+       postgres:
+         condition: service_healthy

@@ -17,7 +17,7 @@ from secagent.agents.coordinator import (
 )
 from secagent.conversation_decomposition import LogicalProvider, RouteReasonCode
 from secagent.conversation_domain import ConversationSettings, TurnBudgetSnapshot
-from secagent.domain import ModelRequest, ModelResponse, ModelStage
+from secagent.domain import ModelRequest, ModelResponse, ModelStage, RiskLevel
 from secagent.providers.router import ModelRouter
 from secagent.services.assignment_policy import AssignmentPolicy
 
@@ -143,10 +143,26 @@ def test_coordinator_context_dtos_accept_exact_bounded_contract() -> None:
     ]
     assert isinstance(context.attachments[0], CoordinatorAttachment)
     assert isinstance(context.completed_subtasks[0], CoordinatorCompletedSubtask)
+    assert context.completed_subtasks[0].provider is LogicalProvider.GLM
     assert isinstance(context.evidence[0], CoordinatorEvidence)
     assert isinstance(context.available_tools[0], CoordinatorTool)
+    assert context.available_tools[0].risk_level.value == "low"
     assert isinstance(context.settings, ConversationSettings)
     assert isinstance(context.budget, TurnBudgetSnapshot)
+
+    enum_subtask = CoordinatorCompletedSubtask(
+        key="enum_task",
+        provider=LogicalProvider.DEEPSEEK,
+        summary="已完成检查。",
+        evidence_refs=[],
+    )
+    enum_tool = CoordinatorTool(
+        name="source_scanner",
+        risk_level=RiskLevel.LOW,
+        description="扫描源码",
+    )
+    assert enum_subtask.provider is LogicalProvider.DEEPSEEK
+    assert enum_tool.risk_level is RiskLevel.LOW
 
 
 @pytest.mark.parametrize(
@@ -224,6 +240,33 @@ def test_coordinator_context_rejects_invalid_bounds_and_duplicates(field, value)
 def test_coordinator_nested_dtos_reject_invalid_values(model_type, data) -> None:
     with pytest.raises(ValidationError):
         model_type.model_validate(data)
+
+
+@pytest.mark.parametrize("provider", [b"glm", 1])
+def test_completed_subtask_provider_rejects_non_string_enum_input(provider) -> None:
+    with pytest.raises(ValidationError):
+        CoordinatorCompletedSubtask.model_validate(
+            {
+                "key": "prior_check",
+                "provider": provider,
+                "summary": "已完成检查。",
+                "evidence_refs": [],
+            }
+        )
+
+
+@pytest.mark.parametrize("risk_level", [b"low", 1])
+def test_coordinator_tool_risk_level_rejects_non_string_enum_input(
+    risk_level,
+) -> None:
+    with pytest.raises(ValidationError):
+        CoordinatorTool.model_validate(
+            {
+                "name": "source_scanner",
+                "risk_level": risk_level,
+                "description": "扫描源码",
+            }
+        )
 
 
 def test_coordinator_context_is_strict_and_forbids_extras_or_scalar_coercion() -> None:
@@ -335,6 +378,16 @@ async def test_coordinator_redacts_and_filters_bounded_canonical_request() -> No
         "context",
         "plan_version",
     }
+    expected_budget = {
+        "max_subtasks": 4,
+        "max_model_calls_per_subtask": 2,
+        "max_tool_calls_per_subtask": 2,
+        "timeout_seconds": 180,
+        "max_replans": 1,
+        "max_context_tokens": 8_000,
+    }
+    assert payload["budget_limits"] == expected_budget
+    assert payload["context"]["budget"] == expected_budget
 
 
 @pytest.mark.asyncio

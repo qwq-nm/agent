@@ -45,6 +45,12 @@ def _unique(values: list[str]) -> list[str]:
     return values
 
 
+def _require_string_enum(value: object) -> object:
+    if not isinstance(value, str):
+        raise ValueError("enum input must be a string")
+    return value
+
+
 def _bounded_text(max_length: int):
     return Annotated[
         str,
@@ -95,6 +101,11 @@ class CoordinatorCompletedSubtask(StrictModel):
     summary: Text4000
     evidence_refs: list[Text128] = Field(max_length=64)
 
+    @field_validator("provider", mode="before")
+    @classmethod
+    def require_provider_string(cls, value: object) -> object:
+        return _require_string_enum(value)
+
     @field_validator("evidence_refs")
     @classmethod
     def unique_evidence_refs(cls, value: list[str]) -> list[str]:
@@ -111,6 +122,11 @@ class CoordinatorTool(StrictModel):
     name: ToolName
     risk_level: RiskLevel = Field(strict=False)
     description: Text500
+
+    @field_validator("risk_level", mode="before")
+    @classmethod
+    def require_risk_level_string(cls, value: object) -> object:
+        return _require_string_enum(value)
 
 
 class DecompositionContext(StrictModel):
@@ -196,21 +212,21 @@ class CoordinatorAgent:
         ):
             raise ValueError("context budget exceeded")
         safe_context = redact_mapping(context_data)
+        budget_limits = context.budget.model_dump(mode="json")
+        safe_context["budget"] = budget_limits
 
-        payload = redact_mapping(
-            {
-                "context": safe_context,
-                "capability_matrix": {
-                    provider.value: {
-                        capability.value: level.value
-                        for capability, level in capabilities.items()
-                    }
-                    for provider, capabilities in CAPABILITY_MATRIX.items()
-                },
-                "plan_version": plan_version,
-                "budget_limits": context.budget.model_dump(mode="json"),
-            }
-        )
+        payload = {
+            "context": safe_context,
+            "capability_matrix": {
+                provider.value: {
+                    capability.value: level.value
+                    for capability, level in capabilities.items()
+                }
+                for provider, capabilities in CAPABILITY_MATRIX.items()
+            },
+            "plan_version": plan_version,
+            "budget_limits": budget_limits,
+        }
         request = ModelRequest(
             system=(
                 "Decompose the bounded authorized conversation context into a "

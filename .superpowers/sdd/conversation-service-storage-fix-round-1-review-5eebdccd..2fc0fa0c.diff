@@ -1,0 +1,486 @@
+# Review package: 5eebdccd..2fc0fa0c
+
+## Commits
+2fc0fa0c fix: harden conversation commit and storage boundaries
+
+## Files changed
+ backend/secagent/conversation_domain.py           |  8 +++-
+ backend/secagent/services/conversation_service.py |  9 +++--
+ backend/secagent/services/conversation_storage.py | 10 +++--
+ backend/tests/unit/test_conversation_service.py   | 49 ++++++++++++++++++++++-
+ backend/tests/unit/test_conversation_storage.py   | 29 ++++++++++++++
+ 5 files changed, 95 insertions(+), 10 deletions(-)
+
+## Diff
+diff --git a/backend/secagent/conversation_domain.py b/backend/secagent/conversation_domain.py
+index 95610a9c..afe434c2 100644
+--- a/backend/secagent/conversation_domain.py
++++ b/backend/secagent/conversation_domain.py
+@@ -1,15 +1,16 @@
+ from __future__ import annotations
+ 
+ import json
+ import math
+ import re
++import unicodedata
+ from datetime import datetime
+ from enum import StrEnum
+ from typing import Annotated, Any, TypeVar
+ from uuid import UUID
+ 
+ from pydantic import (
+     AfterValidator,
+     BaseModel,
+     BeforeValidator,
+     ConfigDict,
+@@ -36,20 +37,24 @@ _WINDOWS_RESERVED_NAMES = {
+     "NUL",
+     "CLOCK$",
+     "CONIN$",
+     "CONOUT$",
+     *(f"COM{index}" for index in range(1, 10)),
+     *(f"LPT{index}" for index in range(1, 10)),
+ }
+ _WINDOWS_FORBIDDEN_CHARACTERS = frozenset('<>:"|?*')
+ 
+ 
++def contains_unicode_control_characters(value: str) -> bool:
++    return any(unicodedata.category(character).startswith("C") for character in value)
++
++
+ def _canonical_uuid(value: object) -> str:
+     if not isinstance(value, str) or _CANONICAL_UUID_RE.fullmatch(value) is None:
+         raise ValueError("must be a canonical hyphenated UUID")
+     try:
+         return str(UUID(value))
+     except ValueError as exc:
+         raise ValueError("must be a canonical hyphenated UUID") from exc
+ 
+ 
+ def _require_string_enum(value: object) -> object:
+@@ -281,21 +286,22 @@ def _safe_relative_posix_path(value: object) -> str:
+         raise ValueError("path must be a safe relative POSIX path")
+     if value.startswith("/") or _WINDOWS_DRIVE_RE.match(value):
+         raise ValueError("path must be relative")
+     segments = value.split("/")
+     if any(segment in {"", ".", ".."} for segment in segments):
+         raise ValueError("path contains an unsafe segment")
+     for segment in segments:
+         if segment.endswith((".", " ")):
+             raise ValueError("path contains a Windows-normalized alias")
+         if any(
+-            character in _WINDOWS_FORBIDDEN_CHARACTERS or ord(character) < 32
++            character in _WINDOWS_FORBIDDEN_CHARACTERS
++            or contains_unicode_control_characters(character)
+             for character in segment
+         ):
+             raise ValueError("path contains a Windows-forbidden character")
+         device_stem = segment.split(".", 1)[0].upper()
+         if device_stem in _WINDOWS_RESERVED_NAMES:
+             raise ValueError("path contains a reserved Windows device name")
+     return value
+ 
+ 
+ SafeStorageRef = Annotated[
+diff --git a/backend/secagent/services/conversation_service.py b/backend/secagent/services/conversation_service.py
+index ecefd2f9..812331c1 100644
+--- a/backend/secagent/services/conversation_service.py
++++ b/backend/secagent/services/conversation_service.py
+@@ -1,20 +1,19 @@
+ from __future__ import annotations
+ 
+ import re
+ from collections import Counter
+ from dataclasses import dataclass
+ from typing import TYPE_CHECKING, Callable, Sequence
+ 
+ from fastapi import UploadFile
+ from pydantic import TypeAdapter
+-from sqlalchemy.exc import DBAPIError
+ from sqlalchemy.orm import Session
+ 
+ from secagent.config import Settings
+ from secagent.conversation_domain import (
+     AttachmentRead,
+     ConversationCreate,
+     ConversationDetailRead,
+     ConversationMessageKind,
+     ConversationMessageRead,
+     ConversationMessageRole,
+@@ -61,20 +60,24 @@ class AttachmentIdempotencyConflict(RuntimeError):
+ 
+ 
+ class ConversationReplayCorruptState(RuntimeError):
+     """A persisted message replay is missing its required Turn."""
+ 
+ 
+ class ConversationCommitOutcomeUnknown(RuntimeError):
+     """COMMIT outcome is uncertain and filesystem reconciliation is required."""
+ 
+ 
++class ConversationCommitNotApplied(RuntimeError):
++    """Controlled transaction adapter evidence that COMMIT was not attempted."""
++
++
+ @dataclass(frozen=True)
+ class _ReplayState:
+     message: ConversationMessageRead
+     attachments: list[AttachmentRead]
+     turn: ConversationTurnRead
+ 
+ 
+ class ConversationService:
+     """Request-scoped orchestration boundary for conversation persistence."""
+ 
+@@ -579,23 +582,21 @@ class ConversationService:
+         except Exception as exc:
+             if self._commit_explicitly_not_applied(exc):
+                 self.session.rollback()
+                 raise
+             self.session.invalidate()
+             raise ConversationCommitOutcomeUnknown(
+                 "COMMIT outcome is uncertain; reconciliation is required"
+             ) from exc
+ 
+     def _commit_explicitly_not_applied(self, error: Exception) -> bool:
+-        if isinstance(error, DBAPIError) and error.connection_invalidated:
+-            return False
+-        return self.session.in_transaction()
++        return isinstance(error, ConversationCommitNotApplied)
+ 
+     def _require_clean_writer(self) -> None:
+         meaningfully_dirty = any(
+             self.session.is_modified(row, include_collections=True)
+             for row in self.session.dirty
+         )
+         if (
+             self.session.in_transaction()
+             or self.session.new
+             or self.session.deleted
+diff --git a/backend/secagent/services/conversation_storage.py b/backend/secagent/services/conversation_storage.py
+index c02bd43c..98c9c4ae 100644
+--- a/backend/secagent/services/conversation_storage.py
++++ b/backend/secagent/services/conversation_storage.py
+@@ -3,30 +3,32 @@ from __future__ import annotations
+ import hashlib
+ import mimetypes
+ import os
+ import shutil
+ import stat
+ import unicodedata
+ from dataclasses import dataclass
+ from pathlib import Path, PurePosixPath
+ from typing import Sequence
+ from uuid import uuid4
++from weakref import WeakKeyDictionary
+ from zipfile import BadZipFile, ZipFile
+ 
+ from fastapi import UploadFile
+ from pydantic import TypeAdapter, ValidationError
+ 
+ from secagent.config import Settings
+ from secagent.conversation_domain import (
+     AttachmentMetadataCreate,
+     CanonicalUUID,
+     SafeClientRelativePath,
++    contains_unicode_control_characters,
+ )
+ from secagent.security.files import UnsafeArchive, extract_zip_safely
+ 
+ 
+ _READ_CHUNK_BYTES = 1024 * 1024
+ _ZIP_SIGNATURES = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
+ _WINDOWS_RESERVED_NAMES = {
+     "CON",
+     "PRN",
+     "AUX",
+@@ -58,21 +60,21 @@ class _StagedAttachment:
+             self.relative_path,
+             self.content_type,
+             self.size_bytes,
+             self.sha256,
+         )
+ 
+ 
+ class StagedAttachmentBatch:
+     """Opaque capability representing one service-owned temporary batch."""
+ 
+-    __slots__ = ("_batch_id", "_entries", "_owner")
++    __slots__ = ("_batch_id", "_entries", "_owner", "__weakref__")
+ 
+     def __init__(
+         self,
+         owner: object,
+         batch_id: str | None,
+         entries: tuple[_StagedAttachment, ...],
+     ) -> None:
+         self._owner = owner
+         self._batch_id = batch_id
+         self._entries = entries
+@@ -80,21 +82,23 @@ class StagedAttachmentBatch:
+ 
+ class ConversationStorageService:
+     def __init__(self, settings: Settings) -> None:
+         self.data_dir = settings.data_dir.resolve()
+         self.upload_max_bytes = settings.upload_max_bytes
+         self.archive_max_files = settings.archive_max_files
+         self.archive_max_bytes = settings.archive_max_bytes
+         self.max_attachments_per_message = settings.max_attachments_per_message
+         self.max_attachment_total_bytes = settings.max_attachment_total_bytes
+         self._owner = object()
+-        self._issued_batches: dict[StagedAttachmentBatch, str | None] = {}
++        self._issued_batches: WeakKeyDictionary[
++            StagedAttachmentBatch, str | None
++        ] = WeakKeyDictionary()
+ 
+     @property
+     def staging_root(self) -> Path:
+         return self.data_dir / ".conversation-staging"
+ 
+     async def stage_many(
+         self,
+         uploads: Sequence[UploadFile],
+         relative_paths: Sequence[str | None],
+     ) -> StagedAttachmentBatch:
+@@ -313,21 +317,21 @@ class ConversationStorageService:
+     def _normalize_filename(value: str | None) -> str:
+         if not isinstance(value, str) or not value:
+             raise AttachmentStorageError("filename is required")
+         name = unicodedata.normalize("NFC", value)
+         if len(name) > 255:
+             raise AttachmentStorageError("filename exceeds 255 characters")
+         if name in {".", ".."} or "/" in name or "\\" in name:
+             raise AttachmentStorageError("filename must be one safe path segment")
+         if name.endswith((".", " ")):
+             raise AttachmentStorageError("filename has a trailing dot or space")
+-        if ":" in name or any(unicodedata.category(char).startswith("C") for char in name):
++        if ":" in name or contains_unicode_control_characters(name):
+             raise AttachmentStorageError("filename contains an unsafe character")
+         if name.split(".", 1)[0].upper() in _WINDOWS_RESERVED_NAMES:
+             raise AttachmentStorageError("filename uses a Windows device alias")
+         if Path(name).is_absolute() or (len(name) >= 2 and name[1] == ":"):
+             raise AttachmentStorageError("filename must not be absolute")
+         return name
+ 
+     @staticmethod
+     def _validate_relative_path(value: str | None) -> str | None:
+         try:
+diff --git a/backend/tests/unit/test_conversation_service.py b/backend/tests/unit/test_conversation_service.py
+index a0ff83ec..16c7be4c 100644
+--- a/backend/tests/unit/test_conversation_service.py
++++ b/backend/tests/unit/test_conversation_service.py
+@@ -45,20 +45,21 @@ from secagent.db_models import (
+     TaskRow,
+     UserRow,
+ )
+ from secagent.domain import SafetyMode, UserRole
+ from secagent.repository import TaskRepository
+ from secagent.services.audit import AuditService
+ from secagent.services.conversation_events import ConversationEventService
+ from secagent.services.conversation_service import (
+     ArchivedConversationError,
+     AttachmentIdempotencyConflict,
++    ConversationCommitNotApplied,
+     ConversationCommitOutcomeUnknown,
+     ConversationReplayCorruptState,
+     ConversationService,
+ )
+ from secagent.services.conversation_storage import ConversationStorageService
+ 
+ 
+ def _uuid() -> str:
+     return str(uuid4())
+ 
+@@ -728,24 +729,24 @@ async def test_failure_after_publish_rolls_back_all_rows_and_removes_workspace(
+ 
+ @pytest.mark.asyncio
+ async def test_explicit_commit_failure_compensates_but_uncertain_commit_keeps_files(
+     service_env: ServiceEnvironment, monkeypatch: pytest.MonkeyPatch
+ ) -> None:
+     service = service_env.service()
+     conversation = service.create(service_env.alice, ConversationCreate())
+     original_commit = service.session.commit
+ 
+     def fail_before_commit():
+-        raise RuntimeError("explicitly not committed")
++        raise ConversationCommitNotApplied("explicitly not committed")
+ 
+     monkeypatch.setattr(service.session, "commit", fail_before_commit)
+-    with pytest.raises(RuntimeError, match="not committed"):
++    with pytest.raises(ConversationCommitNotApplied, match="not committed"):
+         await service.send_message(
+             service_env.alice,
+             conversation.id,
+             MessageSubmission(content="fail", relative_paths=[None]),
+             [_upload("a.txt", b"a")],
+             "commit-fail",
+         )
+     assert _counts(service_env, conversation.id)["messages"] == 0
+     message_parent = (
+         service_env.settings.data_dir
+@@ -801,20 +802,64 @@ async def test_connection_invalidated_during_commit_is_treated_as_uncertain(
+         )
+     message_parent = (
+         service_env.settings.data_dir
+         / "conversations"
+         / conversation.id
+         / "messages"
+     )
+     assert message_parent.exists() and len(list(message_parent.iterdir())) == 1
+ 
+ 
++@pytest.mark.asyncio
++async def test_noninvalidated_driver_commit_error_defaults_to_uncertain(
++    service_env: ServiceEnvironment, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    service = service_env.service()
++    conversation = service.create(service_env.alice, ConversationCreate())
++    invalidations = 0
++    original_invalidate = service.session.invalidate
++
++    def track_invalidate():
++        nonlocal invalidations
++        invalidations += 1
++        original_invalidate()
++
++    def driver_error_with_live_client_transaction():
++        assert service.session.in_transaction()
++        raise OperationalError(
++            "COMMIT",
++            {},
++            RuntimeError("driver timeout after COMMIT write"),
++            connection_invalidated=False,
++        )
++
++    monkeypatch.setattr(service.session, "invalidate", track_invalidate)
++    monkeypatch.setattr(service.session, "commit", driver_error_with_live_client_transaction)
++    with pytest.raises(ConversationCommitOutcomeUnknown):
++        await service.send_message(
++            service_env.alice,
++            conversation.id,
++            MessageSubmission(content="uncertain", relative_paths=[None]),
++            [_upload("uncertain.txt", b"keep for reconciliation")],
++            "noninvalidated-driver-error",
++        )
++    assert invalidations == 1
++    assert not service.session.in_transaction()
++    message_parent = (
++        service_env.settings.data_dir
++        / "conversations"
++        / conversation.id
++        / "messages"
++    )
++    assert message_parent.exists() and len(list(message_parent.iterdir())) == 1
++
++
+ class FailingResponseService(ConversationService):
+     def _message_send_read(self, *args, **kwargs):
+         raise RuntimeError("injected response failure")
+ 
+ 
+ @pytest.mark.asyncio
+ async def test_response_failure_after_commit_keeps_files_for_idempotent_replay(
+     service_env: ServiceEnvironment,
+ ) -> None:
+     seed = service_env.service()
+diff --git a/backend/tests/unit/test_conversation_storage.py b/backend/tests/unit/test_conversation_storage.py
+index 2c70b68e..dcd7c74d 100644
+--- a/backend/tests/unit/test_conversation_storage.py
++++ b/backend/tests/unit/test_conversation_storage.py
+@@ -1,14 +1,16 @@
+ import hashlib
+ import io
+ import os
+ import asyncio
++import gc
++import weakref
+ from pathlib import Path
+ from uuid import uuid4
+ from zipfile import ZIP_DEFLATED, ZipFile
+ 
+ import pytest
+ from fastapi import UploadFile
+ from starlette.datastructures import Headers
+ 
+ from secagent.config import Settings
+ from secagent.services.conversation_storage import (
+@@ -149,20 +151,21 @@ async def test_count_relative_path_and_size_limits_fail_without_residue(
+         "",
+         "../escape.txt",
+         "/absolute.txt",
+         "C:/drive.txt",
+         "folder/file.txt",
+         "folder\\file.txt",
+         "CON",
+         "nul.txt",
+         "file.txt:stream",
+         "control\x01.txt",
++        "control\u0085.txt",
+         "trailing.",
+         "trailing ",
+         "x" * 256,
+     ],
+ )
+ async def test_unsafe_client_filenames_fail_closed(
+     tmp_path: Path, name: str | None
+ ) -> None:
+     service = _service(tmp_path)
+     with pytest.raises(AttachmentStorageError, match="filename"):
+@@ -207,20 +210,21 @@ async def test_zip_is_preserved_detected_by_name_or_signature_and_isolated(
+ @pytest.mark.asyncio
+ @pytest.mark.parametrize(
+     "entries",
+     [
+         [("../escape.txt", b"x")],
+         [("CON.txt", b"x")],
+         [("file.txt:stream", b"x")],
+         [("trailing./file.txt", b"x")],
+         [("trailing /file.txt", b"x")],
+         [("control\x01.txt", b"x")],
++        [("control\u0085.txt", b"x")],
+         [("x" * 256 + ".txt", b"x")],
+         [("A.txt", b"a"), ("a.txt", b"b")],
+         [("é.txt", b"a"), ("e\u0301.txt", b"b")],
+     ],
+ )
+ async def test_zip_unsafe_aliases_and_normalized_collisions_reject_batch(
+     tmp_path: Path, entries: list[tuple[str, bytes]]
+ ) -> None:
+     service = _service(tmp_path)
+     with pytest.raises((AttachmentStorageError, ValueError)):
+@@ -339,10 +343,35 @@ async def test_cleanup_does_not_trust_mutated_batch_identifier(tmp_path: Path) -
+ async def test_cancelled_partial_staging_cleans_its_workspace(tmp_path: Path) -> None:
+     class CancelledUpload(UploadFile):
+         async def read(self, size: int = -1) -> bytes:
+             raise asyncio.CancelledError
+ 
+     service = _service(tmp_path)
+     upload = CancelledUpload(file=io.BytesIO(b"unused"), filename="cancel.txt")
+     with pytest.raises(asyncio.CancelledError):
+         await service.stage_many([upload], [None])
+     assert not service.staging_root.exists() or not any(service.staging_root.iterdir())
++
++
++@pytest.mark.asyncio
++async def test_completed_batches_are_collectible_and_cleanup_remains_idempotent(
++    tmp_path: Path,
++) -> None:
++    service = _service(tmp_path)
++    references = []
++    for _index in range(10):
++        batch = await service.stage_many([], [])
++        service.cleanup_staged(batch)
++        service.cleanup_staged(batch)
++        references.append(weakref.ref(batch))
++
++    published = await service.stage_many([_upload("a.txt", b"a")], [None])
++    service.publish(published, _uuid(), _uuid())
++    service.cleanup_staged(published)
++    service.cleanup_staged(published)
++    references.append(weakref.ref(published))
++
++    del batch
++    del published
++    gc.collect()
++    assert all(reference() is None for reference in references)
++    assert len(service._issued_batches) == 0

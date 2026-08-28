@@ -1,0 +1,211 @@
+# Review package: 1e7fcccc..960d68e9
+
+## Commits
+960d68e9 test: stabilize baseline frontend specs
+
+## Files changed
+ frontend/tests/admin-views.spec.ts          | 20 ++++++++++++++++++++
+ frontend/tests/provider-credentials.spec.ts | 20 ++++++++++++++++++++
+ frontend/tests/task-create.spec.ts          | 13 ++++++++++++-
+ frontend/tests/team-task-detail.spec.ts     |  3 ++-
+ 4 files changed, 54 insertions(+), 2 deletions(-)
+
+## Diff
+diff --git a/frontend/tests/admin-views.spec.ts b/frontend/tests/admin-views.spec.ts
+index de55dc63..57f85396 100644
+--- a/frontend/tests/admin-views.spec.ts
++++ b/frontend/tests/admin-views.spec.ts
+@@ -2,20 +2,22 @@ import { flushPromises, mount } from '@vue/test-utils'
+ import { beforeEach, expect, it, vi } from 'vitest'
+ 
+ const api = vi.hoisted(() => ({
+   workers: vi.fn(),
+   readiness: vi.fn(),
+   modelStatus: vi.fn(),
+   providerCheck: vi.fn(),
+   listProviderCredentials: vi.fn(),
+   saveProviderCredential: vi.fn(),
+   clearProviderCredential: vi.fn(),
++  getDeepseekRoute: vi.fn(),
++  listDeepseekRouteOptions: vi.fn(),
+   toolStatus: vi.fn(),
+   listUsers: vi.fn(),
+   createUser: vi.fn(),
+   updateUser: vi.fn(),
+   auditEvents: vi.fn(),
+ }))
+ 
+ vi.mock('../src/api/client', () => ({ api }))
+ 
+ import AuditView from '../src/views/AuditView.vue'
+@@ -39,20 +41,38 @@ beforeEach(() => {
+     request_id: 'req-1',
+     input_tokens: 12,
+     output_tokens: 8,
+     latency_ms: 120,
+     error_code: null,
+   })
+   api.listProviderCredentials.mockResolvedValue([
+     { provider: 'deepseek', configured: true, key_hint: '...abcd', updated_at: '2026-08-15T02:00:00Z' },
+     { provider: 'glm', configured: false, key_hint: null, updated_at: null },
+   ])
++  api.getDeepseekRoute.mockResolvedValue({
++    provider: 'deepseek', route: 'opencode-go', display_name: 'OpenCode Go',
++    base_url: 'https://opencode.ai/zen/go/v1', model: 'deepseek-v4-flash',
++    api_style: 'opencode-go', reasoning_effort: 'high', configured: true,
++    updated_at: '2026-08-15T02:00:00Z',
++  })
++  api.listDeepseekRouteOptions.mockResolvedValue([
++    {
++      provider: 'deepseek', route: 'opencode-go', display_name: 'OpenCode Go',
++      base_url: 'https://opencode.ai/zen/go/v1', model: 'deepseek-v4-flash',
++      api_style: 'opencode-go', reasoning_effort: 'high',
++    },
++    {
++      provider: 'deepseek', route: 'deepseek', display_name: 'DeepSeek Official',
++      base_url: 'https://api.deepseek.com', model: 'deepseek-reasoner',
++      api_style: 'deepseek', reasoning_effort: null,
++    },
++  ])
+   api.toolStatus.mockResolvedValue([])
+   api.listUsers.mockResolvedValue([
+     { id: 'u1', username: 'alice', role: 'admin', is_active: true },
+     { id: 'u2', username: 'bob', role: 'analyst', is_active: false },
+   ])
+   api.createUser.mockResolvedValue({ id: 'u3', username: 'carol', role: 'analyst', is_active: true })
+   api.updateUser.mockResolvedValue({ id: 'u2', username: 'bob', role: 'analyst', is_active: true })
+   api.auditEvents.mockResolvedValue([
+     {
+       id: 7,
+diff --git a/frontend/tests/provider-credentials.spec.ts b/frontend/tests/provider-credentials.spec.ts
+index 1c1e0daa..89d6a0e1 100644
+--- a/frontend/tests/provider-credentials.spec.ts
++++ b/frontend/tests/provider-credentials.spec.ts
+@@ -3,40 +3,60 @@ import { beforeEach, expect, it, vi } from 'vitest'
+ 
+ const api = vi.hoisted(() => ({
+   workers: vi.fn(),
+   readiness: vi.fn(),
+   modelStatus: vi.fn(),
+   providerCheck: vi.fn(),
+   toolStatus: vi.fn(),
+   listProviderCredentials: vi.fn(),
+   saveProviderCredential: vi.fn(),
+   clearProviderCredential: vi.fn(),
++  getDeepseekRoute: vi.fn(),
++  listDeepseekRouteOptions: vi.fn(),
+ }))
+ 
+ vi.mock('../src/api/client', () => ({ api }))
+ 
+ import SystemView from '../src/views/SystemView.vue'
+ 
+ beforeEach(() => {
+   vi.clearAllMocks()
+   api.workers.mockResolvedValue({ online: 1, active: 2, capacity: 3, queued: 4 })
+   api.readiness.mockResolvedValue({ status: 'ok', checks: { database: 'ok' } })
+   api.modelStatus.mockResolvedValue([
+     { name: 'deepseek', configured: true, model: 'deepseek-v4-pro', status: 'ready' },
+   ])
+   api.toolStatus.mockResolvedValue([])
+   api.listProviderCredentials.mockResolvedValue([
+     { provider: 'deepseek', configured: true, key_hint: '...abcd', updated_at: '2026-08-15T02:00:00Z' },
+     { provider: 'glm', configured: false, key_hint: null, updated_at: null },
+   ])
+   api.saveProviderCredential.mockResolvedValue({ provider: 'deepseek', configured: true, key_hint: '...wxyz', updated_at: '2026-08-15T03:00:00Z' })
+   api.clearProviderCredential.mockResolvedValue(undefined)
++  api.getDeepseekRoute.mockResolvedValue({
++    provider: 'deepseek', route: 'opencode-go', display_name: 'OpenCode Go',
++    base_url: 'https://opencode.ai/zen/go/v1', model: 'deepseek-v4-flash',
++    api_style: 'opencode-go', reasoning_effort: 'high', configured: true,
++    updated_at: '2026-08-15T02:00:00Z',
++  })
++  api.listDeepseekRouteOptions.mockResolvedValue([
++    {
++      provider: 'deepseek', route: 'opencode-go', display_name: 'OpenCode Go',
++      base_url: 'https://opencode.ai/zen/go/v1', model: 'deepseek-v4-flash',
++      api_style: 'opencode-go', reasoning_effort: 'high',
++    },
++    {
++      provider: 'deepseek', route: 'deepseek', display_name: 'DeepSeek Official',
++      base_url: 'https://api.deepseek.com', model: 'deepseek-reasoner',
++      api_style: 'deepseek', reasoning_effort: null,
++    },
++  ])
+   api.providerCheck.mockResolvedValue({
+     provider: 'deepseek', model: 'deepseek-v4-pro', status: 'ok', request_id: 'req-1', input_tokens: 12, output_tokens: 8, latency_ms: 120, error_code: null,
+   })
+ })
+ 
+ it('renders safe credential hints and never a complete key', async () => {
+   const wrapper = mount(SystemView)
+   await flushPromises()
+ 
+   expect(wrapper.get('input[name="provider-key-deepseek"]').attributes('type')).toBe('password')
+diff --git a/frontend/tests/task-create.spec.ts b/frontend/tests/task-create.spec.ts
+index 02981d56..ef3a5263 100644
+--- a/frontend/tests/task-create.spec.ts
++++ b/frontend/tests/task-create.spec.ts
+@@ -15,21 +15,32 @@ it('submits goal, authorization, and automatic routing', async () => {
+     'fetch',
+     vi.fn().mockResolvedValue({
+       ok: true,
+       json: async () => ({ id: 't1', status: 'created' }),
+     }),
+   )
+   const wrapper = mount(TaskCreateView)
+   await wrapper
+     .get('[data-test="goal"]')
+     .setValue('分析 access.log 中的异常行为')
++  await wrapper.get('.quick-actions button').trigger('click')
+   await wrapper
+-    .get('[data-test="authorization"]')
++    .get('.advanced-panel textarea')
+     .setValue('仅分析上传日志')
+   await wrapper.get('form').trigger('submit')
+   await flushPromises()
+   expect(fetch).toHaveBeenCalledWith(
+     '/api/tasks',
+     expect.objectContaining({ method: 'POST' }),
+   )
++  const createRequest = vi.mocked(fetch).mock.calls[0][1] as RequestInit
++  expect(JSON.parse(createRequest.body as string)).toMatchObject({
++    goal: '分析 access.log 中的异常行为',
++    authorization_scope: '仅分析上传日志',
++    route_mode: 'auto',
++  })
++  expect(fetch).toHaveBeenCalledWith(
++    '/api/tasks/t1/plan',
++    expect.objectContaining({ method: 'POST' }),
++  )
+   expect(push).toHaveBeenCalledWith('/tasks/t1')
+ })
+diff --git a/frontend/tests/team-task-detail.spec.ts b/frontend/tests/team-task-detail.spec.ts
+index bc3a2f58..511d41a9 100644
+--- a/frontend/tests/team-task-detail.spec.ts
++++ b/frontend/tests/team-task-detail.spec.ts
+@@ -17,21 +17,22 @@ it('shows queue, attempt, heartbeat, and current stage', () => {
+ it('renders complete, safe model metrics', () => {
+   const wrapper = mount(ModelRoutePanel, {
+     props: {
+       calls: [{
+         id: 'm1', provider: 'deepseek', model: 'deepseek-v4-pro', stage: 'plan',
+         route_reason: 'analysis', latency_ms: 120, is_demo: false, prompt_tokens: 12,
+         completion_tokens: 8, retry_count: 1, request_id: 'req-1', error_code: 'rate_limited',
+       }],
+     },
+   })
+-  expect(wrapper.text()).toContain('12 / 8 tokens')
++  expect(wrapper.text()).toContain('Token 用量')
++  expect(wrapper.text()).toContain('12 / 8')
+   expect(wrapper.text()).toContain('req-1')
+   expect(wrapper.text()).toContain('rate_limited')
+ })
+ 
+ it('disables approval decisions while an approval is pending', () => {
+   const wrapper = mount(ApprovalDialog, {
+     props: { open: true, busy: true, approval: { step_id: 's1', tool_name: 'scan', risk_level: 'high', params_summary: '{}' } },
+   })
+   expect(wrapper.get('.dialog-actions button:first-child').attributes('disabled')).toBeDefined()
+   expect(wrapper.get('.dialog-actions button:last-child').attributes('disabled')).toBeDefined()
+
