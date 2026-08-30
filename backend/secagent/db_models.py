@@ -8,6 +8,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -400,6 +401,10 @@ class JobRunRow(Base):
     )
     broker_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     command_id: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    job_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    turn_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    subtask_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    parent_job_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     worker_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     attempt: Mapped[int] = mapped_column(Integer, default=1)
     status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
@@ -487,6 +492,9 @@ class ModelCallRow(Base):
     retry_count: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(32), default="completed")
     error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    turn_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    subtask_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    attempt_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     is_demo: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_utc
@@ -510,6 +518,9 @@ class ToolCallRow(Base):
     duration_ms: Mapped[int] = mapped_column(Integer, default=0)
     attempt: Mapped[int] = mapped_column(Integer, default=1)
     error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    turn_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    subtask_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    attempt_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_utc
     )
@@ -533,6 +544,9 @@ class EvidenceRow(Base):
     confidence: Mapped[float] = mapped_column(Float)
     file_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    turn_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    subtask_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    attempt_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_utc
     )
@@ -560,9 +574,12 @@ class ApprovalRow(Base):
     task_id: Mapped[str] = mapped_column(
         ForeignKey("tasks.id", ondelete="CASCADE"), index=True
     )
-    step_id: Mapped[str] = mapped_column(
-        ForeignKey("task_steps.id", ondelete="CASCADE"), index=True
+    step_id: Mapped[str | None] = mapped_column(
+        ForeignKey("task_steps.id", ondelete="CASCADE"), nullable=True, index=True
     )
+    turn_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    subtask_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    attempt_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     tool_name: Mapped[str] = mapped_column(String(120))
     risk_level: Mapped[str] = mapped_column(String(16))
     params_summary: Mapped[str] = mapped_column(Text)
@@ -614,4 +631,208 @@ class AuditEventRow(Base):
     details_json: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_utc, index=True
+    )
+
+
+class SubtaskRow(Base):
+    __tablename__ = "subtasks"
+    __table_args__ = (
+        UniqueConstraint("turn_id", "key", name="uq_subtasks_turn_key"),
+        Index("ix_subtasks_turn_id_status", "turn_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    turn_id: Mapped[str] = mapped_column(
+        ForeignKey(
+            "conversation_turns.id",
+            name="fk_subtasks_turn_id_conversation_turns",
+            ondelete="CASCADE",
+        ),
+        index=True,
+    )
+    key: Mapped[str] = mapped_column(String(64))
+    title: Mapped[str] = mapped_column(String(80))
+    objective: Mapped[str] = mapped_column(Text)
+    required_capabilities_json: Mapped[str] = mapped_column(
+        Text, default="[]", server_default="[]"
+    )
+    proposed_provider: Mapped[str] = mapped_column(String(16))
+    assigned_provider: Mapped[str] = mapped_column(String(16))
+    route_reason_code: Mapped[str] = mapped_column(String(80))
+    route_reason: Mapped[str] = mapped_column(Text)
+    allowed_tools_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
+    expected_output: Mapped[str] = mapped_column(Text)
+    required: Mapped[bool] = mapped_column(Boolean, default=True)
+    status: Mapped[str] = mapped_column(
+        String(32), default="pending_dependency", server_default="pending_dependency"
+    )
+    status_version: Mapped[int] = mapped_column(Integer, default=0)
+    result_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=now_utc,
+        onupdate=now_utc,
+        server_default=func.now(),
+    )
+
+
+class SubtaskDependencyRow(Base):
+    __tablename__ = "subtask_dependencies"
+    __table_args__ = (
+        UniqueConstraint(
+            "subtask_id",
+            "dependency_subtask_id",
+            name="uq_subtask_dependencies_pair",
+        ),
+    )
+
+    subtask_id: Mapped[str] = mapped_column(
+        ForeignKey(
+            "subtasks.id",
+            name="fk_subtask_dependencies_subtask_id_subtasks",
+            ondelete="CASCADE",
+        ),
+        primary_key=True,
+    )
+    dependency_subtask_id: Mapped[str] = mapped_column(
+        ForeignKey(
+            "subtasks.id",
+            name="fk_subtask_dependencies_dependency_subtask_id_subtasks",
+            ondelete="CASCADE",
+        ),
+        primary_key=True,
+    )
+
+
+class SubtaskAttemptRow(Base):
+    __tablename__ = "subtask_attempts"
+    __table_args__ = (
+        UniqueConstraint(
+            "subtask_id", "attempt", name="uq_subtask_attempts_subtask_attempt"
+        ),
+        UniqueConstraint(
+            "idempotency_key", name="uq_subtask_attempts_idempotency_key"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    subtask_id: Mapped[str] = mapped_column(
+        ForeignKey(
+            "subtasks.id",
+            name="fk_subtask_attempts_subtask_id_subtasks",
+            ondelete="CASCADE",
+        ),
+        index=True,
+    )
+    attempt: Mapped[int] = mapped_column(Integer)
+    provider: Mapped[str] = mapped_column(String(80))
+    model: Mapped[str] = mapped_column(String(120))
+    idempotency_key: Mapped[str] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(32), default="running")
+    error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    worker_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, server_default=func.now()
+    )
+
+
+class SubtaskResultRow(Base):
+    __tablename__ = "subtask_results"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    attempt_id: Mapped[str] = mapped_column(
+        ForeignKey(
+            "subtask_attempts.id",
+            name="fk_subtask_results_attempt_id_subtask_attempts",
+            ondelete="CASCADE",
+        ),
+        unique=True,
+        index=True,
+    )
+    subtask_id: Mapped[str] = mapped_column(
+        ForeignKey(
+            "subtasks.id",
+            name="fk_subtask_results_subtask_id_subtasks",
+            ondelete="CASCADE",
+        ),
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(String(16))
+    summary: Mapped[str] = mapped_column(Text)
+    claims_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
+    evidence_refs_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
+    inference_notes_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
+    unresolved_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, server_default=func.now()
+    )
+
+
+class ModelFailureRow(Base):
+    __tablename__ = "model_failures"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey(
+            "conversations.id",
+            name="fk_model_failures_conversation_id_conversations",
+            ondelete="CASCADE",
+        ),
+        index=True,
+    )
+    turn_id: Mapped[str] = mapped_column(
+        ForeignKey(
+            "conversation_turns.id",
+            name="fk_model_failures_turn_id_conversation_turns",
+            ondelete="CASCADE",
+        ),
+        index=True,
+    )
+    subtask_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "subtasks.id",
+            name="fk_model_failures_subtask_id_subtasks",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
+    stage: Mapped[str] = mapped_column(String(16))
+    provider: Mapped[str] = mapped_column(String(80))
+    model: Mapped[str] = mapped_column(String(120))
+    error_code: Mapped[str] = mapped_column(String(80))
+    detail: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(
+        String(24), default="waiting_decision", server_default="waiting_decision"
+    )
+    decision: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    decided_by: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=now_utc,
+        onupdate=now_utc,
+        server_default=func.now(),
     )
