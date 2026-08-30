@@ -158,7 +158,7 @@ class ModelFailureCreate(_StrictModel):
 
 
 class ModelFailureDecisionInput(_StrictModel):
-    decision: ModelFailureDecision
+    decision: ModelFailureDecision = Field(strict=False)
     target_provider: Literal["glm", "deepseek"] | None = None
 
 

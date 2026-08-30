@@ -29,7 +29,7 @@ from secagent.dag_domain import (
     SubtaskStatus,
     SubtaskTransitionError,
 )
-from secagent.dag_domain import JobKind
+from secagent.dag_domain import JobKind, TERMINAL_SUBTASK_STATUSES
 from secagent.db_models import (
     ConversationEventRow,
     ConversationTurnRow,
@@ -494,6 +494,66 @@ class DagRepository:
     ) -> None:
         turn = self.require_turn(turn_id)
         self._append_event(turn.conversation_id, turn_id, None, event_type, payload)
+
+    def set_assigned_provider(self, subtask_id: str, provider: str) -> None:
+        self.session.execute(
+            update(SubtaskRow)
+            .where(SubtaskRow.id == subtask_id)
+            .values(assigned_provider=provider)
+        )
+        self.session.flush()
+
+    def requeue_failed_dag_job(self, command_id: str) -> bool:
+        claimed = self.session.execute(
+            update(JobRunRow)
+            .where(
+                JobRunRow.command_id == command_id,
+                JobRunRow.status == "failed",
+            )
+            .values(status="pending_publish")
+            .returning(JobRunRow.id)
+        ).scalar_one_or_none()
+        self.session.flush()
+        return claimed is not None
+
+    def _close_out_active_subtasks(
+        self, turn_id: str, target: SubtaskStatus, reason: str
+    ) -> int:
+        """Move every non-terminal subtask of the turn to the target state."""
+        closed = 0
+        rows = self.session.scalars(
+            select(SubtaskRow).where(SubtaskRow.turn_id == turn_id)
+        ).all()
+        for row in rows:
+            if SubtaskStatus(row.status) in TERMINAL_SUBTASK_STATUSES:
+                continue
+            try:
+                self.transition_subtask(
+                    row.id,
+                    target,
+                    expected={
+                        SubtaskStatus.PENDING_DEPENDENCY,
+                        SubtaskStatus.QUEUED,
+                        SubtaskStatus.RUNNING,
+                        SubtaskStatus.WAITING_TOOL_APPROVAL,
+                        SubtaskStatus.WAITING_MODEL_DECISION,
+                    },
+                    reason=reason,
+                )
+                closed += 1
+            except SubtaskTransitionError:
+                continue
+        return closed
+
+    def supersede_active_subtasks(self, turn_id: str, reason: str) -> int:
+        return self._close_out_active_subtasks(
+            turn_id, SubtaskStatus.SUPERSEDED, reason
+        )
+
+    def cancel_active_subtasks(self, turn_id: str, reason: str) -> int:
+        return self._close_out_active_subtasks(
+            turn_id, SubtaskStatus.CANCELLED, reason
+        )
 
     # ------------------------------------------------------------- dag job lifecycle
 

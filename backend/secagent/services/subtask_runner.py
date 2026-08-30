@@ -474,6 +474,16 @@ class SubtaskRunner:
                     expected={SubtaskStatus.RUNNING, SubtaskStatus.QUEUED},
                     reason="provider failure awaiting user decision",
                 )
+            with suppress(Exception):
+                dag.mark_turn_state(
+                    turn_id,
+                    "waiting_model_decision",
+                    expected={
+                        "running",
+                        "scheduling",
+                        "waiting_tool_approval",
+                    },
+                )
             session.commit()
         if self.scheduler is not None:
             self.scheduler.on_subtask_finished(subtask_id)

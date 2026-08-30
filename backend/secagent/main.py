@@ -7,7 +7,9 @@ from secagent import db_models  # noqa: F401 -- registers SQLAlchemy tables
 from secagent.agents.executor import DemoEvidenceTool
 from secagent.api.admin import router as admin_router
 from secagent.api.auth import router as auth_router
+from secagent.api.approvals import router as approvals_router
 from secagent.api.conversations import router as conversations_router
+from secagent.api.model_failures import router as model_failures_router
 from secagent.api.conversation_events import router as conversation_events_router
 from secagent.api.errors import install_error_handlers
 from secagent.api.events import router as events_router
@@ -158,6 +160,8 @@ def create_app(
     app.include_router(events_router)
     app.include_router(conversations_router)
     app.include_router(conversation_events_router)
+    app.include_router(approvals_router)
+    app.include_router(model_failures_router)
     return app
 
 

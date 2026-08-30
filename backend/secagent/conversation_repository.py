@@ -364,6 +364,70 @@ class ConversationRepository:
 
         return self._write(write, commit=commit)
 
+    def create_replan_turn(
+        self,
+        actor: AuthenticatedUser,
+        conversation_id: str,
+        *,
+        source_turn_id: str,
+        task_id: str,
+        budget: TurnBudgetSnapshot,
+        trigger_message_id: str | None = None,
+        commit: bool = True,
+    ) -> ConversationTurnRead:
+        """Create the next plan version for a superseded/replanned turn.
+
+        The new turn points at the source turn's trigger message (no message
+        linking is performed) and becomes the conversation's active turn.
+        """
+
+        def write() -> ConversationTurnRead:
+            conversation = self._lock_conversation(actor, conversation_id)
+            source = self._require_turn(conversation_id, source_turn_id)
+            if task_id is not None:
+                task = self.session.get(TaskRow, task_id)
+                if (
+                    task is None
+                    or task.owner_id is None
+                    or task.owner_id != conversation.owner_id
+                ):
+                    raise ConversationInvariantError(
+                        "task must exist and have the conversation owner"
+                    )
+            plan_version = self._allocate_counter(
+                conversation_id,
+                ConversationRow.next_turn_plan_version,
+                "next_turn_plan_version",
+            )
+            trigger = trigger_message_id or source.trigger_message_id
+            row = ConversationTurnRow(
+                conversation_id=conversation_id,
+                trigger_message_id=trigger,
+                task_id=task_id,
+                plan_version=plan_version,
+                budget_json=canonical_json_dumps(budget),
+                replan_from_turn_id=source_turn_id,
+            )
+            self.session.add(row)
+            self.session.flush()
+            conversation.active_turn_id = row.id
+            if trigger_message_id is not None:
+                # Link the fresh follow-up message to the replan turn so the
+                # committed-message replay contract stays intact.
+                self.session.execute(
+                    update(ConversationMessageRow)
+                    .where(
+                        ConversationMessageRow.id == trigger_message_id,
+                        ConversationMessageRow.conversation_id == conversation_id,
+                        ConversationMessageRow.turn_id.is_(None),
+                    )
+                    .values(turn_id=row.id)
+                )
+            self.session.flush()
+            return self._turn_read(row)
+
+        return self._write(write, commit=commit)
+
     def get_turn(
         self, actor: AuthenticatedUser, conversation_id: str, turn_id: str
     ) -> ConversationTurnRead | None:

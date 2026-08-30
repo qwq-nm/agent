@@ -39,6 +39,7 @@ from secagent.conversation_repository import (
 from secagent.dag_domain import JobKind, turn_decompose_command_id
 from secagent.domain import TaskCreate, TaskStatus
 from secagent.queue.base import DagJobQueue
+from secagent.repositories.dag_repository import DagRepository
 from secagent.repository import TaskRepository
 from secagent.services.audit import AuditService
 from secagent.services.conversation_events import ConversationEventService
@@ -375,6 +376,24 @@ class ConversationService:
                 raise ArchivedConversationError(
                     "archived conversations reject new messages"
                 )
+            previous_active_turn_id = locked.active_turn_id
+            previous_active_states = {
+                "created",
+                "decomposing",
+                "scheduling",
+                "running",
+                "waiting_tool_approval",
+                "waiting_model_decision",
+            }
+            previous_turn_is_active = False
+            if previous_active_turn_id is not None:
+                previous_turn = self.conversation_repository.get_turn(
+                    actor, conversation_id, previous_active_turn_id
+                )
+                previous_turn_is_active = (
+                    previous_turn is not None
+                    and previous_turn.status.value in previous_active_states
+                )
             budget = self._turn_budget_snapshot()
             published_message_id = appended.message.id
             metadata = self.storage.publish(
@@ -411,16 +430,47 @@ class ConversationService:
                 max_output_tokens=self.settings.max_output_tokens_per_task,
                 max_steps=self.settings.max_steps_per_task,
             )
-            turn = self.conversation_repository.create_turn(
-                actor,
-                conversation_id,
-                ConversationTurnCreate(
-                    trigger_message_id=appended.message.id,
+            if previous_turn_is_active and previous_active_turn_id is not None:
+                # Follow-up during an active turn: supersede the old plan and
+                # create the next plan version from the same trigger lineage.
+                dag = DagRepository(self.session)
+                dag.supersede_active_subtasks(
+                    previous_active_turn_id,
+                    "superseded by a follow-up message",
+                )
+                dag.mark_turn_state(
+                    previous_active_turn_id,
+                    "replan_requested",
+                    expected=previous_active_states,
+                )
+                dag.record_turn_event(
+                    previous_active_turn_id,
+                    "turn.replan.requested",
+                    {
+                        "turn_id": previous_active_turn_id,
+                        "trigger_message_id": appended.message.id,
+                    },
+                )
+                turn = self.conversation_repository.create_replan_turn(
+                    actor,
+                    conversation_id=conversation_id,
+                    source_turn_id=previous_active_turn_id,
                     task_id=task.id,
                     budget=budget,
-                ),
-                commit=False,
-            )
+                    trigger_message_id=appended.message.id,
+                    commit=False,
+                )
+            else:
+                turn = self.conversation_repository.create_turn(
+                    actor,
+                    conversation_id,
+                    ConversationTurnCreate(
+                        trigger_message_id=appended.message.id,
+                        task_id=task.id,
+                        budget=budget,
+                    ),
+                    commit=False,
+                )
             self.task_repository.transition_task_status(
                 task.id,
                 TaskStatus.CREATED,

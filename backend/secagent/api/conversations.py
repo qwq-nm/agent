@@ -4,7 +4,7 @@ import json
 from collections.abc import Iterator
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import TypeAdapter, ValidationError
 from starlette.datastructures import FormData, UploadFile
 
@@ -47,6 +47,17 @@ from secagent.services.conversation_storage import (
 
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
+
+
+def _get_turn_control_service(request: Request):
+    from secagent.services.turn_control_service import TurnControlService
+
+    return TurnControlService(
+        session_factory=request.app.state.session_factory,
+        queue=request.app.state.job_queue,
+        logical_providers=request.app.state.model_router.logical_assignment_providers(),
+        max_parallel=request.app.state.settings.max_parallel_subtasks_per_conversation,
+    )
 
 
 def get_conversation_service(request: Request) -> Iterator[ConversationService]:
@@ -261,3 +272,23 @@ async def send_message(
     if result.replayed:
         response.status_code = status.HTTP_200_OK
     return result
+
+
+@router.post("/{conversation_id}/stop")
+def stop_conversation_turn(
+    conversation_id: str,
+    service: ServiceDep,
+    actor: ActorDep,
+    control: Annotated[
+        "TurnControlService", Depends(_get_turn_control_service)
+    ],
+) -> dict:
+    try:
+        final_status = control.request_stop(conversation_id, actor)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="conversation not found") from exc
+    except HTTPException:
+        raise
+    except Exception as exc:  # active-turn conflict surfaces as 409
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"conversation_id": conversation_id, "status": final_status}
