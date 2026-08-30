@@ -8,6 +8,7 @@ const router = useRouter()
 const auth = useAuthStore()
 const items = [
   { to: '/', label: '总览', icon: '◫' },
+  { to: '/chat/new', label: 'AI 对话', icon: '✦' },
   { to: '/tasks/new', label: '创建任务', icon: '+' },
   { to: '/tasks', label: '任务中心', icon: '◎' },
   { to: '/reports', label: '报告', icon: '≣' },

@@ -367,6 +367,7 @@ const statusLabels: Record<string, string> = {
 </template>
 
 <style scoped>
+/* 亮色模式作用域：agent 工作区在深色控制台内使用独立浅色主题 */
 .chat-workspace {
   display: grid;
   grid-template-columns: 240px 1fr 300px;
@@ -374,6 +375,33 @@ const statusLabels: Record<string, string> = {
   height: calc(100vh - 56px);
   padding: 12px;
   box-sizing: border-box;
+  color: #243244;
+  background: #eef2f7;
+  border-radius: 10px;
+}
+.chat-workspace button,
+.chat-workspace textarea {
+  color: #243244;
+}
+.chat-workspace textarea::placeholder {
+  color: #8ea0b5;
+}
+.chat-workspace button {
+  background: #fff;
+  border: 1px solid #cfd8e3;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.chat-workspace button:hover:not(:disabled) {
+  border-color: #409eff;
+  color: #409eff;
+}
+.chat-workspace button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.chat-workspace h2 {
+  color: #243244;
 }
 .chat-sidebar,
 .chat-task-tree {
@@ -382,6 +410,7 @@ const statusLabels: Record<string, string> = {
   padding: 12px;
   overflow-y: auto;
   background: #fff;
+  color: #243244;
 }
 .chat-brand {
   font-weight: 700;
@@ -408,8 +437,14 @@ const statusLabels: Record<string, string> = {
   flex-direction: column;
   border: 1px solid #d8dee9;
   border-radius: 8px;
-  background: #fafbfc;
+  background: #f8fafc;
+  color: #243244;
   min-height: 0;
+}
+.chat-message header {
+  color: #5a6b80;
+  font-size: 12px;
+  font-weight: 600;
 }
 .chat-messages {
   flex: 1;
@@ -424,14 +459,18 @@ const statusLabels: Record<string, string> = {
   border: 1px solid #e4e9f0;
 }
 .chat-message.user {
-  background: #ecf5ff;
+  background: #e8f3ff;
+  border-color: #c5e1ff;
+}
+.chat-message.assistant {
+  background: #fff;
 }
 .chat-message-content {
   white-space: pre-wrap;
   margin: 6px 0 0;
 }
 .chat-message-meta {
-  color: #909399;
+  color: #7c8ba1;
   font-size: 12px;
 }
 .chat-empty-hint {
@@ -503,7 +542,7 @@ const statusLabels: Record<string, string> = {
 }
 .chat-status {
   font-size: 12px;
-  color: #606266;
+  color: #5a6b80;
 }
 @media (max-width: 900px) {
   .chat-workspace {
