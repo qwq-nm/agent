@@ -29,9 +29,11 @@ from secagent.dag_domain import (
     SubtaskStatus,
     SubtaskTransitionError,
 )
+from secagent.dag_domain import JobKind
 from secagent.db_models import (
     ConversationEventRow,
     ConversationTurnRow,
+    JobRunRow,
     ModelFailureRow,
     SubtaskAttemptRow,
     SubtaskDependencyRow,
@@ -492,6 +494,101 @@ class DagRepository:
     ) -> None:
         turn = self.require_turn(turn_id)
         self._append_event(turn.conversation_id, turn_id, None, event_type, payload)
+
+    # ------------------------------------------------------------- dag job lifecycle
+
+    def claim_dag_job(
+        self,
+        command_id: str,
+        worker_id: str,
+        *,
+        lease_seconds: int,
+    ) -> Any:
+        """Claim a DAG job without touching the legacy compat TaskRow."""
+        from datetime import timedelta
+
+        from secagent.services.job_service import JobLease, utcnow
+
+        current = utcnow()
+        expires = current + timedelta(seconds=lease_seconds)
+        row = self.session.execute(
+            update(JobRunRow)
+            .where(
+                JobRunRow.command_id == command_id,
+                JobRunRow.status.in_(("publishing", "queued")),
+            )
+            .values(
+                status="running",
+                worker_id=worker_id,
+                lease_expires_at=expires,
+                heartbeat_at=current,
+                started_at=current,
+            )
+            .returning(
+                JobRunRow.id,
+                JobRunRow.task_id,
+                JobRunRow.attempt,
+            )
+        ).one_or_none()
+        if row is None:
+            self.session.rollback()
+            return None
+        self.session.commit()
+        return JobLease(row.id, row.task_id, worker_id, row.attempt, expires)
+
+    def finish_dag_job(
+        self, job_run_id: str, worker_id: str, status: str
+    ) -> bool:
+        from secagent.services.job_service import utcnow
+
+        if status not in {"completed", "failed"}:
+            raise ValueError("invalid final job status")
+        current = utcnow()
+        claimed = self.session.execute(
+            update(JobRunRow)
+            .where(
+                JobRunRow.id == job_run_id,
+                JobRunRow.worker_id == worker_id,
+                JobRunRow.status.in_(("running", "pause_requested", "cancel_requested")),
+                JobRunRow.lease_expires_at > current,
+            )
+            .values(status=status, finished_at=current, lease_expires_at=None)
+            .returning(JobRunRow.id)
+        ).scalar_one_or_none()
+        if claimed is None:
+            self.session.rollback()
+            return False
+        self.session.commit()
+        return True
+
+    def recover_expired_dag_jobs(self) -> int:
+        """Expired running DAG jobs go back to pending_publish for republish."""
+        from secagent.services.job_service import _as_utc, utcnow
+
+        current = utcnow()
+        claimed = self.session.execute(
+            update(JobRunRow)
+            .where(
+                JobRunRow.job_kind.in_(
+                    [
+                        JobKind.TURN_DECOMPOSE.value,
+                        JobKind.SUBTASK_EXECUTE.value,
+                        JobKind.TURN_SYNTHESIZE.value,
+                    ]
+                ),
+                JobRunRow.status.in_(("running", "pause_requested", "cancel_requested")),
+                JobRunRow.lease_expires_at <= current,
+            )
+            .values(
+                status="pending_publish",
+                worker_id=None,
+                heartbeat_at=None,
+                lease_expires_at=None,
+            )
+            .returning(JobRunRow.id)
+        ).all()
+        self.session.commit()
+        return len(claimed)
 
     # ----------------------------------------------------------------- internals
 

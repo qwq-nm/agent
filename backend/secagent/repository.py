@@ -1006,18 +1006,24 @@ class TaskRepository:
         self,
         task_id: str,
         *,
-        step_id: str,
+        step_id: str | None,
         tool_name: str,
         risk_level: str,
         params_summary: str,
         lease: Any | None = None,
         commit: bool = True,
+        turn_id: str | None = None,
+        subtask_id: str | None = None,
+        attempt_id: str | None = None,
     ) -> str:
         if lease is not None:
             self.require_job_fence(lease, task_id)
         row = ApprovalRow(
             task_id=task_id,
             step_id=step_id,
+            turn_id=turn_id,
+            subtask_id=subtask_id,
+            attempt_id=attempt_id,
             tool_name=tool_name,
             risk_level=risk_level,
             params_summary=params_summary,

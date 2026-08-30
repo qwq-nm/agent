@@ -190,6 +190,9 @@ class LedgerService:
         params: dict[str, Any],
         result: dict[str, Any],
         step_id: str | None = None,
+        turn_id: str | None = None,
+        subtask_id: str | None = None,
+        attempt_id: str | None = None,
     ) -> str:
         return self.repository.add_tool_call(
             task_id=task_id,
@@ -198,6 +201,9 @@ class LedgerService:
             params_json=json.dumps(redact_mapping(params), ensure_ascii=False),
             result_json=json.dumps(redact_mapping(result), ensure_ascii=False),
             status="completed",
+            turn_id=turn_id,
+            subtask_id=subtask_id,
+            attempt_id=attempt_id,
         )
 
     def record_evidence(
@@ -212,6 +218,9 @@ class LedgerService:
         file_ref: str | None = None,
         tool_call_id: str | None = None,
         lease: Any | None = None,
+        turn_id: str | None = None,
+        subtask_id: str | None = None,
+        attempt_id: str | None = None,
     ) -> str:
         prepared = self._prepare_evidence(task_id, content, file_ref)
         return self.repository.add_evidence(
@@ -225,6 +234,9 @@ class LedgerService:
             confidence=confidence,
             file_ref=prepared["file_ref"],
             metadata_json=json.dumps(redact_mapping(metadata or {}), ensure_ascii=False),
+            turn_id=turn_id,
+            subtask_id=subtask_id,
+            attempt_id=attempt_id,
         )
 
     def record_tool_result(

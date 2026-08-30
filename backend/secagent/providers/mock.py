@@ -63,6 +63,73 @@ class MockProvider:
                 "emulated_provider": "deepseek",
                 "emulated_model": "deepseek-v4-flash",
             }
+        elif title == "SubtaskResultDocument":
+            allowed_tools = [
+                name
+                for name in payload.get("subtask", {}).get("allowed_tools", [])
+                if isinstance(name, str)
+            ]
+            observations = [
+                item
+                for item in payload.get("tool_observations", [])
+                if isinstance(item, dict)
+            ]
+            preferred = payload.get("preferred", "deepseek")
+            if allowed_tools and not observations:
+                data = {
+                    "status": "tool_request",
+                    "tool_name": allowed_tools[0],
+                    "params": {},
+                    "thought": "需要一次白名单工具调用以获取证据。",
+                }
+                emulation = {
+                    "emulated_provider": preferred,
+                    "emulated_model": (
+                        "deepseek-v4-flash"
+                        if preferred == "deepseek"
+                        else "glm-5.2"
+                    ),
+                }
+                return ModelResponse(
+                    provider="mock",
+                    model="deterministic-mock",
+                    data=data,
+                    latency_ms=0,
+                    is_demo=True,
+                    **emulation,
+                )
+            evidence_refs = [
+                f"{item.get('tool_name', 'tool')}:result"
+                for item in observations
+            ][:64]
+            claims = [
+                {
+                    "statement": f"工具 {item.get('tool_name', 'tool')} 返回了可追溯证据（演示结果）。",
+                    "evidence_ref": ref,
+                }
+                for item, ref in zip(observations, evidence_refs)
+            ]
+            if not claims:
+                claims = [
+                    {
+                        "statement": "基于依赖输出完成了该子任务（演示结果）。",
+                        "upstream_key": "extract_context",
+                    }
+                ]
+            data = {
+                "status": "completed",
+                "summary": "子任务已完成，证据已关联（演示结果）",
+                "claims": claims,
+                "evidence_refs": evidence_refs,
+                "inference_notes": ["演示模式下不产生真实推断"],
+                "unresolved": [],
+            }
+            emulation = {
+                "emulated_provider": preferred,
+                "emulated_model": (
+                    "deepseek-v4-flash" if preferred == "deepseek" else "glm-5.2"
+                ),
+            }
         elif title == "ParsedTask":
             hint = payload.get("scene_hint")
             goal = payload["goal"]
