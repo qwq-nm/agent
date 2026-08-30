@@ -147,6 +147,21 @@ class SubtaskResultDocument(_StrictModel):
         return _unique(value)
 
 
+class SynthesisDocument(_StrictModel):
+    """DeepSeek synthesis output; facts must carry resolvable references."""
+
+    summary: Annotated[str, StringConstraints(strict=True, min_length=1, max_length=4_000), AfterValidator(_non_whitespace)]
+    facts: list[ClaimDocument] = Field(default_factory=list, max_length=64)
+    inference_notes: list[Annotated[str, StringConstraints(strict=True, min_length=1, max_length=1_000)]] = Field(default_factory=list, max_length=32)
+    unresolved: list[Annotated[str, StringConstraints(strict=True, min_length=1, max_length=1_000)]] = Field(default_factory=list, max_length=32)
+    is_partial: bool = False
+
+    @field_validator("inference_notes", "unresolved")
+    @classmethod
+    def require_unique_notes(cls, value: list[str]) -> list[str]:
+        return _unique(value)
+
+
 class ModelFailureCreate(_StrictModel):
     turn_id: CanonicalUUID
     subtask_id: CanonicalUUID | None = None
@@ -248,6 +263,7 @@ def turn_synthesize_command_id(turn_id: str) -> str:
 
 __all__ = [
     "ClaimDocument",
+    "SynthesisDocument",
     "JobKind",
     "ModelFailureAlreadyResolved",
     "ModelFailureCreate",

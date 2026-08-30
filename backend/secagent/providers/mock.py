@@ -130,6 +130,55 @@ class MockProvider:
                     "deepseek-v4-flash" if preferred == "deepseek" else "glm-5.2"
                 ),
             }
+        elif title == "SynthesisDocument":
+            results = [
+                item
+                for item in payload.get("subtask_results", [])
+                if isinstance(item, dict)
+            ]
+            evidence_refs = sorted(
+                {
+                    ref
+                    for item in results
+                    for ref in item.get("evidence_refs", [])
+                    if isinstance(ref, str)
+                }
+            )[:64]
+            facts = [
+                {
+                    "statement": f"子任务 {item.get('key', '')} 的结论：{item.get('summary', '')[:200]}（演示结果）",
+                    "evidence_ref": ref,
+                }
+                for item in results
+                for ref in item.get("evidence_refs", [])[:1]
+            ][:64]
+            if not facts:
+                facts = [
+                    {
+                        "statement": "对话材料已完成拆解与子任务执行（演示结果）。",
+                        "upstream_key": "extract_context",
+                    }
+                ]
+            unresolved = sorted(
+                {
+                    entry
+                    for item in results
+                    for entry in item.get("unresolved", [])
+                    if isinstance(entry, str)
+                }
+            )[:32]
+            data = {
+                "summary": "综合已完成子任务的结果（演示结果）：所有可用证据均已引用。",
+                "facts": facts,
+                "inference_notes": ["演示模式下不产生真实推断"],
+                "unresolved": unresolved,
+                "is_partial": bool(unresolved)
+                or any(item.get("status") != "completed" for item in results),
+            }
+            emulation = {
+                "emulated_provider": "deepseek",
+                "emulated_model": "deepseek-v4-flash",
+            }
         elif title == "ParsedTask":
             hint = payload.get("scene_hint")
             goal = payload["goal"]

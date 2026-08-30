@@ -303,7 +303,11 @@ class TurnOrchestratorService:
         del lease  # fence checks happen at claim/finish boundaries
         with self.session_factory() as session:
             dag = DagRepository(session)
-            dag.mark_turn_state(turn_id, "decomposing", expected={"created"})
+            dag.mark_turn_state(
+                turn_id,
+                "decomposing",
+                expected={"created", "waiting_model_decision"},
+            )
             dag.record_turn_event(
                 turn_id,
                 "turn.decomposition.started",
@@ -491,3 +495,9 @@ def republish_pending_dag_jobs(
             task_repository.mark_job_enqueued(row.command_id, broker_id)
             published += 1
     return published
+
+# Re-exported for the worker entry points; kept here to preserve the import
+# surface used by secagent.worker.
+from secagent.services.synthesis_service import (  # noqa: E402,F401
+    execute_turn_synthesize_job,
+)
