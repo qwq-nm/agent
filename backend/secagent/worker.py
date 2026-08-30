@@ -216,6 +216,8 @@ def run_turn_decompose(turn_id: str, command_id: str) -> None:
     def operation(runtime: _WorkerRuntime) -> "Coroutine[Any, Any, None]":
         from secagent.services.dag_orchestrator import execute_turn_decompose_job
 
+        from secagent.queue.celery_queue import CeleryJobQueue
+
         return execute_turn_decompose_job(
             turn_id,
             command_id,
@@ -223,6 +225,7 @@ def run_turn_decompose(turn_id: str, command_id: str) -> None:
             runtime.registry,
             settings,
             worker_id=getattr(run_turn_decompose.request, "id", None),
+            queue=CeleryJobQueue(),
         )
 
     _run_worker_coroutine(settings, operation)

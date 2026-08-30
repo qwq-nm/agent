@@ -421,8 +421,18 @@ async def execute_turn_decompose_job(
     settings: Any,
     *,
     worker_id: str | None = None,
-    scheduler: "DagScheduler | None" = None,
+    queue: Any | None = None,
 ) -> None:
+    from secagent.services.dag_scheduler import DagScheduler
+
+    scheduler: DagScheduler | None = None
+    if queue is not None:
+        scheduler = DagScheduler(
+            session_factory=session_factory,
+            queue=queue,
+            max_parallel=settings.max_parallel_subtasks_per_conversation,
+        )
+
     def router_builder(session: Session) -> Any:
         return ProviderRuntimeFactory(settings).build(session)
 

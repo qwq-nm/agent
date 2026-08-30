@@ -128,6 +128,7 @@ class DagRepository:
         return ready
 
     def running_subtask_count(self, conversation_id: str) -> int:
+        """In-flight subtasks (queued for the broker or running) per conversation."""
         return len(
             self.session.scalars(
                 select(SubtaskRow.id)
@@ -137,7 +138,12 @@ class DagRepository:
                 )
                 .where(
                     ConversationTurnRow.conversation_id == conversation_id,
-                    SubtaskRow.status == SubtaskStatus.RUNNING.value,
+                    SubtaskRow.status.in_(
+                        (
+                            SubtaskStatus.QUEUED.value,
+                            SubtaskStatus.RUNNING.value,
+                        )
+                    ),
                 )
             ).all()
         )
