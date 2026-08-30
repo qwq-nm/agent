@@ -48,9 +48,12 @@ from secagent.subtask_prompts import _WORKER_RESPONSE_SCHEMA  # noqa: F401
 
 _SYNTHESIS_SYSTEM_PROMPT = (
     "You are the final synthesis stage. Combine the completed subtask results "
-    "into one Chinese answer. Every factual statement must cite an evidence "
-    "reference; anything unverified goes to inference_notes; missing inputs go "
-    "to unresolved. Never invent facts and never call tools."
+    "into one Chinese answer. Every entry in facts MUST copy one evidence_ref "
+    "verbatim from the provided subtask_results[].evidence_refs (or cite an "
+    "upstream_key); if you cannot cite anything, put the statement into "
+    "inference_notes instead - never leave all three reference fields empty. "
+    "Anything unverified goes to inference_notes; missing inputs go to "
+    "unresolved. Never invent facts and never call tools."
 )
 
 _SYNTHESIS_RESPONSE_SCHEMA = SynthesisDocument.model_json_schema()
@@ -143,7 +146,7 @@ class SynthesisService:
             try:
                 await self._synthesize(turn_id, task_id, lease, router)
                 job_status = "completed"
-            except ProviderUnavailable as exc:
+            except (ProviderUnavailable, ValidationError) as exc:
                 self._record_failure(turn_id, task_id, exc)
                 job_status = "failed"
             with self.session_factory() as session:
@@ -207,8 +210,38 @@ class SynthesisService:
             session.commit()
 
         safe_data = redact_mapping(response.data)
-        document = SynthesisDocument.model_validate(safe_data)
+        try:
+            document = SynthesisDocument.model_validate(safe_data)
+        except ValidationError:
+            # Spec 7.3: statements without any reference are inference, not
+            # fact. Downgrade them instead of failing the whole turn.
+            document = self._salvage_synthesis(safe_data)
         self._stream_answer(turn_id, conversation_id, document, response.is_demo)
+
+    @staticmethod
+    def _salvage_synthesis(safe_data: dict[str, Any]) -> SynthesisDocument:
+        data = dict(safe_data)
+        facts: list[dict[str, Any]] = []
+        moved: list[str] = []
+        for claim in data.get("facts") or []:
+            if not isinstance(claim, dict):
+                continue
+            if (
+                claim.get("evidence_ref")
+                or claim.get("attachment_ref")
+                or claim.get("upstream_key")
+            ):
+                facts.append(claim)
+            else:
+                statement = str(claim.get("statement", "")).strip()
+                if statement:
+                    moved.append(statement[:1_000])
+        data["facts"] = facts
+        data["inference_notes"] = list(
+            dict.fromkeys([*moved, *(data.get("inference_notes") or [])])
+        )[:32]
+        data["is_partial"] = True
+        return SynthesisDocument.model_validate(data)
 
     def _stream_answer(
         self,
@@ -311,9 +344,15 @@ class SynthesisService:
             session.commit()
 
     def _record_failure(
-        self, turn_id: str, task_id: str, exc: ProviderUnavailable
+        self, turn_id: str, task_id: str, exc: Exception
     ) -> None:
-        code = getattr(getattr(exc, "code", None), "value", "server") or "server"
+        if isinstance(exc, ValidationError):
+            error_code = "invalid_schema"
+            provider = "deepseek"
+        else:
+            code = getattr(getattr(exc, "code", None), "value", "server") or "server"
+            error_code = code
+            provider = getattr(exc, "provider", "deepseek") or "deepseek"
         with self.session_factory() as session:
             dag = DagRepository(session)
             ledger = LedgerService(TaskRepository(session))
@@ -323,7 +362,7 @@ class SynthesisService:
                 ModelStage.SYNTHESIZE,
                 provider=provider,
                 model="deepseek-v4-flash",
-                error_code=code,
+                error_code=error_code,
                 request_id=getattr(exc, "request_id", None),
                 turn_id=turn_id,
             )
@@ -334,7 +373,7 @@ class SynthesisService:
                     stage=ModelFailureStage.SYNTHESIZE,
                     provider=provider,
                     model="deepseek-v4-flash",
-                    error_code=code,
+                    error_code=error_code,
                     detail=redact_text(f"{type(exc).__name__}: {exc}"[:1_800]),
                 )
             )
