@@ -2,7 +2,9 @@
 
 > 日期：2026-08-28（Asia/Shanghai）  
 > 状态：Task 3 修复轮次 1 已有未提交实现，需完成全量验证、范围复审和提交。  
-> 重要：不要合并或引入 `origin/hhj`；当前功能分支基于 `origin/lym`。
+> 重要：不要合并或引入 `origin/hhj`；当前功能分支基于 `origin/lym`。  
+> **已过时**：本文记录的状态已全部处置完毕，当前接手入口见
+> `docs/2026-08-30_durable-dag-progress-report.md`。
 
 本文档用于直接接手 `agent` 项目的传统对话式多 Agent 改造。当前工作树已冻结；没有后台 pytest 进程，也没有正在运行的子代理。
 
