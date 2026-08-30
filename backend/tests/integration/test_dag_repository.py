@@ -294,6 +294,18 @@ def test_ready_subtasks_respect_completed_dependencies(dag_env) -> None:
             "assess_risk"
         ]
 
+        # A weaker but usable terminal result still unlocks dependents.
+        repository.transition_subtask(
+            by_key["extract_context"].id,
+            SubtaskStatus.INCOMPLETE,
+            expected={SubtaskStatus.COMPLETED},
+            reason="downgraded to incomplete",
+        )
+        repository.commit()
+        assert [item.key for item in repository.ready_subtasks(turn_id)] == [
+            "assess_risk"
+        ]
+
 
 def test_attempts_are_idempotent_by_key_and_increment_by_subtask(dag_env) -> None:
     factory, actor = dag_env

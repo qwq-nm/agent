@@ -57,7 +57,13 @@ _EVENT_NAME_BY_STATUS: dict[SubtaskStatus, str] = {
     SubtaskStatus.CANCELLED: "subtask.cancelled",
 }
 
-_SUCCESS_STATUSES = (SubtaskStatus.COMPLETED.value,)
+# An upstream that reached a usable terminal result unlocks its dependents.
+# "incomplete" still carries a summary and unresolved notes, so downstream
+# workers consume it as weaker context; only a hard failure blocks the DAG.
+_SUCCESS_STATUSES = (
+    SubtaskStatus.COMPLETED.value,
+    SubtaskStatus.INCOMPLETE.value,
+)
 
 
 class DagRepository:
