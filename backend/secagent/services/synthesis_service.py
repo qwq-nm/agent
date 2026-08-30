@@ -173,6 +173,7 @@ class SynthesisService:
                     "scheduling",
                     "partial",
                     "waiting_tool_approval",
+                    "synthesizing",  # idempotent rerun after a crashed attempt
                 },
             )
             dag.record_turn_event(
@@ -207,13 +208,14 @@ class SynthesisService:
 
         safe_data = redact_mapping(response.data)
         document = SynthesisDocument.model_validate(safe_data)
-        self._stream_answer(turn_id, conversation_id, document)
+        self._stream_answer(turn_id, conversation_id, document, response.is_demo)
 
     def _stream_answer(
         self,
         turn_id: str,
         conversation_id: str,
         document: SynthesisDocument,
+        is_demo: bool,
     ) -> None:
         with self.session_factory() as session:
             dag = DagRepository(session)
@@ -229,39 +231,53 @@ class SynthesisService:
             full_text = document.summary
             if document.is_partial or document.unresolved:
                 full_text += "\n\n未完成范围：" + "；".join(document.unresolved)
-            message = repository.add_message(
-                actor,
-                conversation_id,
-                ConversationMessageWrite(
-                    role=ConversationMessageRole.ASSISTANT,
-                    kind=ConversationMessageKind.ASSISTANT_ANSWER,
-                    content=full_text,
-                    status=ConversationMessageStatus.STREAMING,
-                    turn_id=turn_id,
-                ),
-                commit=False,
-            )
-            chunks = [
-                full_text[i : i + _DELTA_CHUNK_SIZE]
-                for i in range(0, len(full_text), _DELTA_CHUNK_SIZE)
-            ] or [full_text]
-            for seq, chunk in enumerate(chunks, start=1):
-                dag.record_turn_event(
-                    turn_id,
-                    "assistant.answer.delta",
-                    {
-                        "turn_id": turn_id,
-                        "message_id": message.message.id,
-                        "delta_seq": seq,
-                        "text": chunk,
-                    },
+            from secagent.db_models import ConversationMessageRow
+
+            existing = session.scalar(
+                select(ConversationMessageRow).where(
+                    ConversationMessageRow.turn_id == turn_id,
+                    ConversationMessageRow.kind
+                    == ConversationMessageKind.ASSISTANT_ANSWER.value,
                 )
+            )
+            if existing is not None:
+                # Idempotent rerun after a crashed attempt: reuse the row.
+                message_id = existing.id
+            else:
+                message = repository.add_message(
+                    actor,
+                    conversation_id,
+                    ConversationMessageWrite(
+                        role=ConversationMessageRole.ASSISTANT,
+                        kind=ConversationMessageKind.ASSISTANT_ANSWER,
+                        content=full_text,
+                        status=ConversationMessageStatus.STREAMING,
+                        turn_id=turn_id,
+                    ),
+                    commit=False,
+                )
+                message_id = message.message.id
+                chunks = [
+                    full_text[i : i + _DELTA_CHUNK_SIZE]
+                    for i in range(0, len(full_text), _DELTA_CHUNK_SIZE)
+                ] or [full_text]
+                for seq, chunk in enumerate(chunks, start=1):
+                    dag.record_turn_event(
+                        turn_id,
+                        "assistant.answer.delta",
+                        {
+                            "turn_id": turn_id,
+                            "message_id": message_id,
+                            "delta_seq": seq,
+                            "text": chunk,
+                        },
+                    )
             dag.record_turn_event(
                 turn_id,
                 "assistant.answer.completed",
                 {
                     "turn_id": turn_id,
-                    "message_id": message.message.id,
+                    "message_id": message_id,
                     "evidence_refs": sorted(
                         {
                             claim.evidence_ref
@@ -284,12 +300,13 @@ class SynthesisService:
             dag.record_turn_event(
                 turn_id,
                 "turn.completed",
-                {"turn_id": turn_id, "is_demo": True},
+                {"turn_id": turn_id, "is_demo": is_demo},
             )
             session.commit()
 
         with self.session_factory() as session:
-            row = session.get(ConversationMessageRow, message.message.id)
+            row = session.get(ConversationMessageRow, message_id)
+            row.content = full_text
             row.status = "completed"
             session.commit()
 
