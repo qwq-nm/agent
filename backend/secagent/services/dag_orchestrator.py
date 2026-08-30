@@ -475,6 +475,20 @@ def republish_pending_dag_jobs(
             task_repository = TaskRepository(session)
             if row.status == "enqueue_failed":
                 task_repository.claim_job_republish(row.command_id)
+                # A re-queued DAG job means its compat task is executable
+                # again; the legacy claim path refuses anything but QUEUED.
+                from contextlib import suppress
+                from secagent.domain import TaskStatus
+
+                for previous in (TaskStatus.FAILED_RETRYABLE, TaskStatus.CREATED):
+                    with suppress(ValueError):
+                        task_repository.transition_task_status(
+                            row.task_id,
+                            previous,
+                            TaskStatus.QUEUED,
+                            commit=False,
+                        )
+                        break
             state = task_repository.begin_job_publish(row.command_id)
             if state != "claimed":
                 continue

@@ -201,6 +201,22 @@ def test_enqueue_failure_is_recovered_by_startup_republish(
         ).all()[-1]
         assert row.status == "queued"
 
+    # A recovered job must actually be executable: the compat task is back to
+    # queued so the legacy claim path does not cancel the job.
+    job = fake_queue.dag_enqueued[-1]
+    asyncio.run(
+        execute_turn_decompose_job(
+            job.ref_id,
+            job.command_id,
+            app.state.session_factory,
+            app.state.tool_registry,
+            app.state.settings,
+        )
+    )
+    with app.state.session_factory() as session:
+        turn = session.get(ConversationTurnRow, turn_id)
+        assert turn.status == "scheduling"
+
 
 def test_idempotent_replay_does_not_duplicate_the_job(
     app, fake_queue, analyst_client
