@@ -41,6 +41,10 @@ class UrlGuard:
         ):
             raise BlockedUrl("blocked URL syntax or scheme")
         host = parsed.hostname.lower().rstrip(".")
+        if "*" in self.allowed_hosts:
+            # Explicit operator opt-out: allow every target, including
+            # private/lab addresses, for local sandbox deployments.
+            return parsed
         if host in self.allowed_hosts:
             return parsed
         try:
