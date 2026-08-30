@@ -56,6 +56,33 @@ const subtasks = ref<Map<string, SubtaskView>>(new Map())
 const approvals = ref<ApprovalView[]>([])
 const failures = ref<FailureView[]>([])
 
+const THEME_STORAGE_KEY = 'secagent-chat-theme'
+const THEMES = [
+  { id: 'sky', label: '天蓝', dot: '#409eff' },
+  { id: 'sand', label: '暖沙', dot: '#d98a2b' },
+  { id: 'mint', label: '薄荷', dot: '#2ba471' },
+  { id: 'lavender', label: '紫藤', dot: '#7a5cd6' },
+  { id: 'rose', label: '蔷薇', dot: '#d4507c' },
+] as const
+
+function initialTheme(): string {
+  try {
+    const stored = localStorage.getItem(THEME_STORAGE_KEY)
+    return THEMES.some((item) => item.id === stored) ? (stored as string) : 'sky'
+  } catch {
+    return 'sky'
+  }
+}
+
+const theme = ref<string>(initialTheme())
+watch(theme, (value) => {
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, value)
+  } catch {
+    // 私密模式下无法持久化，主题仅本次会话生效
+  }
+})
+
 const conversationId = computed(() => {
   const value = route.params.conversationId
   return typeof value === 'string' && value !== 'new' ? value : null
@@ -267,12 +294,25 @@ const statusLabels: Record<string, string> = {
 </script>
 
 <template>
-  <div class="chat-workspace">
+  <div class="chat-workspace" :data-theme="theme">
     <aside class="chat-sidebar">
       <div class="chat-brand">SecAgent-X</div>
       <button class="chat-new-button" type="button" @click="router.push('/chat/new')">
         新对话
       </button>
+      <div class="chat-theme-picker" role="group" aria-label="配色">
+        <button
+          v-for="item in THEMES"
+          :key="item.id"
+          type="button"
+          class="chat-theme-dot"
+          :class="{ active: theme === item.id }"
+          :title="item.label"
+          :aria-label="`配色：${item.label}`"
+          :style="{ background: item.dot }"
+          @click="theme = item.id"
+        />
+      </div>
       <nav class="chat-conversation-list">
         <button
           v-for="item in conversations"
@@ -367,50 +407,111 @@ const statusLabels: Record<string, string> = {
 </template>
 
 <style scoped>
-/* 亮色模式作用域：agent 工作区在深色控制台内使用独立浅色主题 */
+/* agent 工作区亮色配色系统：通过 data-theme 切换 CSS 变量 */
 .chat-workspace {
+  --cw-bg: #eef2f7;
+  --cw-panel: #ffffff;
+  --cw-chat: #f8fafc;
+  --cw-border: #d8dee9;
+  --cw-text: #243244;
+  --cw-muted: #5a6b80;
+  --cw-accent: #409eff;
+  --cw-accent-soft: #e8f3ff;
+  --cw-accent-border: #c5e1ff;
+  --cw-btn-border: #cfd8e3;
+
   display: grid;
   grid-template-columns: 240px 1fr 300px;
   gap: 12px;
   height: calc(100vh - 56px);
   padding: 12px;
   box-sizing: border-box;
-  color: #243244;
-  background: #eef2f7;
+  color: var(--cw-text);
+  background: var(--cw-bg);
   border-radius: 10px;
 }
+.chat-workspace[data-theme='sand'] {
+  --cw-bg: #f5efe4;
+  --cw-panel: #fffdf9;
+  --cw-chat: #fbf7ef;
+  --cw-border: #e2d7c3;
+  --cw-text: #3d3327;
+  --cw-muted: #7d705c;
+  --cw-accent: #d98a2b;
+  --cw-accent-soft: #fdf0dd;
+  --cw-accent-border: #f0d9b5;
+  --cw-btn-border: #ddcfb8;
+}
+.chat-workspace[data-theme='mint'] {
+  --cw-bg: #e9f4ee;
+  --cw-panel: #ffffff;
+  --cw-chat: #f2faf6;
+  --cw-border: #cfe4d8;
+  --cw-text: #1f3a2e;
+  --cw-muted: #557767;
+  --cw-accent: #2ba471;
+  --cw-accent-soft: #e2f5ec;
+  --cw-accent-border: #bfe8d4;
+  --cw-btn-border: #c3dcd0;
+}
+.chat-workspace[data-theme='lavender'] {
+  --cw-bg: #f0edf9;
+  --cw-panel: #ffffff;
+  --cw-chat: #f8f6fd;
+  --cw-border: #d9d2ec;
+  --cw-text: #2e2843;
+  --cw-muted: #6a6285;
+  --cw-accent: #7a5cd6;
+  --cw-accent-soft: #ece5fb;
+  --cw-accent-border: #d5c8f2;
+  --cw-btn-border: #d3cbe4;
+}
+.chat-workspace[data-theme='rose'] {
+  --cw-bg: #f9edf1;
+  --cw-panel: #ffffff;
+  --cw-chat: #fdf5f7;
+  --cw-border: #ecd2da;
+  --cw-text: #402931;
+  --cw-muted: #86606c;
+  --cw-accent: #d4507c;
+  --cw-accent-soft: #fce4ea;
+  --cw-accent-border: #f2c3d0;
+  --cw-btn-border: #e4c6d0;
+}
+
 .chat-workspace button,
 .chat-workspace textarea {
-  color: #243244;
+  color: var(--cw-text);
 }
 .chat-workspace textarea::placeholder {
-  color: #8ea0b5;
+  color: var(--cw-muted);
 }
 .chat-workspace button {
-  background: #fff;
-  border: 1px solid #cfd8e3;
+  background: var(--cw-panel);
+  border: 1px solid var(--cw-btn-border);
   border-radius: 6px;
   cursor: pointer;
 }
 .chat-workspace button:hover:not(:disabled) {
-  border-color: #409eff;
-  color: #409eff;
+  border-color: var(--cw-accent);
+  color: var(--cw-accent);
 }
 .chat-workspace button:disabled {
   opacity: 0.55;
   cursor: not-allowed;
 }
 .chat-workspace h2 {
-  color: #243244;
+  color: var(--cw-text);
 }
+
 .chat-sidebar,
 .chat-task-tree {
-  border: 1px solid #d8dee9;
+  border: 1px solid var(--cw-border);
   border-radius: 8px;
   padding: 12px;
   overflow-y: auto;
-  background: #fff;
-  color: #243244;
+  background: var(--cw-panel);
+  color: var(--cw-text);
 }
 .chat-brand {
   font-weight: 700;
@@ -423,28 +524,40 @@ const statusLabels: Record<string, string> = {
   text-align: left;
   padding: 8px;
   margin-bottom: 6px;
-  border: 1px solid #d8dee9;
+  border: 1px solid var(--cw-border);
   border-radius: 6px;
-  background: #fff;
+  background: var(--cw-panel);
   cursor: pointer;
 }
 .chat-conversation-item.active {
-  border-color: #409eff;
-  background: #ecf5ff;
+  border-color: var(--cw-accent);
+  background: var(--cw-accent-soft);
+}
+.chat-theme-picker {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 2px;
+}
+.chat-theme-dot {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border-radius: 50%;
+  border: 2px solid var(--cw-panel);
+  box-shadow: 0 0 0 1px var(--cw-border);
+}
+.chat-theme-dot.active {
+  box-shadow: 0 0 0 2px var(--cw-accent);
 }
 .chat-main {
   display: flex;
   flex-direction: column;
-  border: 1px solid #d8dee9;
+  border: 1px solid var(--cw-border);
   border-radius: 8px;
-  background: #f8fafc;
-  color: #243244;
+  background: var(--cw-chat);
+  color: var(--cw-text);
   min-height: 0;
-}
-.chat-message header {
-  color: #5a6b80;
-  font-size: 12px;
-  font-weight: 600;
 }
 .chat-messages {
   flex: 1;
@@ -455,26 +568,31 @@ const statusLabels: Record<string, string> = {
   margin-bottom: 10px;
   padding: 10px;
   border-radius: 8px;
-  background: #fff;
-  border: 1px solid #e4e9f0;
+  background: var(--cw-panel);
+  border: 1px solid var(--cw-border);
+}
+.chat-message header {
+  color: var(--cw-muted);
+  font-size: 12px;
+  font-weight: 600;
 }
 .chat-message.user {
-  background: #e8f3ff;
-  border-color: #c5e1ff;
+  background: var(--cw-accent-soft);
+  border-color: var(--cw-accent-border);
 }
 .chat-message.assistant {
-  background: #fff;
+  background: var(--cw-panel);
 }
 .chat-message-content {
   white-space: pre-wrap;
   margin: 6px 0 0;
 }
 .chat-message-meta {
-  color: #7c8ba1;
+  color: var(--cw-muted);
   font-size: 12px;
 }
 .chat-empty-hint {
-  color: #909399;
+  color: var(--cw-muted);
 }
 .chat-card {
   border: 1px solid #e6a23c;
@@ -482,10 +600,12 @@ const statusLabels: Record<string, string> = {
   border-radius: 8px;
   padding: 10px;
   margin-bottom: 10px;
+  color: #6c4a12;
 }
 .chat-card.failure {
   border-color: #f56c6c;
   background: #fef0f0;
+  color: #7c2d35;
 }
 .chat-card-actions {
   display: flex;
@@ -493,11 +613,11 @@ const statusLabels: Record<string, string> = {
   margin-top: 8px;
 }
 .chat-error {
-  color: #f56c6c;
+  color: #d4507c;
   padding: 0 12px;
 }
 .chat-composer {
-  border-top: 1px solid #d8dee9;
+  border-top: 1px solid var(--cw-border);
   padding: 10px;
   display: flex;
   flex-direction: column;
@@ -507,6 +627,9 @@ const statusLabels: Record<string, string> = {
   width: 100%;
   box-sizing: border-box;
   resize: vertical;
+  background: var(--cw-panel);
+  border: 1px solid var(--cw-btn-border);
+  border-radius: 6px;
 }
 .chat-composer-actions {
   display: flex;
@@ -519,7 +642,7 @@ const statusLabels: Record<string, string> = {
   margin: 0;
 }
 .chat-task-tree li {
-  border: 1px solid #e4e9f0;
+  border: 1px solid var(--cw-border);
   border-radius: 6px;
   padding: 8px;
   margin-bottom: 8px;
@@ -533,8 +656,8 @@ const statusLabels: Record<string, string> = {
   font-size: 12px;
   padding: 2px 6px;
   border-radius: 4px;
-  background: #ecf5ff;
-  color: #409eff;
+  background: var(--cw-accent-soft);
+  color: var(--cw-accent);
 }
 .chat-provider.deepseek {
   background: #f0f9eb;
@@ -542,7 +665,7 @@ const statusLabels: Record<string, string> = {
 }
 .chat-status {
   font-size: 12px;
-  color: #5a6b80;
+  color: var(--cw-muted);
 }
 @media (max-width: 900px) {
   .chat-workspace {
