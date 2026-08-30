@@ -8,6 +8,7 @@ import SystemView from './views/SystemView.vue'
 import TeamView from './views/TeamView.vue'
 import AuditView from './views/AuditView.vue'
 import LoginView from './views/LoginView.vue'
+import ChatView from './views/ChatView.vue'
 import { useAuthStore } from './stores/auth'
 
 declare module 'vue-router' {
@@ -47,7 +48,9 @@ export const router = createRouter({
   routes: [
     { path: '/login', component: LoginView },
     { path: '/', component: DashboardView, meta: { requiresAuth: true } },
-    { path: '/tasks/new', component: TaskCreateView, meta: { requiresAuth: true } },
+    { path: '/chat/new', component: ChatView, meta: { requiresAuth: true } },
+    { path: '/chat/:conversationId', component: ChatView, meta: { requiresAuth: true } },
+    { path: '/tasks/new', redirect: '/chat/new' },
     { path: '/tasks', component: TaskListView, meta: { requiresAuth: true } },
     { path: '/tasks/:id', component: TaskDetailView, meta: { requiresAuth: true } },
     { path: '/reports', component: ReportsView, meta: { requiresAuth: true } },
