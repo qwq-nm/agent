@@ -53,7 +53,7 @@ _SYNTHESIS_SYSTEM_PROMPT = (
     "to unresolved. Never invent facts and never call tools."
 )
 
-_SYNTHESIS_RESPONSE_SCHEMA = {"title": "SynthesisDocument", "type": "object"}
+_SYNTHESIS_RESPONSE_SCHEMA = SynthesisDocument.model_json_schema()
 _DELTA_CHUNK_SIZE = 160
 
 

@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from secagent.conversation_domain import canonical_json_dumps
-from secagent.dag_domain import SubtaskRead
+from secagent.dag_domain import SubtaskRead, SubtaskResultDocument
 from secagent.domain import ModelRequest
 
 _SUBTASK_SYSTEM_PROMPT = (
@@ -21,10 +21,7 @@ _SUBTASK_SYSTEM_PROMPT = (
     "tool call instead, return a tool_request object."
 )
 
-_WORKER_RESPONSE_SCHEMA = {
-    "title": "SubtaskResultDocument",
-    "type": "object",
-}
+_WORKER_RESPONSE_SCHEMA = SubtaskResultDocument.model_json_schema()
 
 
 def build_subtask_request(

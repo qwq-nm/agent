@@ -82,6 +82,10 @@ def create_app(
                     lease_seconds=application.state.settings.job_lease_seconds,
                     max_auto_retries=application.state.settings.job_auto_retries,
                 ).recover_expired()
+            with application.state.session_factory() as session:
+                from secagent.repositories.dag_repository import DagRepository
+
+                DagRepository(session).recover_expired_dag_jobs()
             republish_pending_dag_jobs(
                 application.state.session_factory,
                 application.state.job_queue,
