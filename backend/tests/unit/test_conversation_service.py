@@ -310,7 +310,7 @@ async def test_one_text_message_composes_exact_rows_links_budgets_title_and_safe
         "tasks": 1,
         "turns": 1,
         "events": 1,
-        "jobs": 0,
+        "jobs": 1,
     }
     detail = service.get_detail(service_env.alice, conversation.id)
     assert detail is not None
@@ -471,7 +471,7 @@ async def test_sequential_replay_is_order_independent_and_multiplicity_sensitive
         "tasks": 1,
         "turns": 1,
         "events": 1,
-        "jobs": 0,
+        "jobs": 1,
     }
     with pytest.raises(AttachmentIdempotencyConflict):
         await service.send_message(
@@ -573,7 +573,7 @@ def test_concurrent_same_key_sqlite_has_one_composed_winner_and_no_loser_files(
         "tasks": 1,
         "turns": 1,
         "events": 1,
-        "jobs": 0,
+        "jobs": 1,
     }
     message_root = (
         service_env.settings.data_dir
@@ -1049,7 +1049,7 @@ def test_concurrent_same_key_postgresql_read_committed_barrier(tmp_path: Path) -
             "tasks": 1,
             "turns": 1,
             "events": 1,
-            "jobs": 0,
+            "jobs": 1,
         }
         with env.factory() as session:
             row = session.get(ConversationRow, conversation.id)

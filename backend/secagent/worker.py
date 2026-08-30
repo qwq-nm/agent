@@ -207,3 +207,62 @@ def run_task(task_id: str, command_id: str) -> None:
             settings=settings,
         ),
     )
+
+
+@celery.task(name="secagent.run_turn_decompose")
+def run_turn_decompose(turn_id: str, command_id: str) -> None:
+    settings = get_settings()
+
+    def operation(runtime: _WorkerRuntime) -> "Coroutine[Any, Any, None]":
+        from secagent.services.dag_orchestrator import execute_turn_decompose_job
+
+        return execute_turn_decompose_job(
+            turn_id,
+            command_id,
+            make_session_factory(settings.database_url),
+            runtime.registry,
+            settings,
+            worker_id=getattr(run_turn_decompose.request, "id", None),
+        )
+
+    _run_worker_coroutine(settings, operation)
+
+
+@celery.task(name="secagent.run_subtask_execute")
+def run_subtask_execute(subtask_id: str, command_id: str) -> None:
+    settings = get_settings()
+
+    def operation(runtime: _WorkerRuntime) -> "Coroutine[Any, Any, None]":
+        from secagent.services.subtask_runner import execute_subtask_job
+
+        return execute_subtask_job(
+            subtask_id,
+            command_id,
+            make_session_factory(settings.database_url),
+            runtime.registry,
+            settings,
+            worker_id=getattr(run_subtask_execute.request, "id", None),
+        )
+
+    _run_worker_coroutine(settings, operation)
+
+
+@celery.task(name="secagent.run_turn_synthesize")
+def run_turn_synthesize(turn_id: str, command_id: str) -> None:
+    settings = get_settings()
+
+    def operation(runtime: _WorkerRuntime) -> "Coroutine[Any, Any, None]":
+        from secagent.services.dag_orchestrator import (
+            execute_turn_synthesize_job,
+        )
+
+        return execute_turn_synthesize_job(
+            turn_id,
+            command_id,
+            make_session_factory(settings.database_url),
+            runtime.registry,
+            settings,
+            worker_id=getattr(run_turn_synthesize.request, "id", None),
+        )
+
+    _run_worker_coroutine(settings, operation)

@@ -28,6 +28,7 @@ from secagent.providers.router import ModelRouter
 from secagent.queue.base import JobQueue
 from secagent.queue.celery_queue import CeleryJobQueue
 from secagent.repository import TaskRepository
+from secagent.services.dag_orchestrator import republish_pending_dag_jobs
 from secagent.services.job_service import JobService
 from secagent.security.url_guard import UrlGuard
 from secagent.tools.registry import ToolRegistry
@@ -79,6 +80,10 @@ def create_app(
                     lease_seconds=application.state.settings.job_lease_seconds,
                     max_auto_retries=application.state.settings.job_auto_retries,
                 ).recover_expired()
+            republish_pending_dag_jobs(
+                application.state.session_factory,
+                application.state.job_queue,
+            )
             yield
         finally:
             await application.state.model_router.aclose()

@@ -60,6 +60,7 @@ def get_conversation_service(request: Request) -> Iterator[ConversationService]:
             storage=ConversationStorageService(request.app.state.settings),
             settings=request.app.state.settings,
             session_factory=request.app.state.session_factory,
+            dag_queue=getattr(request.app.state, "job_queue", None),
         )
 
 

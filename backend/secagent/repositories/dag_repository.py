@@ -478,6 +478,15 @@ class DagRepository:
         turn = self.require_turn(row.turn_id)
         self._append_event(turn.conversation_id, row.turn_id, subtask_id, event_type, payload)
 
+    def record_turn_event(
+        self,
+        turn_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> None:
+        turn = self.require_turn(turn_id)
+        self._append_event(turn.conversation_id, turn_id, None, event_type, payload)
+
     # ----------------------------------------------------------------- internals
 
     def _append_event(

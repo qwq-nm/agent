@@ -20,6 +20,9 @@ ROUTE_REASONS = {
     "技术计划生成",
     "证据完整性复核",
     "中文报告生成",
+    "任务拆解",
+    "子任务执行",
+    "最终综合",
     "fixed_stage",
 }
 ERROR_CODES = {
@@ -73,6 +76,9 @@ class LedgerService:
         status: str = "completed",
         error_code: str | None = None,
         lease: Any | None = None,
+        turn_id: str | None = None,
+        subtask_id: str | None = None,
+        attempt_id: str | None = None,
     ) -> str:
         del input_summary  # Never persist prompts, reasoning, or request bodies.
         safe_stage = stage if stage in {item.value for item in ModelStage} else "unknown"
@@ -100,6 +106,9 @@ class LedgerService:
             is_demo=is_demo,
             status=safe_status,
             error_code=safe_error,
+            turn_id=turn_id,
+            subtask_id=subtask_id,
+            attempt_id=attempt_id,
         )
 
     def record_model_response(
@@ -109,12 +118,18 @@ class LedgerService:
         response: ModelResponse,
         *,
         lease: Any | None = None,
+        turn_id: str | None = None,
+        subtask_id: str | None = None,
+        attempt_id: str | None = None,
     ) -> str:
         reasons = {
             ModelStage.TASK_PARSE: "中文任务理解",
             ModelStage.PLAN: "技术计划生成",
             ModelStage.CRITIC: "证据完整性复核",
             ModelStage.REPORT: "中文报告生成",
+            ModelStage.DECOMPOSE: "任务拆解",
+            ModelStage.SUBTASK_EXECUTE: "子任务执行",
+            ModelStage.SYNTHESIZE: "最终综合",
         }
         return self.record_model_call(
             task_id,
@@ -131,6 +146,9 @@ class LedgerService:
             latency_ms=response.latency_ms,
             is_demo=response.is_demo,
             lease=lease,
+            turn_id=turn_id,
+            subtask_id=subtask_id,
+            attempt_id=attempt_id,
         )
 
     def record_model_error(
@@ -143,6 +161,9 @@ class LedgerService:
         error_code: str,
         request_id: str | None,
         lease: Any | None = None,
+        turn_id: str | None = None,
+        subtask_id: str | None = None,
+        attempt_id: str | None = None,
     ) -> str:
         return self.record_model_call(
             task_id,
@@ -156,6 +177,9 @@ class LedgerService:
             status="error",
             error_code=error_code,
             lease=lease,
+            turn_id=turn_id,
+            subtask_id=subtask_id,
+            attempt_id=attempt_id,
         )
 
     def record_tool_call(

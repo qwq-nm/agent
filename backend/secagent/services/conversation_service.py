@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Sequence
 
@@ -35,7 +36,9 @@ from secagent.conversation_repository import (
     ConversationRepositoryStateError,
     MessageIdempotencyConflict,
 )
-from secagent.domain import TaskCreate
+from secagent.dag_domain import JobKind, turn_decompose_command_id
+from secagent.domain import TaskCreate, TaskStatus
+from secagent.queue.base import DagJobQueue
 from secagent.repository import TaskRepository
 from secagent.services.audit import AuditService
 from secagent.services.conversation_events import ConversationEventService
@@ -91,6 +94,7 @@ class ConversationService:
         storage: ConversationStorageService,
         settings: Settings,
         session_factory: Callable[[], Session],
+        dag_queue: DagJobQueue | None = None,
     ) -> None:
         session = conversation_repository.session
         if any(
@@ -108,6 +112,7 @@ class ConversationService:
         self.storage = storage
         self.settings = settings
         self.session_factory = session_factory
+        self.dag_queue = dag_queue
 
     def create(
         self, actor: AuthenticatedUser, payload: ConversationCreate
@@ -326,6 +331,7 @@ class ConversationService:
             list[AttachmentRead],
             ConversationTurnRead,
         ] | None = None
+        publish_target: tuple[str, str, int] | None = None
         try:
             self.session.begin()
             appended = self.conversation_repository.add_message(
@@ -415,6 +421,18 @@ class ConversationService:
                 ),
                 commit=False,
             )
+            self.task_repository.transition_task_status(
+                task.id,
+                TaskStatus.CREATED,
+                TaskStatus.QUEUED,
+                commit=False,
+            )
+            command_id = turn_decompose_command_id(turn.id, turn.plan_version)
+            job_row = self.task_repository.add_job_run(task.id, command_id)
+            job_row.job_kind = JobKind.TURN_DECOMPOSE.value
+            job_row.turn_id = turn.id
+            self.session.flush()
+            publish_target = (task.id, turn.id, turn.plan_version)
             message = self.conversation_repository.get_message(
                 actor, conversation_id, appended.message.id
             )
@@ -487,12 +505,36 @@ class ConversationService:
         refreshed = self._refresh_committed_message(
             actor, conversation_id, response_parts[0].id
         )
+        if publish_target is not None:
+            self._publish_turn_decompose_job(*publish_target)
         return self._message_send_read(
             refreshed.message,
             refreshed.attachments,
             refreshed.turn,
             replayed=False,
         )
+
+    def _publish_turn_decompose_job(
+        self, task_id: str, turn_id: str, plan_version: int
+    ) -> None:
+        """Best-effort post-commit publish; failures land in enqueue_failed."""
+        if self.dag_queue is None:
+            return
+        command_id = turn_decompose_command_id(turn_id, plan_version)
+        try:
+            state = self.task_repository.begin_job_publish(command_id)
+            if state != "claimed":
+                return
+            broker_id = self.dag_queue.enqueue_dag_job(
+                JobKind.TURN_DECOMPOSE, turn_id, command_id
+            )
+            self.task_repository.mark_job_enqueued(command_id, broker_id)
+        except Exception:
+            # The publishing claim is still intact in this transaction; move the
+            # row to enqueue_failed (and commit) so startup recovery can retry.
+            with suppress(Exception):
+                self.task_repository.mark_job_enqueue_failed(task_id, command_id)
+                self.task_repository.commit()
 
     def _load_replay(
         self,

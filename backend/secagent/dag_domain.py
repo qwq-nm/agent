@@ -232,6 +232,20 @@ def dag_command_id(*parts: str) -> str:
     return hashlib.sha256(("secagent:" + ":".join(parts)).encode()).hexdigest()
 
 
+def turn_decompose_command_id(turn_id: str, plan_version: int) -> str:
+    return dag_command_id("turn", turn_id, "decompose", f"v{plan_version}")
+
+
+def subtask_execute_command_id(subtask_id: str, attempt: int) -> str:
+    return dag_command_id("subtask", subtask_id, "execute", f"a{attempt}")
+
+
+def turn_synthesize_command_id(turn_id: str) -> str:
+    # Constant per turn: the unique command id is what guarantees that at
+    # most one synthesize job can ever exist for a turn.
+    return dag_command_id("turn", turn_id, "synthesize")
+
+
 __all__ = [
     "ClaimDocument",
     "JobKind",
