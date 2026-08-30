@@ -236,6 +236,7 @@ def run_subtask_execute(subtask_id: str, command_id: str) -> None:
     settings = get_settings()
 
     def operation(runtime: _WorkerRuntime) -> "Coroutine[Any, Any, None]":
+        from secagent.queue.celery_queue import CeleryJobQueue
         from secagent.services.subtask_runner import execute_subtask_job
 
         return execute_subtask_job(
@@ -245,6 +246,7 @@ def run_subtask_execute(subtask_id: str, command_id: str) -> None:
             runtime.registry,
             settings,
             worker_id=getattr(run_subtask_execute.request, "id", None),
+            queue=CeleryJobQueue(),
         )
 
     _run_worker_coroutine(settings, operation)
