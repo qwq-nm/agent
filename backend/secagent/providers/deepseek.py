@@ -46,12 +46,14 @@ class _StructuredProvider:
         jitter: Callable[[], float] = random.random,
         api_style: str = "deepseek",
         reasoning_effort: str = "high",
+        stage_effort_overrides: dict[ModelStage, str] | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
         self.api_style = api_style
         self.reasoning_effort = reasoning_effort
+        self.stage_effort_overrides = stage_effort_overrides or {}
         self.client = client
         self.transport = ProviderHTTPClient(
             provider=self.name,
@@ -188,7 +190,7 @@ class _StructuredProvider:
                 {"role": "user", "content": request.user},
             ],
         }
-        payload.update(self._provider_options())
+        payload.update(self._provider_options(request))
         return payload
 
     def _repair_payload(
@@ -211,7 +213,7 @@ class _StructuredProvider:
                 }
             ],
         }
-        payload.update(self._provider_options())
+        payload.update(self._provider_options(request))
         return payload
 
     def _truncation_retry_payload(
@@ -236,7 +238,7 @@ class _StructuredProvider:
         ]
         return retry
 
-    def _provider_options(self) -> dict[str, Any]:
+    def _provider_options(self, request: ModelRequest | None = None) -> dict[str, Any]:
         return {}
 
     def _completion(self, response: JSONResponse) -> tuple[str, str | None]:
@@ -301,11 +303,42 @@ class DeepSeekProvider(_StructuredProvider):
         ModelStage.SUBTASK_EXECUTE: 4096,
         ModelStage.SYNTHESIZE: 8192,
     }
+    #: Default stage-level reasoning-effort overrides (opencode-go style only).
+    #: Decomposition is the measured latency hotspot (100-140 s at "high");
+    #: these frequent short stages default to "low" so each message does not
+    #: pay minutes of reasoning cost. Final synthesis keeps the configured
+    #: effort because answer quality matters most there.
+    default_stage_effort_overrides: dict[ModelStage, str] = {
+        ModelStage.DECOMPOSE: "low",
+        ModelStage.SUBTASK_EXECUTE: "low",
+    }
 
-    def _provider_options(self) -> dict[str, Any]:
+    def __init__(self, **kwargs: Any) -> None:
+        explicit = dict(kwargs.pop("stage_effort_overrides", None) or {})
+        merged = dict(self.default_stage_effort_overrides)
+        merged.update(explicit)
+        super().__init__(stage_effort_overrides=merged, **kwargs)
+
+    def _provider_options(self, request: ModelRequest | None = None) -> dict[str, Any]:
         if self.api_style == "opencode-go":
-            return {"reasoning_effort": self.reasoning_effort}
+            return {
+                "reasoning_effort": self._effective_reasoning_effort(
+                    request.stage if request is not None else None
+                )
+            }
         return {"thinking": {"type": "enabled"}}
+
+    def _effective_reasoning_effort(self, stage: ModelStage | None) -> str:
+        """Stage-level effort override, falling back to the configured default.
+
+        Frequent short stages (decompose, subtask execute) default to ``low``
+        because a single decomposition call was measured at 100-140 seconds
+        with ``high`` reasoning; the final synthesis keeps the configured
+        effort since answer quality matters most there.
+        """
+        if stage is not None and stage in self.stage_effort_overrides:
+            return self.stage_effort_overrides[stage]
+        return self.reasoning_effort
 
 
 def _safe_token_count(value: object) -> int:

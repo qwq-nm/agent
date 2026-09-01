@@ -75,6 +75,10 @@ DEEPSEEK_BASE_URL=https://opencode.ai/zen/go/v1
 DEEPSEEK_MODEL=deepseek-v4-flash
 DEEPSEEK_API_STYLE=opencode-go
 DEEPSEEK_REASONING_EFFORT=high
+# 可选：把频繁的短阶段（拆解/子任务）的推理强度调低，显著降低每条消息的
+# 拆解延迟（实测 high 时单次拆解约 100~140 秒）；最终综合仍用上面的值。
+DEEPSEEK_DECOMPOSE_REASONING_EFFORT=low
+DEEPSEEK_SUBTASK_REASONING_EFFORT=low
 WEB_ALLOWED_HOSTS=web-demo,node4.anna.nssctf.cn
 ```
 

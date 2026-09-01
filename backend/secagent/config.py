@@ -50,6 +50,12 @@ class Settings(BaseSettings):
     deepseek_model: str = "deepseek-v4-flash"
     deepseek_api_style: str = "auto"
     deepseek_reasoning_effort: str = "high"
+    #: Stage-level reasoning-effort overrides (opencode-go style only).
+    #: Decompose/subtask are the frequent short stages that made a single
+    #: greeting take minutes; default them to low so latency drops while the
+    #: final synthesis keeps the configured effort for answer quality.
+    deepseek_decompose_reasoning_effort: str = "low"
+    deepseek_subtask_reasoning_effort: str = "low"
 
     glm_api_key: str | None = None
     glm_api_key_file: Path | None = None

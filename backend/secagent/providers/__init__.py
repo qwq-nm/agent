@@ -4,6 +4,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from secagent.config import Settings
+from secagent.domain import ModelStage
 from secagent.providers.base import (
     ModelProvider,
     ProviderErrorCode,
@@ -67,6 +68,16 @@ def build_providers(
                 deepseek_route.get("reasoning_effort")
                 or settings.deepseek_reasoning_effort
             ),
+            stage_effort_overrides={
+                ModelStage.DECOMPOSE: str(
+                    deepseek_route.get("decompose_reasoning_effort")
+                    or settings.deepseek_decompose_reasoning_effort
+                ),
+                ModelStage.SUBTASK_EXECUTE: str(
+                    deepseek_route.get("subtask_reasoning_effort")
+                    or settings.deepseek_subtask_reasoning_effort
+                ),
+            },
         )
     if glm_key and shared_client is not None:
         providers["glm"] = GLMProvider(

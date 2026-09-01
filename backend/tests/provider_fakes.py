@@ -44,6 +44,7 @@ def deepseek_provider(
     base_url: str = "https://deepseek.invalid/v1",
     api_style: str = "deepseek",
     reasoning_effort: str = "high",
+    stage_effort_overrides: dict[ModelStage, str] | None = None,
     model: str = "deepseek-v4-pro",
     sleep: Callable[[float], Awaitable[None]] = _no_sleep,
     jitter: Callable[[], float] = lambda: 0.0,
@@ -56,6 +57,7 @@ def deepseek_provider(
         client=_client(sequence, capture),
         api_style=api_style,
         reasoning_effort=reasoning_effort,
+        stage_effort_overrides=stage_effort_overrides,
         sleep=sleep,
         jitter=jitter,
     )

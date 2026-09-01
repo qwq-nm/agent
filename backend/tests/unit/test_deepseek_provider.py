@@ -116,6 +116,91 @@ async def test_opencode_go_payload_uses_reasoning_effort() -> None:
 
 
 @pytest.mark.asyncio
+async def test_opencode_go_decompose_uses_low_reasoning_effort_by_default() -> None:
+    requests: list[httpx.Request] = []
+    provider = deepseek_provider(
+        returning={
+            "choices": [
+                {"finish_reason": "stop", "message": {"content": '{"ok":true}'}}
+            ]
+        },
+        capture=requests,
+        base_url="https://opencode.ai/zen/go/v1",
+        api_style="opencode-go",
+        model="deepseek-v4-flash",
+    )
+
+    await provider.complete(
+        ModelRequest(
+            stage=ModelStage.DECOMPOSE,
+            system="s",
+            user="{}",
+            response_schema={"type": "object"},
+        )
+    )
+
+    payload = json.loads(requests[0].content)
+    assert payload["reasoning_effort"] == "low"
+
+
+@pytest.mark.asyncio
+async def test_opencode_go_synthesis_keeps_configured_reasoning_effort() -> None:
+    requests: list[httpx.Request] = []
+    provider = deepseek_provider(
+        returning={
+            "choices": [
+                {"finish_reason": "stop", "message": {"content": '{"ok":true}'}}
+            ]
+        },
+        capture=requests,
+        base_url="https://opencode.ai/zen/go/v1",
+        api_style="opencode-go",
+        model="deepseek-v4-flash",
+    )
+
+    await provider.complete(
+        ModelRequest(
+            stage=ModelStage.SYNTHESIZE,
+            system="s",
+            user="{}",
+            response_schema={"type": "object"},
+        )
+    )
+
+    payload = json.loads(requests[0].content)
+    assert payload["reasoning_effort"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_opencode_go_stage_effort_override_is_explicitly_configurable() -> None:
+    requests: list[httpx.Request] = []
+    provider = deepseek_provider(
+        returning={
+            "choices": [
+                {"finish_reason": "stop", "message": {"content": '{"ok":true}'}}
+            ]
+        },
+        capture=requests,
+        base_url="https://opencode.ai/zen/go/v1",
+        api_style="opencode-go",
+        model="deepseek-v4-flash",
+        stage_effort_overrides={ModelStage.DECOMPOSE: "medium"},
+    )
+
+    await provider.complete(
+        ModelRequest(
+            stage=ModelStage.DECOMPOSE,
+            system="s",
+            user="{}",
+            response_schema={"type": "object"},
+        )
+    )
+
+    payload = json.loads(requests[0].content)
+    assert payload["reasoning_effort"] == "medium"
+
+
+@pytest.mark.asyncio
 async def test_deepseek_rejects_glm_stage_before_transport() -> None:
     requests: list[httpx.Request] = []
     provider = deepseek_provider(capture=requests)
