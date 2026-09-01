@@ -13,7 +13,7 @@ from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from secagent.agents.coordinator import (
@@ -28,14 +28,18 @@ from secagent.agents.coordinator import (
 from secagent.conversation_domain import (
     ConversationMessageKind,
     ConversationMessageRole,
+    ConversationMessageStatus,
+    ConversationMessageWrite,
     ConversationSettings,
     TurnBudgetSnapshot,
 )
+from secagent.conversation_repository import ConversationRepository
 from secagent.dag_domain import (
     JobKind,
     ModelFailureCreate,
     ModelFailureStage,
     SubtaskStatus,
+    SubtaskTransitionError,
 )
 from secagent.db import make_session_factory
 from secagent.db_models import (
@@ -45,14 +49,16 @@ from secagent.db_models import (
     JobRunRow,
     MessageAttachmentRow,
     SubtaskRow,
+    UserRow,
 )
-from secagent.domain import ModelStage
+from secagent.domain import ModelStage, UserRole
 from secagent.providers.base import ProviderUnavailable
 from secagent.providers.runtime import ProviderRuntimeFactory
 from secagent.repositories.dag_repository import DagRepository
 from secagent.repository import TaskRepository
 from secagent.security.redaction import redact_text
 from secagent.services.assignment_policy import AssignmentPolicy
+from secagent.services.chitchat import quick_chitchat_reply
 from secagent.services.job_service import JobLease, JobService
 from secagent.services.ledger import LedgerService
 from secagent.services.tool_authorization import derive_authorized_tools
@@ -258,20 +264,30 @@ class TurnOrchestratorService:
             self._heartbeat(lease, self.session_factory)
         )
         router = None
+        job_status = "failed"
         try:
             with self.session_factory() as session:
                 router = self.router_builder(session)
-            result = await self._decompose_turn(
-                turn_id, plan_version, task_id, lease, router
-            )
-            with self.session_factory() as session:
-                JobService(
-                    TaskRepository(session), None, lease_seconds=self.lease_seconds
-                ).finish(
-                    lease.job_run_id,
-                    lease.worker_id,
-                    "completed" if result else "failed",
+            try:
+                result = await self._decompose_turn(
+                    turn_id, plan_version, task_id, lease, router
                 )
+                job_status = "completed" if result else "failed"
+            finally:
+                # The job must always land in a final state, even when the
+                # decompose body raises (e.g. the turn was superseded mid-call);
+                # otherwise recover_expired keeps re-queueing a zombie job.
+                with suppress(Exception):
+                    with self.session_factory() as session:
+                        JobService(
+                            TaskRepository(session),
+                            None,
+                            lease_seconds=self.lease_seconds,
+                        ).finish(
+                            lease.job_run_id,
+                            lease.worker_id,
+                            job_status,
+                        )
         finally:
             heartbeat.cancel()
             with suppress(asyncio.CancelledError):
@@ -303,11 +319,22 @@ class TurnOrchestratorService:
         del lease  # fence checks happen at claim/finish boundaries
         with self.session_factory() as session:
             dag = DagRepository(session)
-            dag.mark_turn_state(
-                turn_id,
-                "decomposing",
-                expected={"created", "waiting_model_decision"},
-            )
+            try:
+                dag.mark_turn_state(
+                    turn_id,
+                    "decomposing",
+                    expected={"created", "waiting_model_decision"},
+                )
+            except SubtaskTransitionError:
+                # A follow-up message superseded this turn before the worker
+                # reached the decompose boundary. Do not let the exception
+                # escape: discard the turn, finish the job, and let the newer
+                # plan version own the conversation.
+                self._discard_turn(
+                    turn_id,
+                    "turn was superseded before decomposition started",
+                )
+                return True
             dag.record_turn_event(
                 turn_id,
                 "turn.decomposition.started",
@@ -319,6 +346,13 @@ class TurnOrchestratorService:
             context = build_decomposition_context(
                 session, registry=self.registry, turn_id=turn_id
             )
+
+        # Fast path: a plain greeting completes the turn immediately with a
+        # static reply instead of spending 100+ seconds on DeepSeek
+        # decomposition plus real subtasks.
+        chitchat_reply = quick_chitchat_reply(context)
+        if chitchat_reply is not None:
+            return self._complete_chitchat_turn(turn_id, chitchat_reply)
 
         registered = frozenset(spec["name"] for spec in self.registry.describe())
         try:
@@ -338,6 +372,16 @@ class TurnOrchestratorService:
 
         with self.session_factory() as session:
             dag = DagRepository(session)
+            current = dag.require_turn(turn_id)
+            if current.status != "decomposing":
+                # The turn was superseded while the model call was in flight.
+                # Discard this stale plan (do not create subtasks, do not
+                # schedule) and let the newer plan version take over.
+                self._discard_turn(
+                    turn_id,
+                    f"turn was superseded during decomposition ({current.status})",
+                )
+                return True
             task_repository = TaskRepository(session)
             ledger = LedgerService(task_repository)
             ledger.record_model_response(
@@ -364,6 +408,96 @@ class TurnOrchestratorService:
         if self.scheduler is not None:
             self.scheduler.schedule_turn(turn_id)
         return True
+
+    def _discard_turn(self, turn_id: str, reason: str) -> None:
+        """Record that a stale turn was discarded and leave it untouched.
+
+        The turn keeps whatever state the superseding flow set (normally
+        ``replan_requested`` or ``superseded``); only the event is appended.
+        """
+        with self.session_factory() as session:
+            dag = DagRepository(session)
+            dag.record_turn_event(
+                turn_id,
+                "turn.decomposition.discarded",
+                {"turn_id": turn_id, "reason": reason},
+            )
+            session.commit()
+
+    def _complete_chitchat_turn(self, turn_id: str, reply: str) -> bool:
+        """Complete a chitchat turn: guard the state, then write the reply.
+
+        The state guard is separate from the reply write so a turn that was
+        superseded between context build and reply write is discarded instead
+        of crashing on an illegal transition.
+        """
+        with self.session_factory() as session:
+            dag = DagRepository(session)
+            try:
+                dag.mark_turn_state(
+                    turn_id,
+                    "completed",
+                    expected={"decomposing"},
+                )
+                session.commit()
+            except SubtaskTransitionError:
+                session.rollback()
+                self._discard_turn(
+                    turn_id,
+                    "turn was superseded before the chitchat reply was written",
+                )
+                return True
+        self._write_chitchat_reply(turn_id, reply)
+        return True
+
+    def _write_chitchat_reply(self, turn_id: str, reply: str) -> None:
+        """Persist the assistant answer message and completion events."""
+        from secagent.auth.dependencies import AuthenticatedUser
+
+        with self.session_factory() as session:
+            dag = DagRepository(session)
+            turn = dag.require_turn(turn_id)
+            conversation_id = turn.conversation_id
+            conversation = session.get(ConversationRow, conversation_id)
+            if conversation is None:  # pragma: no cover - turn implies conversation
+                raise KeyError(conversation_id)
+            owner = session.get(UserRow, conversation.owner_id)
+            if owner is None:  # pragma: no cover - conversation implies owner
+                raise KeyError(conversation.owner_id)
+            actor = AuthenticatedUser(
+                id=owner.id,
+                username=owner.username,
+                role=UserRole(owner.role),
+            )
+            repository = ConversationRepository(session)
+            message = repository.add_message(
+                actor,
+                conversation_id,
+                ConversationMessageWrite(
+                    role=ConversationMessageRole.ASSISTANT,
+                    kind=ConversationMessageKind.ASSISTANT_ANSWER,
+                    content=reply,
+                    status=ConversationMessageStatus.COMPLETED,
+                    turn_id=turn_id,
+                ),
+                commit=False,
+            )
+            dag.record_turn_event(
+                turn_id,
+                "assistant.answer.completed",
+                {
+                    "turn_id": turn_id,
+                    "message_id": message.message.id,
+                    "evidence_refs": [],
+                    "is_partial": False,
+                },
+            )
+            dag.record_turn_event(
+                turn_id,
+                "turn.completed",
+                {"turn_id": turn_id, "is_demo": False},
+            )
+            session.commit()
 
     def _record_decompose_failure(
         self,
@@ -404,16 +538,17 @@ class TurnOrchestratorService:
                     ),
                 )
             )
-            dag.mark_turn_state(
-                turn_id,
-                "waiting_model_decision",
-                expected={
-                    "created",
-                    "decomposing",
-                    "scheduling",
-                    "running",
-                },
-            )
+            with suppress(SubtaskTransitionError):
+                dag.mark_turn_state(
+                    turn_id,
+                    "waiting_model_decision",
+                    expected={
+                        "created",
+                        "decomposing",
+                        "scheduling",
+                        "running",
+                    },
+                )
             session.commit()
 
 
@@ -471,8 +606,38 @@ def republish_pending_dag_jobs(
                 .order_by(JobRunRow.created_at.asc())
             ).all()
         )
+        superseded_turns = {
+            "replan_requested",
+            "superseded",
+            "cancelled",
+            "failed",
+            "failed_retryable",
+            "completed",
+            "partial",
+        }
         for row in rows:
             task_repository = TaskRepository(session)
+            # A stale DAG job whose turn was superseded must not be
+            # republished: the worker would crash on the illegal transition
+            # and restart the zombie loop. Mark it failed instead.
+            if row.turn_id is not None:
+                turn = session.get(ConversationTurnRow, row.turn_id)
+                if turn is not None and turn.status in superseded_turns:
+                    from datetime import datetime, timezone
+
+                    session.execute(
+                        update(JobRunRow)
+                        .where(JobRunRow.id == row.id)
+                        .values(
+                            status="failed",
+                            worker_id=None,
+                            heartbeat_at=None,
+                            lease_expires_at=None,
+                            finished_at=datetime.now(timezone.utc),
+                        )
+                    )
+                    session.commit()
+                    continue
             if row.status == "enqueue_failed":
                 task_repository.claim_job_republish(row.command_id)
                 # A re-queued DAG job means its compat task is executable

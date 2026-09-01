@@ -628,33 +628,67 @@ class DagRepository:
         return True
 
     def recover_expired_dag_jobs(self) -> int:
-        """Expired running DAG jobs go back to pending_publish for republish."""
+        """Expired running DAG jobs go back to pending_publish for republish.
+
+        Jobs whose turn was superseded while they were running (a follow-up
+        message created a newer plan version) are NOT republished: they would
+        crash again on the same illegal transition. Such jobs are marked
+        ``failed`` so the zombie loop ends.
+        """
         from secagent.services.job_service import _as_utc, utcnow
 
         current = utcnow()
-        claimed = self.session.execute(
-            update(JobRunRow)
-            .where(
-                JobRunRow.job_kind.in_(
-                    [
-                        JobKind.TURN_DECOMPOSE.value,
-                        JobKind.SUBTASK_EXECUTE.value,
-                        JobKind.TURN_SYNTHESIZE.value,
-                    ]
-                ),
-                JobRunRow.status.in_(("running", "pause_requested", "cancel_requested")),
-                JobRunRow.lease_expires_at <= current,
-            )
-            .values(
-                status="pending_publish",
-                worker_id=None,
-                heartbeat_at=None,
-                lease_expires_at=None,
-            )
-            .returning(JobRunRow.id)
-        ).all()
+        rows = list(
+            self.session.scalars(
+                select(JobRunRow).where(
+                    JobRunRow.job_kind.in_(
+                        [
+                            JobKind.TURN_DECOMPOSE.value,
+                            JobKind.SUBTASK_EXECUTE.value,
+                            JobKind.TURN_SYNTHESIZE.value,
+                        ]
+                    ),
+                    JobRunRow.status.in_(
+                        ("running", "pause_requested", "cancel_requested")
+                    ),
+                )
+            ).all()
+        )
+        superseded_turns = {
+            "replan_requested",
+            "superseded",
+            "cancelled",
+            "failed",
+            "failed_retryable",
+            "completed",
+            "partial",
+        }
+        recovered = 0
+        for row in rows:
+            if row.lease_expires_at is None or _as_utc(row.lease_expires_at) > current:
+                continue
+            self.session.refresh(row)
+            if row.status not in ("running", "pause_requested", "cancel_requested"):
+                continue
+            if row.turn_id is not None:
+                turn = self.session.get(ConversationTurnRow, row.turn_id)
+                if turn is not None and turn.status in superseded_turns:
+                    # A newer plan version owns this conversation; do not
+                    # republish a stale DAG job that would crash again.
+                    row.status = "failed"
+                    row.worker_id = None
+                    row.heartbeat_at = None
+                    row.lease_expires_at = None
+                    row.finished_at = current
+                    recovered += 1
+                    continue
+            row.status = "pending_publish"
+            row.worker_id = None
+            row.heartbeat_at = None
+            row.lease_expires_at = None
+            recovered += 1
         self.session.commit()
-        return len(claimed)
+        return recovered
 
     # ----------------------------------------------------------------- internals
 
