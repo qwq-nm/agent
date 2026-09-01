@@ -79,6 +79,10 @@ DEEPSEEK_REASONING_EFFORT=high
 # 拆解延迟（实测 high 时单次拆解约 100~140 秒）；最终综合仍用上面的值。
 DEEPSEEK_DECOMPOSE_REASONING_EFFORT=low
 DEEPSEEK_SUBTASK_REASONING_EFFORT=low
+# 官方 DeepSeek API（DEEPSEEK_API_STYLE=deepseek）无法用 reasoning_effort，
+# 通过 thinking 开关达到同样效果：拆解/子任务默认 disabled，综合保持 enabled。
+DEEPSEEK_DECOMPOSE_THINKING=disabled
+DEEPSEEK_SUBTASK_THINKING=disabled
 WEB_ALLOWED_HOSTS=web-demo,node4.anna.nssctf.cn
 ```
 

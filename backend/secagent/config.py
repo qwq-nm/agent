@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     #: final synthesis keeps the configured effort for answer quality.
     deepseek_decompose_reasoning_effort: str = "low"
     deepseek_subtask_reasoning_effort: str = "low"
+    #: Stage-level thinking switch (official DeepSeek API only; values
+    #: "enabled"/"disabled"). Disabling thinking on the frequent short stages
+    #: avoids the same 100+ second reasoning cost on the official endpoint;
+    #: synthesis keeps thinking enabled for answer quality.
+    deepseek_decompose_thinking: str = "disabled"
+    deepseek_subtask_thinking: str = "disabled"
 
     glm_api_key: str | None = None
     glm_api_key_file: Path | None = None
@@ -116,6 +122,19 @@ class Settings(BaseSettings):
                 "max_parallel_subtasks_per_conversation cannot exceed 3"
             )
         return value
+
+    @field_validator(
+        "deepseek_decompose_thinking",
+        "deepseek_subtask_thinking",
+    )
+    @classmethod
+    def validate_thinking_mode(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"enabled", "disabled"}:
+            raise ValueError(
+                "deepseek thinking mode must be 'enabled' or 'disabled'"
+            )
+        return normalized
 
     def deepseek_key(self) -> str | None:
         return read_secret(self.deepseek_api_key, self.deepseek_api_key_file)

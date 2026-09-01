@@ -78,6 +78,20 @@ def build_providers(
                     or settings.deepseek_subtask_reasoning_effort
                 ),
             },
+            stage_thinking_overrides={
+                ModelStage.DECOMPOSE: _thinking_enabled(
+                    str(
+                        deepseek_route.get("decompose_thinking")
+                        or settings.deepseek_decompose_thinking
+                    )
+                ),
+                ModelStage.SUBTASK_EXECUTE: _thinking_enabled(
+                    str(
+                        deepseek_route.get("subtask_thinking")
+                        or settings.deepseek_subtask_thinking
+                    )
+                ),
+            },
         )
     if glm_key and shared_client is not None:
         providers["glm"] = GLMProvider(
@@ -110,6 +124,11 @@ def _resolve_deepseek_api_style(base_url: str, requested: str) -> str:
     ):
         return "opencode-go"
     return "deepseek"
+
+
+def _thinking_enabled(mode: str) -> bool:
+    """Map a settings thinking value ('enabled'/'disabled') to a boolean."""
+    return mode.strip().lower() == "enabled"
 
 
 __all__ = ["build_providers"]

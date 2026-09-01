@@ -201,6 +201,85 @@ async def test_opencode_go_stage_effort_override_is_explicitly_configurable() ->
 
 
 @pytest.mark.asyncio
+async def test_deepseek_decompose_disables_thinking_by_default() -> None:
+    requests: list[httpx.Request] = []
+    provider = deepseek_provider(
+        returning={
+            "choices": [
+                {"finish_reason": "stop", "message": {"content": '{"ok":true}'}}
+            ]
+        },
+        capture=requests,
+        model="deepseek-v4-flash",
+    )
+
+    await provider.complete(
+        ModelRequest(
+            stage=ModelStage.DECOMPOSE,
+            system="s",
+            user="{}",
+            response_schema={"type": "object"},
+        )
+    )
+
+    payload = json.loads(requests[0].content)
+    assert payload["thinking"] == {"type": "disabled"}
+
+
+@pytest.mark.asyncio
+async def test_deepseek_synthesis_keeps_thinking_enabled_by_default() -> None:
+    requests: list[httpx.Request] = []
+    provider = deepseek_provider(
+        returning={
+            "choices": [
+                {"finish_reason": "stop", "message": {"content": '{"ok":true}'}}
+            ]
+        },
+        capture=requests,
+        model="deepseek-v4-flash",
+    )
+
+    await provider.complete(
+        ModelRequest(
+            stage=ModelStage.SYNTHESIZE,
+            system="s",
+            user="{}",
+            response_schema={"type": "object"},
+        )
+    )
+
+    payload = json.loads(requests[0].content)
+    assert payload["thinking"] == {"type": "enabled"}
+
+
+@pytest.mark.asyncio
+async def test_deepseek_stage_thinking_override_is_explicitly_configurable() -> None:
+    requests: list[httpx.Request] = []
+    provider = deepseek_provider(
+        returning={
+            "choices": [
+                {"finish_reason": "stop", "message": {"content": '{"ok":true}'}}
+            ]
+        },
+        capture=requests,
+        model="deepseek-v4-flash",
+        stage_thinking_overrides={ModelStage.DECOMPOSE: True},
+    )
+
+    await provider.complete(
+        ModelRequest(
+            stage=ModelStage.DECOMPOSE,
+            system="s",
+            user="{}",
+            response_schema={"type": "object"},
+        )
+    )
+
+    payload = json.loads(requests[0].content)
+    assert payload["thinking"] == {"type": "enabled"}
+
+
+@pytest.mark.asyncio
 async def test_deepseek_rejects_glm_stage_before_transport() -> None:
     requests: list[httpx.Request] = []
     provider = deepseek_provider(capture=requests)

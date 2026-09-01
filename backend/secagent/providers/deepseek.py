@@ -47,6 +47,7 @@ class _StructuredProvider:
         api_style: str = "deepseek",
         reasoning_effort: str = "high",
         stage_effort_overrides: dict[ModelStage, str] | None = None,
+        stage_thinking_overrides: dict[ModelStage, bool] | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
@@ -54,6 +55,7 @@ class _StructuredProvider:
         self.api_style = api_style
         self.reasoning_effort = reasoning_effort
         self.stage_effort_overrides = stage_effort_overrides or {}
+        self.stage_thinking_overrides = stage_thinking_overrides or {}
         self.client = client
         self.transport = ProviderHTTPClient(
             provider=self.name,
@@ -313,11 +315,30 @@ class DeepSeekProvider(_StructuredProvider):
         ModelStage.SUBTASK_EXECUTE: "low",
     }
 
+    #: Default stage-level thinking switch (official DeepSeek API only, where
+    #: the payload carries ``thinking: {"type": "enabled"|"disabled"}``).
+    #: Disabling thinking on the frequent short stages avoids the same
+    #: 100+ second reasoning cost on the official endpoint; synthesis keeps
+    #: thinking enabled for answer quality.
+    default_stage_thinking_overrides: dict[ModelStage, bool] = {
+        ModelStage.DECOMPOSE: False,
+        ModelStage.SUBTASK_EXECUTE: False,
+    }
+
     def __init__(self, **kwargs: Any) -> None:
-        explicit = dict(kwargs.pop("stage_effort_overrides", None) or {})
-        merged = dict(self.default_stage_effort_overrides)
-        merged.update(explicit)
-        super().__init__(stage_effort_overrides=merged, **kwargs)
+        explicit_effort = dict(kwargs.pop("stage_effort_overrides", None) or {})
+        merged_effort = dict(self.default_stage_effort_overrides)
+        merged_effort.update(explicit_effort)
+        explicit_thinking = dict(
+            kwargs.pop("stage_thinking_overrides", None) or {}
+        )
+        merged_thinking = dict(self.default_stage_thinking_overrides)
+        merged_thinking.update(explicit_thinking)
+        super().__init__(
+            stage_effort_overrides=merged_effort,
+            stage_thinking_overrides=merged_thinking,
+            **kwargs,
+        )
 
     def _provider_options(self, request: ModelRequest | None = None) -> dict[str, Any]:
         if self.api_style == "opencode-go":
@@ -325,6 +346,16 @@ class DeepSeekProvider(_StructuredProvider):
                 "reasoning_effort": self._effective_reasoning_effort(
                     request.stage if request is not None else None
                 )
+            }
+        if request is not None and request.stage in self.stage_thinking_overrides:
+            return {
+                "thinking": {
+                    "type": (
+                        "enabled"
+                        if self.stage_thinking_overrides[request.stage]
+                        else "disabled"
+                    )
+                }
             }
         return {"thinking": {"type": "enabled"}}
 

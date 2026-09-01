@@ -45,6 +45,7 @@ def deepseek_provider(
     api_style: str = "deepseek",
     reasoning_effort: str = "high",
     stage_effort_overrides: dict[ModelStage, str] | None = None,
+    stage_thinking_overrides: dict[ModelStage, bool] | None = None,
     model: str = "deepseek-v4-pro",
     sleep: Callable[[float], Awaitable[None]] = _no_sleep,
     jitter: Callable[[], float] = lambda: 0.0,
@@ -58,6 +59,7 @@ def deepseek_provider(
         api_style=api_style,
         reasoning_effort=reasoning_effort,
         stage_effort_overrides=stage_effort_overrides,
+        stage_thinking_overrides=stage_thinking_overrides,
         sleep=sleep,
         jitter=jitter,
     )
