@@ -45,6 +45,7 @@ class ToolGateway:
         turn_id: str,
         subtask_id: str,
         attempt_id: str,
+        auto_approve: bool = False,
     ) -> None:
         self.registry = registry
         self.ledger = ledger
@@ -58,6 +59,10 @@ class ToolGateway:
         self.turn_id = turn_id
         self.subtask_id = subtask_id
         self.attempt_id = attempt_id
+        #: Autonomous mode: tools that would otherwise wait for the operator are
+        #: executed directly, so web/CTF analysis never stalls behind a manual
+        #: approval. Only meaningful when the operator opts into it.
+        self.auto_approve = auto_approve
 
     async def submit(
         self,
@@ -86,14 +91,25 @@ class ToolGateway:
             return self._reject(subtask_key, tool_name, "tool is not registered")
 
         risk = tool.risk_level
+        # Honour an approval already granted for this tool in this turn/subtask.
+        # The approval created when this same request previously hit the queue
+        # is what a resume after operator consent looks like; without this the
+        # medium tool would keep re-entering the approval queue forever even
+        # after it was approved, so the tool would never actually run.
+        approved = self.task_repository.is_tool_approved(
+            self.task_id,
+            tool_name,
+            turn_id=self.turn_id,
+            subtask_id=self.subtask_id,
+        )
         try:
             decision = RiskGate().check(
-                risk, approved=False, safety_mode=self.safety_mode
+                risk, approved=approved, safety_mode=self.safety_mode
             )
         except RiskRejected as exc:
             return self._reject(subtask_key, tool_name, str(exc))
 
-        if decision.action == "wait":
+        if decision.action == "wait" and not self.auto_approve:
             approval_id = self.task_repository.add_approval(
                 self.task_id,
                 step_id=None,

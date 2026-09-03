@@ -23,11 +23,12 @@ from secagent.db_models import (
     ToolCallRow,
     UserRow,
 )
-from secagent.domain import TaskCreate, UserRole
+from secagent.domain import RiskLevel, TaskCreate, ToolResult, UserRole
 from secagent.repositories.dag_repository import DagRepository
 from secagent.repository import TaskRepository
 from secagent.services.ledger import LedgerService
 from secagent.services.tool_gateway import ToolGateway
+from secagent.tools.base import BaseTool, ToolContext
 from secagent.tools.registry import ToolRegistry
 from secagent.agents.executor import DemoEvidenceTool
 from secagent.tools.source_tools import SourceScanner
@@ -37,6 +38,34 @@ from secagent.security.url_guard import UrlGuard
 
 def _actor(name: str, role: UserRole = UserRole.ANALYST) -> AuthenticatedUser:
     return AuthenticatedUser(id=str(uuid4()), username=name, role=role)
+
+
+class _MediumProbe(BaseTool):
+    """Deterministic MEDIUM-risk tool so the approval test needs no network."""
+
+    name = "medium_probe"
+    scene = "web_analysis"
+    risk_level = RiskLevel.MEDIUM
+    idempotent = True
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def run(self, params: dict, context: ToolContext) -> ToolResult:
+        del params, context
+        self.calls += 1
+        return ToolResult(
+            success=True,
+            summary="probe ok",
+            evidence=[
+                {
+                    "evidence_type": "http_observation",
+                    "source": "probe",
+                    "content": "ok",
+                    "confidence": 1.0,
+                }
+            ],
+        )
 
 
 @pytest.fixture
@@ -282,8 +311,10 @@ async def test_gateway_executes_low_risk_tool_with_linkage(gateway_env, tmp_path
 
 async def test_gateway_routes_medium_risk_tool_to_approval(gateway_env) -> None:
     factory, actor, registry = gateway_env
+    probe = _MediumProbe()
+    registry.register(probe)
     turn_id, task_id, subtask_id = _turn_and_subtask(
-        factory, actor, allowed_tools=["http_fetch"], safety_mode="conservative"
+        factory, actor, allowed_tools=["medium_probe"], safety_mode="conservative"
     )
     attempt_id = _mark_running(factory, subtask_id)
     gateway = _build_gateway(
@@ -293,13 +324,13 @@ async def test_gateway_routes_medium_risk_tool_to_approval(gateway_env) -> None:
         task_id,
         subtask_id,
         attempt_id,
-        allowed_tools=["http_fetch"],
+        allowed_tools=["medium_probe"],
         workspace=None,
     )
 
     outcome = await gateway.submit(
         subtask_key="probe",
-        tool_name="http_fetch",
+        tool_name="medium_probe",
         params={"url": "https://example.test/", "api_key": "sk-secret-123456"},
     )
 
@@ -349,3 +380,64 @@ async def test_gateway_rejects_forbidden_risk_tool(gateway_env) -> None:
         source_scanner.risk_level = original
     assert outcome.status == "rejected"
     gateway.dag.session.commit()
+
+
+async def test_gateway_honours_approved_medium_risk_tool(gateway_env, tmp_path) -> None:
+    """An approved medium tool executes on the retry instead of re-entering the
+    approval queue forever (the conversational-subtask approval bug)."""
+    factory, actor, registry = gateway_env
+    probe = _MediumProbe()
+    registry.register(probe)
+    turn_id, task_id, subtask_id = _turn_and_subtask(
+        factory, actor, allowed_tools=["medium_probe"], safety_mode="conservative"
+    )
+    attempt_id = _mark_running(factory, subtask_id)
+    gateway = _build_gateway(
+        factory,
+        registry,
+        turn_id,
+        task_id,
+        subtask_id,
+        attempt_id,
+        allowed_tools=["medium_probe"],
+        workspace=tmp_path / "workspace",
+    )
+
+    # First request: medium risk with no prior approval -> waits.
+    first = await gateway.submit(
+        subtask_key="probe", tool_name="medium_probe", params={}
+    )
+    assert first.status == "wait"
+    assert probe.calls == 0
+    gateway.dag.session.commit()
+
+    # Simulate the operator approving the created approval.
+    with factory() as session:
+        approval = session.scalars(select(ApprovalRow)).one()
+        approval.status = "approved"
+        session.commit()
+
+    # Build a fresh gateway on a fresh session (the retry loop does the same),
+    # so the approved approval is visible. It must honour it and actually run.
+    retry = _build_gateway(
+        factory,
+        registry,
+        turn_id,
+        task_id,
+        subtask_id,
+        attempt_id,
+        allowed_tools=["medium_probe"],
+        workspace=tmp_path / "workspace",
+    )
+    second = await retry.submit(
+        subtask_key="probe", tool_name="medium_probe", params={}
+    )
+    assert second.status == "executed"
+    assert second.result is not None and second.result.success is True
+    assert probe.calls == 1
+    retry.dag.session.commit()
+
+    with factory() as session:
+        calls = session.scalars(select(ToolCallRow)).all()
+        assert len(calls) == 1
+        assert calls[0].tool_name == "medium_probe"

@@ -164,6 +164,7 @@ class AssignmentPolicy:
         available_providers: Iterable[LogicalProvider | str],
         registered_tools: Iterable[str],
         authorized_tools: Iterable[str],
+        preferred_provider: LogicalProvider | str | None = None,
     ) -> list[AssignmentDecision]:
         if not isinstance(document, DecompositionDocument):
             raise TypeError("document must be a DecompositionDocument")
@@ -175,6 +176,15 @@ class AssignmentPolicy:
         )
         registered = frozenset(registered_tools)
         authorized = frozenset(authorized_tools)
+        preferred = None
+        if preferred_provider:
+            if isinstance(preferred_provider, LogicalProvider):
+                preferred = preferred_provider
+            else:
+                raw = str(preferred_provider).strip().lower()
+                # Provider name, or a model id like 'glm-5.3' / 'deepseek-v4-pro':
+                # derive the owning provider from the leading token.
+                preferred = self._provider(raw) or self._provider(raw.split("-")[0])
         decisions: list[AssignmentDecision] = []
         for subtask in document.subtasks:
             decisions.append(
@@ -183,6 +193,7 @@ class AssignmentPolicy:
                     available=available,
                     registered=registered,
                     authorized=authorized,
+                    preferred=preferred,
                 )
             )
         return decisions
@@ -203,6 +214,7 @@ class AssignmentPolicy:
         available: frozenset[LogicalProvider],
         registered: frozenset[str],
         authorized: frozenset[str],
+        preferred: LogicalProvider | None = None,
     ) -> AssignmentDecision:
         capabilities = tuple(subtask.required_capabilities)
         candidates = [
@@ -238,6 +250,12 @@ class AssignmentPolicy:
             assigned = proposed
         else:
             assigned = best[0]
+        # Soft user model preference: honour the chosen provider for a subtask
+        # only when it is capability-compatible; otherwise keep the
+        # capability-based choice so fixed/unsupported capabilities are never
+        # forced onto the wrong provider.
+        if preferred is not None and preferred in candidates:
+            assigned = preferred
 
         corrections: list[RouteReasonCode] = []
         if proposed not in available:

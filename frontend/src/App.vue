@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from './stores/auth'
 
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
+const sidebarCollapsed = ref(false)
 const items = [
   { to: '/', label: '总览', icon: '◫' },
   { to: '/chat/new', label: 'AI 对话', icon: '✦' },
@@ -26,8 +27,8 @@ async function signOut() {
 
 <template>
   <RouterView v-if="route.path === '/login'" />
-  <div v-else class="app-shell">
-    <aside class="sidebar">
+  <div v-else class="app-shell" :class="{ 'sidebar-collapsed': sidebarCollapsed }">
+    <aside class="sidebar" :class="{ 'is-collapsed': sidebarCollapsed }">
       <RouterLink class="brand" to="/">
         <span class="brand-mark">SX</span>
         <span><strong>SecAgent-X</strong><small>AUTONOMOUS DEFENSE</small></span>
@@ -49,7 +50,16 @@ async function signOut() {
     </aside>
     <main class="main-content">
       <header class="topbar">
-        <span>SecAgent-X 控制台</span>
+        <div class="topbar-left">
+          <button
+            class="collapse-toggle"
+            type="button"
+            :aria-label="sidebarCollapsed ? '展开侧栏' : '收起侧栏'"
+            :title="sidebarCollapsed ? '展开侧栏' : '收起侧栏'"
+            @click="sidebarCollapsed = !sidebarCollapsed"
+          >{{ sidebarCollapsed ? '☰' : '❮' }}</button>
+          <span>SecAgent-X 控制台</span>
+        </div>
         <div><span class="online-dot"></span> API 连接状态由页面实时检测 <button class="link-button" type="button" @click="signOut">退出</button></div>
       </header>
       <RouterView />

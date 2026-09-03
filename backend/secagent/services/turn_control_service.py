@@ -73,11 +73,13 @@ class TurnControlService:
         queue: Any,
         logical_providers: frozenset[str],
         max_parallel: int = 3,
+        max_auto_continues: int = 15,
     ) -> None:
         self.session_factory = session_factory
         self.queue = queue
         self.logical_providers = logical_providers
         self.max_parallel = max_parallel
+        self.max_auto_continues = max_auto_continues
 
     # ------------------------------------------------------------ failure decisions
 
@@ -293,6 +295,7 @@ class TurnControlService:
         source_turn: ConversationTurnRow,
         actor_id: str,
         to_publish: list[tuple[JobKind, str, str, str]],
+        goal: str | None = None,
     ) -> str:
         del actor_id  # the compatibility task and turn are owned by the owner
         from secagent.auth.dependencies import AuthenticatedUser
@@ -312,7 +315,7 @@ class TurnControlService:
         repository = ConversationRepository(session)
         task = task_repository.create_task(
             TaskCreate(
-                goal=f"Replan of turn {source_turn.id}"[:4000],
+                goal=(goal or f"Replan of turn {source_turn.id}")[:4000],
                 authorization_scope="Conversation replan",
             ),
             owner_id=conversation.owner_id,
@@ -333,6 +336,44 @@ class TurnControlService:
         session.flush()
         to_publish.append((JobKind.TURN_DECOMPOSE, turn.id, command_id, task.id))
         return turn.id
+
+    def auto_continue_partial(self, source_turn_id: str, goal: str) -> str | None:
+        """Create a continuation turn for a partial result, or None if capped.
+
+        Used to keep analysing a turn until the synthesis is complete (no
+        unresolved items), so an autonomous CTF/web flow follows promising
+        leads instead of settling for a partial answer. Capped by
+        ``max_auto_continues`` so it degrades to a partial result rather than
+        looping across the whole budget.
+        """
+        to_publish: list[tuple[JobKind, str, str, str]] = []
+        with self.session_factory() as session:
+            dag = DagRepository(session)
+            task_repository = TaskRepository(session)
+            source_turn = dag.require_turn(source_turn_id)
+            if self._replan_depth(session, source_turn_id) >= self.max_auto_continues:
+                return None
+            new_turn_id = self._create_replan_turn(
+                session,
+                dag,
+                task_repository,
+                source_turn,
+                "system",
+                to_publish,
+                goal=goal,
+            )
+            session.commit()
+        self._publish(to_publish)
+        return new_turn_id
+
+    @staticmethod
+    def _replan_depth(session: Session, turn_id: str) -> int:
+        depth = 0
+        current = session.get(ConversationTurnRow, turn_id)
+        while current is not None and current.replan_from_turn_id:
+            depth += 1
+            current = session.get(ConversationTurnRow, current.replan_from_turn_id)
+        return depth
 
     def replan_after_message(
         self,
@@ -434,6 +475,16 @@ class TurnControlService:
                 raise UnknownApproval(approval_id)
             if approved:
                 if subtask.status is SubtaskStatus.WAITING_TOOL_APPROVAL:
+                    # The retry re-runs _run_loop which transitions the subtask
+                    # to RUNNING from QUEUED, so it must be re-queued here;
+                    # otherwise the resumed job fails on the illegal transition
+                    # and the approved tool never actually executes.
+                    dag.transition_subtask(
+                        subtask.id,
+                        SubtaskStatus.QUEUED,
+                        expected={SubtaskStatus.WAITING_TOOL_APPROVAL},
+                        reason="tool approved by operator; re-queued for execution",
+                    )
                     self._enqueue_subtask_retry(
                         session, dag, task_repository, subtask, to_publish
                     )

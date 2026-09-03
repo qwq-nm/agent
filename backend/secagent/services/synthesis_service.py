@@ -343,6 +343,39 @@ class SynthesisService:
             row.status = "completed"
             session.commit()
 
+        # Autonomous continuation: if the synthesis is partial (unresolved next
+        # steps) and auto-continue is enabled, spawn a continuation turn so the
+        # analysis keeps following promising leads instead of settling for a
+        # partial answer. Capped so it degrades to partial rather than looping.
+        if (
+            (document.is_partial or bool(document.unresolved))
+            and bool(getattr(self.settings, "auto_continue_on_partial", False))
+        ):
+            goal = (
+                ("继续分析并完成：" + "；".join(document.unresolved))
+                if document.unresolved
+                else "继续深入分析，给出完整结论。"
+            )
+            self._auto_continue(turn_id, goal)
+
+    def _auto_continue(self, source_turn_id: str, goal: str) -> None:
+        from secagent.queue.celery_queue import CeleryJobQueue
+        from secagent.services.turn_control_service import TurnControlService
+
+        control = TurnControlService(
+            session_factory=self.session_factory,
+            queue=CeleryJobQueue(),
+            logical_providers=frozenset({"glm", "deepseek"}),
+            max_auto_continues=int(
+                getattr(self.settings, "max_auto_continues", 15) or 15
+            ),
+        )
+        try:
+            control.auto_continue_partial(source_turn_id, goal)
+        except Exception:
+            # Non-fatal: the partial answer is already streamed; degrade gracefully.
+            pass
+
     def _record_failure(
         self, turn_id: str, task_id: str, exc: Exception
     ) -> None:

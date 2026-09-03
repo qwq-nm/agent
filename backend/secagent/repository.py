@@ -1116,16 +1116,34 @@ class TaskRepository:
         return decided
 
     def is_tool_approved(
-        self, task_id: str, tool_name: str, *, step_id: str
+        self,
+        task_id: str,
+        tool_name: str,
+        *,
+        step_id: str | None = None,
+        turn_id: str | None = None,
+        subtask_id: str | None = None,
     ) -> bool:
-        row = self.session.scalar(
-            select(ApprovalRow).where(
-                ApprovalRow.task_id == task_id,
-                ApprovalRow.step_id == step_id,
-                ApprovalRow.tool_name == tool_name,
-                ApprovalRow.status == "approved",
-            )
-        )
+        """Return True when a matching approval is already granted.
+
+        The legacy step-scoped callers pass ``step_id``; the conversational
+        subtask gateway matches on ``turn_id``/``subtask_id`` instead. Only the
+        supplied filters are applied, so an approval granted for the same
+        task + tool + turn + subtask is honoured rather than forcing the next
+        request back into the approval queue.
+        """
+        conditions: list[object] = [
+            ApprovalRow.task_id == task_id,
+            ApprovalRow.tool_name == tool_name,
+            ApprovalRow.status == "approved",
+        ]
+        if step_id is not None:
+            conditions.append(ApprovalRow.step_id == step_id)
+        if turn_id is not None:
+            conditions.append(ApprovalRow.turn_id == turn_id)
+        if subtask_id is not None:
+            conditions.append(ApprovalRow.subtask_id == subtask_id)
+        row = self.session.scalar(select(ApprovalRow).where(*conditions))
         return row is not None
 
     @staticmethod

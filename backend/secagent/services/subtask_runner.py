@@ -375,6 +375,9 @@ class SubtaskRunner:
                 turn_id=turn_id,
                 subtask_id=subtask.id,
                 attempt_id=attempt_id,
+                auto_approve=bool(
+                    getattr(self.settings, "auto_approve_tools", False)
+                ),
             )
             outcome = await gateway.submit(
                 subtask_key=subtask.key, tool_name=tool_name, params=params
@@ -467,23 +470,38 @@ class SubtaskRunner:
                     detail=f"{type(exc).__name__}: {exc}"[:1_800],
                 )
             )
-            with suppress(Exception):
-                dag.transition_subtask(
-                    subtask_id,
-                    SubtaskStatus.WAITING_MODEL_DECISION,
-                    expected={SubtaskStatus.RUNNING, SubtaskStatus.QUEUED},
-                    reason="provider failure awaiting user decision",
-                )
-            with suppress(Exception):
-                dag.mark_turn_state(
-                    turn_id,
-                    "waiting_model_decision",
-                    expected={
-                        "running",
-                        "scheduling",
-                        "waiting_tool_approval",
-                    },
-                )
+            auto_resolve = bool(
+                getattr(self.settings, "auto_resolve_model_failures", False)
+            )
+            if auto_resolve:
+                # Autonomous mode: don't block on the operator decision; mark the
+                # subtask failed (terminal) so the scheduler synthesizes a partial
+                # result instead of waiting for a decision forever.
+                with suppress(Exception):
+                    dag.transition_subtask(
+                        subtask_id,
+                        SubtaskStatus.FAILED,
+                        expected={SubtaskStatus.RUNNING, SubtaskStatus.QUEUED},
+                        reason="provider failure auto-resolved to failed (autonomous)",
+                    )
+            else:
+                with suppress(Exception):
+                    dag.transition_subtask(
+                        subtask_id,
+                        SubtaskStatus.WAITING_MODEL_DECISION,
+                        expected={SubtaskStatus.RUNNING, SubtaskStatus.QUEUED},
+                        reason="provider failure awaiting user decision",
+                    )
+                with suppress(Exception):
+                    dag.mark_turn_state(
+                        turn_id,
+                        "waiting_model_decision",
+                        expected={
+                            "running",
+                            "scheduling",
+                            "waiting_tool_approval",
+                        },
+                    )
             session.commit()
         if self.scheduler is not None:
             self.scheduler.on_subtask_finished(subtask_id)

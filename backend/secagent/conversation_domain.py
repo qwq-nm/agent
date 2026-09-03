@@ -168,11 +168,30 @@ class ConversationSettings(_StrictModel):
     safety_mode: SafetyMode = SafetyMode.CONSERVATIVE
     allowed_targets: list[TrimmedTarget] = Field(default_factory=list, max_length=20)
     requested_parallelism: int | None = Field(default=None, ge=1, le=3, strict=True)
+    #: Soft provider preference for subtask execution. Decompose/Synthesize stay
+    #: fixed to DeepSeek; this only biases capability-compatible subtasks.
+    preferred_model: str | None = None
 
     @field_validator("safety_mode", mode="before")
     @classmethod
     def validate_safety_mode_input(cls, value: object) -> object:
         return _require_string_enum(value)
+
+    @field_validator("preferred_model", mode="before")
+    @classmethod
+    def validate_preferred_model(cls, value: object) -> object:
+        if value is None:
+            return None
+        normalized = str(value).strip().lower()
+        if normalized not in {"glm", "deepseek"} and not (
+            normalized.startswith("glm-") or normalized.startswith("deepseek-")
+        ):
+            raise ValueError(
+                "preferred_model must be 'glm', 'deepseek', a model id "
+                "('glm-5.2'/'glm-5.3'/'deepseek-v4-flash'/'deepseek-v4-pro'/"
+                "'deepseek-vl'), or null"
+            )
+        return normalized
 
     @field_validator("allowed_targets", mode="before")
     @classmethod

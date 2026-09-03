@@ -7,6 +7,7 @@ import {
   decideModelFailure,
   getConversation,
   listConversations,
+  patchConversation,
   sendMessage,
   stopConversation,
   type ConversationDetail,
@@ -40,6 +41,13 @@ interface FailureView {
   resolved: boolean
 }
 
+interface ActivityEntry {
+  id: number
+  ts: string
+  text: string
+  tone: 'stage' | 'subtask' | 'tool' | 'synthesis' | 'info'
+}
+
 const route = useRoute()
 const router = useRouter()
 
@@ -51,14 +59,50 @@ const stopping = ref(false)
 const errorText = ref('')
 const stream = ref<{ stop: () => void } | null>(null)
 const lastEventId = ref(0)
+// 聊天框右下角的模型偏好（自动协同 / 具体模型版本）
+const preferredModel = ref<
+  'auto' | 'deepseek' | 'deepseek-v4-flash' | 'deepseek-v4-pro' | 'deepseek-vl' | 'glm' | 'glm-5.2' | 'glm-5.3'
+>('auto')
 
 const subtasks = ref<Map<string, SubtaskView>>(new Map())
 const approvals = ref<ApprovalView[]>([])
 const failures = ref<FailureView[]>([])
 
+// 实时“运作/思考过程”：阶段 + 事件流（不展示隐藏推理链，只展示阶段/子任务/工具/汇总）
+const turnStage = ref<string>('idle')
+const activity = ref<ActivityEntry[]>([])
+let activitySeq = 0
+
+function pushActivity(text: string, tone: ActivityEntry['tone'] = 'info'): void {
+  activity.value.push({
+    id: ++activitySeq,
+    ts: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
+    text,
+    tone,
+  })
+  if (activity.value.length > 120) activity.value = activity.value.slice(-120)
+}
+
+const stageLabels: Record<string, string> = {
+  idle: '待机',
+  decomposing: '拆解任务',
+  scheduling: '调度子任务',
+  running: '执行子任务',
+  synthesizing: '汇总结论',
+  waiting_tool_approval: '等待审批',
+  waiting_model_decision: '等待模型决策',
+  completed: '已完成',
+  cancelled: '已取消',
+  failed: '失败',
+}
+
+const isWorking = computed(() =>
+  ['decomposing', 'scheduling', 'running', 'synthesizing'].includes(turnStage.value),
+)
+
 const THEME_STORAGE_KEY = 'secagent-chat-theme'
 const THEMES = [
-  { id: 'sky', label: '天蓝', dot: '#409eff' },
+  { id: 'sky', label: '天蓝', dot: '#0f9aa9' },
   { id: 'sand', label: '暖沙', dot: '#d98a2b' },
   { id: 'mint', label: '薄荷', dot: '#2ba471' },
   { id: 'lavender', label: '紫藤', dot: '#7a5cd6' },
@@ -115,6 +159,9 @@ function resetLiveState(): void {
   subtasks.value = new Map()
   approvals.value = []
   failures.value = []
+  turnStage.value = 'idle'
+  activity.value = []
+  activitySeq = 0
   lastEventId.value = 0
 }
 
@@ -148,7 +195,12 @@ function onStreamEvent(event: ConversationStreamEvent): void {
     const existing = subtasks.value.get(String(payload.subtask_id))
     if (existing) {
       const status = event.type.replace('subtask.', '')
-      existing.status = status === 'started' ? 'running' : status
+      if (
+        ['queued', 'started', 'waiting_approval', 'waiting_model_decision',
+         'completed', 'incomplete', 'skipped', 'superseded', 'failed', 'cancelled'].includes(status)
+      ) {
+        existing.status = status === 'started' ? 'running' : status
+      }
       if (event.type === 'subtask.waiting_approval' && payload.approval_id) {
         approvals.value.push({
           approvalId: String(payload.approval_id),
@@ -156,6 +208,24 @@ function onStreamEvent(event: ConversationStreamEvent): void {
           subtaskKey: existing.key,
           resolved: false,
         })
+      }
+      if (event.type === 'subtask.started') {
+        if (turnStage.value === 'scheduling') turnStage.value = 'running'
+        pushActivity(`子任务「${existing.key}」开始执行（${existing.provider}）`, 'subtask')
+      } else if (event.type === 'subtask.tool.requested') {
+        pushActivity(`子任务「${existing.key}」调用工具 ${String(payload.tool_name ?? '')}`, 'tool')
+      } else if (event.type === 'subtask.tool.rejected') {
+        pushActivity(`子任务「${existing.key}」工具被拒绝：${String(payload.reason ?? '')}`, 'tool')
+      } else if (event.type === 'subtask.waiting_approval') {
+        turnStage.value = 'waiting_tool_approval'
+        pushActivity(`子任务「${existing.key}」等待工具审批`, 'subtask')
+      } else if (event.type === 'subtask.completed') {
+        pushActivity(`子任务「${existing.key}」完成`, 'subtask')
+      } else if (event.type === 'subtask.failed') {
+        pushActivity(`子任务「${existing.key}」失败`, 'subtask')
+      } else if (event.type === 'subtask.waiting_model_decision') {
+        turnStage.value = 'waiting_model_decision'
+        pushActivity(`子任务「${existing.key}」等待模型决策`, 'subtask')
       }
     }
   } else if (event.type === 'model.failure.waiting_decision') {
@@ -165,13 +235,37 @@ function onStreamEvent(event: ConversationStreamEvent): void {
       errorCode: String(payload.error_code ?? ''),
       resolved: false,
     })
+    turnStage.value = 'waiting_model_decision'
+    pushActivity(`模型失败（${String(payload.stage ?? '')}），等待选择处理方式`, 'stage')
   } else if (event.type === 'model.failure.resolved') {
     const failureId = String(payload.failure_id ?? '')
     const failure = failures.value.find((item) => item.failureId === failureId)
     if (failure) failure.resolved = true
-  } else if (event.type === 'assistant.answer.completed') {
-    void refreshDetail()
+    pushActivity('模型失败已处理，继续执行', 'info')
+  } else if (event.type === 'turn.decomposition.started') {
+    turnStage.value = 'decomposing'
+    pushActivity('正在拆解任务（DeepSeek）…', 'stage')
+  } else if (event.type === 'turn.decomposition.completed') {
+    pushActivity('任务拆解完成', 'stage')
+  } else if (event.type === 'turn.plan.versioned') {
+    turnStage.value = 'scheduling'
+    pushActivity(`已生成任务图 v${String(payload.plan_version ?? '')}`, 'stage')
+  } else if (event.type === 'turn.replan.requested') {
+    turnStage.value = 'running'
+    pushActivity('收到追问，重新规划本轮', 'stage')
+  } else if (event.type === 'turn.synthesis.started') {
+    turnStage.value = 'synthesizing'
+    pushActivity('正在汇总最终结论（DeepSeek）…', 'stage')
+  } else if (event.type === 'turn.cancelled') {
+    turnStage.value = 'cancelled'
+    pushActivity('本轮已停止', 'stage')
   } else if (event.type === 'turn.completed') {
+    turnStage.value = 'completed'
+    pushActivity('本轮已完成', 'stage')
+    void refreshDetail()
+  } else if (event.type === 'assistant.answer.completed') {
+    turnStage.value = 'completed'
+    pushActivity('答案生成完毕，本轮结束', 'synthesis')
     void refreshDetail()
   }
   void nextTick(() => {
@@ -212,10 +306,17 @@ async function send(): Promise<void> {
   errorText.value = ''
   try {
     let id = conversationId.value
+    const model = preferredModel.value === 'auto' ? null : preferredModel.value
     if (!id) {
-      const created = await createConversation()
+      const created = await createConversation(undefined, model)
       id = created.id
       await loadConversations()
+    } else {
+      try {
+        await patchConversation(id, { preferred_model: model })
+      } catch {
+        // 运行中或瞬时失败时忽略，不阻塞发送
+      }
     }
     const result = await sendMessage(
       id,
@@ -374,6 +475,18 @@ const statusLabels: Record<string, string> = {
           @keydown.ctrl.enter.prevent="send"
         />
         <div class="chat-composer-actions">
+          <select v-model="preferredModel" class="chat-model-select" aria-label="选择模型">
+            <option value="auto">自动协同</option>
+            <optgroup label="DeepSeek">
+              <option value="deepseek-v4-flash">V4 Flash</option>
+              <option value="deepseek-v4-pro">V4 Pro</option>
+              <option value="deepseek-vl">V4 多模态</option>
+            </optgroup>
+            <optgroup label="GLM">
+              <option value="glm-5.2">GLM 5.2</option>
+              <option value="glm-5.3">GLM 5.3</option>
+            </optgroup>
+          </select>
           <button
             type="button"
             :disabled="!conversationId || stopping"
@@ -389,6 +502,22 @@ const statusLabels: Record<string, string> = {
     </main>
 
     <aside class="chat-task-tree">
+      <div class="chat-live" :class="{ working: isWorking }">
+        <span class="chat-live-dot"></span>
+        <strong>{{ stageLabels[turnStage] ?? turnStage }}</strong>
+        <small>{{ isWorking ? 'Agent 正在思考/执行…' : '待机' }}</small>
+      </div>
+
+      <div v-if="activity.length" class="chat-activity">
+        <h3>运作过程</h3>
+        <ol>
+          <li v-for="item in activity" :key="item.id" :class="item.tone">
+            <span class="chat-activity-ts">{{ item.ts }}</span>
+            <span class="chat-activity-text">{{ item.text }}</span>
+          </li>
+        </ol>
+      </div>
+
       <h2>任务图</h2>
       <p v-if="subtaskList.length === 0" class="chat-empty-hint">
         发送消息后，这里会实时展示子任务 DAG、模型分工与状态。
@@ -415,13 +544,13 @@ const statusLabels: Record<string, string> = {
   --cw-border: #d8dee9;
   --cw-text: #243244;
   --cw-muted: #5a6b80;
-  --cw-accent: #409eff;
-  --cw-accent-soft: #e8f3ff;
-  --cw-accent-border: #c5e1ff;
+  --cw-accent: #0f9aa9;
+  --cw-accent-soft: #e4f4f6;
+  --cw-accent-border: #b6e1e7;
   --cw-btn-border: #cfd8e3;
 
   display: grid;
-  grid-template-columns: 240px 1fr 300px;
+  grid-template-columns: 240px 1fr 340px;
   gap: 12px;
   height: calc(100vh - 56px);
   padding: 12px;
@@ -528,6 +657,10 @@ const statusLabels: Record<string, string> = {
   border-radius: 6px;
   background: var(--cw-panel);
   cursor: pointer;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.45;
 }
 .chat-conversation-item.active {
   border-color: var(--cw-accent);
@@ -595,12 +728,15 @@ const statusLabels: Record<string, string> = {
   color: var(--cw-muted);
 }
 .chat-card {
-  border: 1px solid #e6a23c;
-  background: #fdf6ec;
-  border-radius: 8px;
-  padding: 10px;
+  border: 1px solid var(--cw-accent-border);
+  background: var(--cw-accent-soft);
+  border-radius: 12px;
+  padding: 12px 14px;
   margin-bottom: 10px;
-  color: #6c4a12;
+  color: var(--cw-text);
+}
+.chat-card strong {
+  color: var(--cw-accent);
 }
 .chat-card.failure {
   border-color: #f56c6c;
@@ -610,7 +746,20 @@ const statusLabels: Record<string, string> = {
 .chat-card-actions {
   display: flex;
   gap: 8px;
-  margin-top: 8px;
+  margin-top: 10px;
+}
+.chat-card-actions button {
+  border: 1px solid var(--cw-accent-border);
+  background: var(--cw-panel);
+  color: var(--cw-text);
+  border-radius: 6px;
+  padding: 5px 10px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.chat-card-actions button:hover {
+  border-color: var(--cw-accent);
+  color: var(--cw-accent);
 }
 .chat-error {
   color: #d4507c;
@@ -627,14 +776,36 @@ const statusLabels: Record<string, string> = {
   width: 100%;
   box-sizing: border-box;
   resize: vertical;
+  min-height: 72px;
   background: var(--cw-panel);
   border: 1px solid var(--cw-btn-border);
-  border-radius: 6px;
+  border-radius: 10px;
+  padding: 10px 12px;
+  line-height: 1.6;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.chat-composer textarea:focus {
+  outline: none;
+  border-color: var(--cw-accent);
+  box-shadow: 0 0 0 3px var(--cw-accent-soft);
 }
 .chat-composer-actions {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
   gap: 8px;
+}
+.chat-model-select {
+  border: 1px solid var(--cw-btn-border);
+  border-radius: 6px;
+  background: var(--cw-panel);
+  color: var(--cw-text);
+  padding: 6px 8px;
+  font-size: 12px;
+}
+.chat-model-select:focus {
+  outline: none;
+  border-color: var(--cw-accent);
 }
 .chat-task-tree ul {
   list-style: none;
@@ -646,6 +817,89 @@ const statusLabels: Record<string, string> = {
   border-radius: 6px;
   padding: 8px;
   margin-bottom: 8px;
+}
+.chat-live {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px;
+  margin-bottom: 12px;
+  border: 1px solid var(--cw-border);
+  border-radius: 6px;
+  background: var(--cw-accent-soft);
+}
+.chat-live strong {
+  font-size: 13px;
+  color: var(--cw-text);
+}
+.chat-live small {
+  font-size: 11px;
+  color: var(--cw-muted);
+  margin-left: auto;
+}
+.chat-live-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--cw-muted);
+  flex: 0 0 auto;
+}
+.chat-live.working {
+  border-color: var(--cw-accent-border);
+}
+.chat-live.working .chat-live-dot {
+  background: var(--cw-accent);
+  animation: chat-live-pulse 1.1s ease-in-out infinite;
+}
+.chat-activity {
+  margin-bottom: 12px;
+  border: 1px solid var(--cw-border);
+  border-radius: 6px;
+  padding: 10px;
+  background: var(--cw-chat);
+  max-height: 260px;
+  overflow-y: auto;
+}
+.chat-activity h3 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--cw-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+.chat-activity ol {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 6px;
+}
+.chat-activity li {
+  display: grid;
+  grid-template-columns: 44px 1fr;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 12px;
+}
+.chat-activity-ts {
+  color: var(--cw-muted);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 10px;
+}
+.chat-activity-text {
+  color: var(--cw-text);
+}
+.chat-activity li.stage .chat-activity-text {
+  font-weight: 600;
+}
+.chat-activity li.tool .chat-activity-text,
+.chat-activity li.synthesis .chat-activity-text {
+  color: var(--cw-accent);
+}
+@keyframes chat-live-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(15,154,169,0.4); }
+  70% { box-shadow: 0 0 0 8px rgba(15,154,169,0); }
+  100% { box-shadow: 0 0 0 0 rgba(15,154,169,0); }
 }
 .chat-subtask-head {
   display: flex;

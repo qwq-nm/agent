@@ -68,12 +68,30 @@ export async function listConversations(): Promise<ConversationSummary[]> {
 
 export async function createConversation(
   title?: string,
+  preferredModel?: string | null,
 ): Promise<ConversationSummary> {
+  const body: Record<string, unknown> = {}
+  if (title) body.title = title
+  if (preferredModel) body.settings = { preferred_model: preferredModel }
   return apiRequest<ConversationSummary>('/api/conversations', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(title ? { title } : {}),
+    body: JSON.stringify(body),
   })
+}
+
+export async function patchConversation(
+  conversationId: string,
+  settings: { preferred_model?: string | null },
+): Promise<ConversationSummary> {
+  return apiRequest<ConversationSummary>(
+    `/api/conversations/${encodeURIComponent(conversationId)}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ settings }),
+    },
+  )
 }
 
 export async function getConversation(

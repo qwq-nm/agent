@@ -34,7 +34,7 @@ from secagent.db_models import (
     ToolCallRow,
     UserRow,
 )
-from secagent.domain import TaskCreate, UserRole
+from secagent.domain import RiskLevel, TaskCreate, ToolResult, UserRole
 from secagent.agents.executor import DemoEvidenceTool
 from secagent.repositories.dag_repository import DagRepository
 from secagent.repository import TaskRepository
@@ -44,6 +44,7 @@ from secagent.services.assignment_policy import (
 )
 from secagent.conversation_decomposition import RouteReasonCode
 from secagent.services.subtask_runner import execute_subtask_job
+from secagent.tools.base import BaseTool, ToolContext
 from secagent.tools.http_request import HttpRequest
 from secagent.tools.registry import ToolRegistry
 from secagent.security.url_guard import UrlGuard
@@ -51,6 +52,30 @@ from secagent.security.url_guard import UrlGuard
 
 def _actor(name: str, role: UserRole = UserRole.ANALYST) -> AuthenticatedUser:
     return AuthenticatedUser(id=str(uuid4()), username=name, role=role)
+
+
+class _MediumProbe(BaseTool):
+    """Deterministic MEDIUM-risk tool so approval tests need no network."""
+
+    name = "medium_probe"
+    scene = "web_analysis"
+    risk_level = RiskLevel.MEDIUM
+    idempotent = True
+
+    async def run(self, params: dict, context: ToolContext) -> ToolResult:
+        del params, context
+        return ToolResult(
+            success=True,
+            summary="probe ok",
+            evidence=[
+                {
+                    "evidence_type": "observation",
+                    "source": "probe",
+                    "content": "ok",
+                    "confidence": 1.0,
+                }
+            ],
+        )
 
 
 @pytest.fixture
@@ -80,6 +105,8 @@ def runner_env(tmp_path):
         data_dir=tmp_path / "data",
         model_mode="mock",
         jwt_signing_key="test-signing-key-at-least-32-bytes",
+        auto_approve_tools=False,
+        auto_resolve_model_failures=False,
     )
     yield factory, actor, registry, settings
     engine.dispose()
@@ -302,8 +329,9 @@ def test_transport_failure_records_model_failure_and_waits(runner_env) -> None:
 
 def test_medium_tool_request_pauses_for_approval(runner_env) -> None:
     factory, actor, registry, settings = runner_env
+    registry.register(_MediumProbe())
     subtask_id, command_id = _make_subtask(
-        factory, actor, allowed_tools=["http_fetch"], safety_mode="conservative"
+        factory, actor, allowed_tools=["medium_probe"], safety_mode="conservative"
     )
 
     _run(factory, registry, settings, subtask_id, command_id)

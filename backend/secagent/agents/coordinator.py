@@ -249,6 +249,7 @@ class CoordinatorAgent:
             available_providers=self.router.logical_assignment_providers(),
             registered_tools=registered,
             authorized_tools=authorized,
+            preferred_provider=getattr(context.settings, "preferred_model", None),
         )
         return CoordinatorResult(
             document=document,

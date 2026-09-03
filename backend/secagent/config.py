@@ -31,18 +31,30 @@ class Settings(BaseSettings):
     archive_max_files: int = 200
     archive_max_bytes: int = 50 * 1024 * 1024
     web_allowed_hosts: str = "web-demo"
-    max_steps_per_task: int = 20
-    max_replans: int = 2
-    task_timeout_seconds: int = 1800
+    max_steps_per_task: int = 40
+    max_replans: int = 4
+    task_timeout_seconds: int = 3600
     max_parallel_subtasks_per_conversation: int = 3
-    max_subtasks_per_turn: int = 12
-    max_model_calls_per_subtask: int = 4
-    max_tool_calls_per_subtask: int = 6
-    subtask_timeout_seconds: int = 180
-    max_replans_per_turn: int = 2
+    max_subtasks_per_turn: int = 16
+    max_model_calls_per_subtask: int = 6
+    max_tool_calls_per_subtask: int = 8
+    subtask_timeout_seconds: int = 300
+    max_replans_per_turn: int = 4
     max_conversation_context_tokens: int = 32_000
     max_attachments_per_message: int = 20
     max_attachment_total_bytes: int = 209_715_200
+    #: Autonomous web/CTF analysis: tools that would otherwise wait for the
+    #: operator are executed directly, and model failures are auto-resolved, so
+    #: the analysis runs to a result instead of stalling behind approvals.
+    #: Default off; enable via AUTO_APPROVE_TOOLS / AUTO_RESOLVE_MODEL_FAILURES.
+    auto_approve_tools: bool = False
+    auto_resolve_model_failures: bool = False
+    #: Keep analysing a turn until the synthesis is complete (no unresolved
+    #: items). When a partial result has dangling next steps, the turn auto-
+    #: replans a continuation, up to ``max_auto_continues`` rounds (a safety cap
+    #: so it degrades to a partial result rather than looping across all budget).
+    auto_continue_on_partial: bool = False
+    max_auto_continues: int = 15
 
     deepseek_api_key: str | None = None
     deepseek_api_key_file: Path | None = None

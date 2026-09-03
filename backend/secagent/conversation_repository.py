@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, TypeVar
 
@@ -129,7 +130,20 @@ class ConversationRepository:
             if "title" in payload.model_fields_set:
                 row.title = payload.title
             if "settings" in payload.model_fields_set:
-                row.settings_json = canonical_json_dumps(payload.settings)
+                # Merge the provided settings onto the current ones so a partial
+                # PATCH (e.g. preferred_model) never clobbers other settings.
+                current: dict[str, object] = {}
+                if row.settings_json:
+                    try:
+                        decoded = json.loads(row.settings_json)
+                        if isinstance(decoded, dict):
+                            current = decoded
+                    except (TypeError, ValueError):
+                        current = {}
+                provider = payload.settings.model_dump(mode="json")
+                for field in payload.settings.model_fields_set:
+                    current[field] = provider[field]
+                row.settings_json = canonical_json_dumps(current)
             self.session.flush()
             return self._conversation_read(row)
 

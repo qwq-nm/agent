@@ -24,6 +24,8 @@ class HttpRequest(BaseTool):
     # Keep the existing tool route stable while the implementation gains write support.
     name = "http_fetch"
     scene = "web_analysis"
+    # Kept MEDIUM (active outbound request) by default; in autonomous mode the
+    # ToolGateway auto-approves it so web/CTF analysis runs to a result.
     risk_level = RiskLevel.MEDIUM
     idempotent = False
 
