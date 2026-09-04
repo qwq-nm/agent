@@ -49,6 +49,7 @@ from secagent.db_models import (
     JobRunRow,
     MessageAttachmentRow,
     SubtaskRow,
+    TaskRow,
     UserRow,
 )
 from secagent.domain import ModelStage, UserRole
@@ -61,6 +62,7 @@ from secagent.services.assignment_policy import AssignmentPolicy
 from secagent.services.chitchat import quick_chitchat_reply
 from secagent.services.job_service import JobLease, JobService
 from secagent.services.ledger import LedgerService
+from secagent.services.runtime_memory import build_conversation_memory
 from secagent.services.tool_authorization import derive_authorized_tools
 from secagent.tools.registry import ToolRegistry
 
@@ -72,6 +74,28 @@ _DAG_JOB_KINDS = {
     JobKind.SUBTASK_EXECUTE.value,
     JobKind.TURN_SYNTHESIZE.value,
 }
+
+#: Discovery tools injected into a web/CTF subtask whose decomposition forgot
+#: to assign any tool. Guarantees the solver can at least fetch and explore the
+#: authorized target instead of stalling on an empty ``allowed_tools``.
+_WEB_DISCOVERY_TOOLS = (
+    "url_guard",
+    "http_fetch",
+    "header_check",
+    "form_extract",
+    "link_extract",
+    "browser_snapshot",
+    "dirsearch_scan",
+    "robots_analyzer",
+    "js_analyzer",
+    "path_normalizer",
+    "flag_pattern_detector",
+    "cookie_analyzer",
+    "sensitive_file_checker",
+    "login_probe",
+    "sqlmap_probe",
+    "submit_flag",
+)
 
 
 def build_decomposition_context(
@@ -155,6 +179,9 @@ def build_decomposition_context(
         evidence=_completed_evidence(session, turn),
         unresolved_questions=[],
         available_tools=available_tools,
+        runtime_memory=build_conversation_memory(
+            session, conversation_id=conversation.id
+        ),
         budget=TurnBudgetSnapshot.model_validate_json(turn.budget_json),
     )
 
@@ -390,6 +417,25 @@ class TurnOrchestratorService:
                 result.model_response,
                 turn_id=turn_id,
             )
+            # Direction A: a web/CTF task is solved by ONE end-to-end solver
+            # subtask, not a graph of narrow subtasks. Collapse any multi-subtask
+            # decomposition to just the first subtask, then union the full
+            # discovery toolset onto it so the solver can act freely.
+            task_row = session.get(TaskRow, task_id) if task_id else None
+            if task_row is not None and task_row.target_url:
+                if len(result.document.subtasks) > 1:
+                    keep = result.document.subtasks[0]
+                    result.document.subtasks = [keep]
+                    result.assignments = [
+                        item for item in result.assignments if item.key == keep.key
+                    ]
+                discovery = [name for name in _WEB_DISCOVERY_TOOLS if name in registered]
+                for decision in result.assignments:
+                    merged = list(decision.allowed_tools)
+                    for name in discovery:
+                        if name not in merged:
+                            merged.append(name)
+                    decision.allowed_tools = merged
             subtasks = dag.create_subtasks_from_document(
                 turn_id, result.document, result.assignments
             )

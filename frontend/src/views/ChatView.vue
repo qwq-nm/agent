@@ -18,6 +18,13 @@ import {
   useConversationEvents,
   type ConversationStreamEvent,
 } from '../composables/useConversationEvents'
+import { toolCapabilityLabel, toolNameLabel } from '../labels'
+
+interface SubtaskToolView {
+  toolName: string
+  success: boolean
+  summary: string
+}
 
 interface SubtaskView {
   subtaskId: string
@@ -25,6 +32,9 @@ interface SubtaskView {
   provider: string
   status: string
   reason: string
+  objective: string
+  allowedTools: string[]
+  tools: SubtaskToolView[]
 }
 
 interface ApprovalView {
@@ -63,6 +73,7 @@ const lastEventId = ref(0)
 const preferredModel = ref<
   'auto' | 'deepseek' | 'deepseek-v4-flash' | 'deepseek-v4-pro' | 'deepseek-vl' | 'glm' | 'glm-5.2' | 'glm-5.3'
 >('auto')
+const safetyMode = ref<'conservative' | 'standard' | 'expert'>('conservative')
 
 const subtasks = ref<Map<string, SubtaskView>>(new Map())
 const approvals = ref<ApprovalView[]>([])
@@ -71,6 +82,7 @@ const failures = ref<FailureView[]>([])
 // 实时“运作/思考过程”：阶段 + 事件流（不展示隐藏推理链，只展示阶段/子任务/工具/汇总）
 const turnStage = ref<string>('idle')
 const activity = ref<ActivityEntry[]>([])
+const streamingAnswer = ref('')
 let activitySeq = 0
 
 function pushActivity(text: string, tone: ActivityEntry['tone'] = 'info'): void {
@@ -146,6 +158,7 @@ const pendingFailures = computed(() =>
 )
 
 const messageList = ref<HTMLElement | null>(null)
+const traceList = ref<HTMLElement | null>(null)
 
 async function loadConversations(): Promise<void> {
   try {
@@ -161,6 +174,7 @@ function resetLiveState(): void {
   failures.value = []
   turnStage.value = 'idle'
   activity.value = []
+  streamingAnswer.value = ''
   activitySeq = 0
   lastEventId.value = 0
 }
@@ -190,6 +204,11 @@ function onStreamEvent(event: ConversationStreamEvent): void {
       provider: String(payload.assigned_provider ?? ''),
       status: 'pending_dependency',
       reason: String(payload.route_reason ?? ''),
+      objective: String(payload.objective ?? ''),
+      allowedTools: Array.isArray(payload.allowed_tools)
+        ? payload.allowed_tools.map(String)
+        : [],
+      tools: [],
     })
   } else if (event.type.startsWith('subtask.') && payload.subtask_id) {
     const existing = subtasks.value.get(String(payload.subtask_id))
@@ -213,7 +232,20 @@ function onStreamEvent(event: ConversationStreamEvent): void {
         if (turnStage.value === 'scheduling') turnStage.value = 'running'
         pushActivity(`子任务「${existing.key}」开始执行（${existing.provider}）`, 'subtask')
       } else if (event.type === 'subtask.tool.requested') {
-        pushActivity(`子任务「${existing.key}」调用工具 ${String(payload.tool_name ?? '')}`, 'tool')
+        const toolName = String(payload.tool_name ?? '')
+        const detail = formatParams(payload.params)
+        pushActivity(`「${existing.key}」调用 ${toolNameLabel(toolName)}${detail ? `\n  · ${detail}` : ''}`, 'tool')
+      } else if (event.type === 'subtask.tool.completed') {
+        const toolName = String(payload.tool_name ?? '')
+        const ok = payload.success !== false
+        const summary = String(payload.summary ?? '')
+        existing.tools.push({ toolName, success: ok, summary })
+        const outputs = (Array.isArray(payload.evidence) ? payload.evidence : [])
+          .map((e) => (e && typeof e === 'object' ? String((e as Record<string, unknown>).content ?? '') : ''))
+          .map((s) => s.trim())
+          .filter(Boolean)
+        const resultText = `  ↳ ${ok ? '✓' : '✗'} ${summary}` + (outputs.length ? `\n  · ${outputs.join('\n  · ')}` : '')
+        pushActivity(resultText, 'tool')
       } else if (event.type === 'subtask.tool.rejected') {
         pushActivity(`子任务「${existing.key}」工具被拒绝：${String(payload.reason ?? '')}`, 'tool')
       } else if (event.type === 'subtask.waiting_approval') {
@@ -255,6 +287,7 @@ function onStreamEvent(event: ConversationStreamEvent): void {
     pushActivity('收到追问，重新规划本轮', 'stage')
   } else if (event.type === 'turn.synthesis.started') {
     turnStage.value = 'synthesizing'
+    streamingAnswer.value = ''
     pushActivity('正在汇总最终结论（DeepSeek）…', 'stage')
   } else if (event.type === 'turn.cancelled') {
     turnStage.value = 'cancelled'
@@ -263,13 +296,17 @@ function onStreamEvent(event: ConversationStreamEvent): void {
     turnStage.value = 'completed'
     pushActivity('本轮已完成', 'stage')
     void refreshDetail()
+  } else if (event.type === 'assistant.answer.delta') {
+    const text = String(payload.text ?? '')
+    if (text) streamingAnswer.value += text
   } else if (event.type === 'assistant.answer.completed') {
     turnStage.value = 'completed'
+    streamingAnswer.value = ''
     pushActivity('答案生成完毕，本轮结束', 'synthesis')
     void refreshDetail()
   }
   void nextTick(() => {
-    messageList.value?.scrollTo({ top: messageList.value.scrollHeight })
+    traceList.value?.scrollTo({ top: traceList.value.scrollHeight })
   })
 }
 
@@ -307,13 +344,14 @@ async function send(): Promise<void> {
   try {
     let id = conversationId.value
     const model = preferredModel.value === 'auto' ? null : preferredModel.value
+    const mode = safetyMode.value
     if (!id) {
-      const created = await createConversation(undefined, model)
+      const created = await createConversation(undefined, model, mode)
       id = created.id
       await loadConversations()
     } else {
       try {
-        await patchConversation(id, { preferred_model: model })
+        await patchConversation(id, { preferred_model: model, safety_mode: mode })
       } catch {
         // 运行中或瞬时失败时忽略，不阻塞发送
       }
@@ -330,9 +368,8 @@ async function send(): Promise<void> {
       detail.value = await getConversation(id)
     }
     void result
-    if (!stream.value) {
-      stream.value = useConversationEvents(id, lastEventId.value, onStreamEvent)
-    }
+    // 事件流统一由 loadConversation（路由变化触发）订阅；这里再订阅会在
+    // 新对话场景下产生第二个流，导致每条执行记录重复显示两遍。
   } catch (cause) {
     errorText.value = cause instanceof Error ? cause.message : String(cause)
   } finally {
@@ -392,6 +429,34 @@ const statusLabels: Record<string, string> = {
   failed: '失败',
   cancelled: '已取消',
 }
+
+function truncate(text: string, n: number): string {
+  return text.length > n ? `${text.slice(0, n)}…` : text
+}
+
+function subtaskTooltip(subtask: SubtaskView): string {
+  const lines = [subtask.objective || subtask.key]
+  if (subtask.allowedTools.length) {
+    lines.push('可用工具：' + subtask.allowedTools.map(toolNameLabel).join('、'))
+  }
+  for (const tool of subtask.tools) {
+    lines.push(`${tool.success ? '✓' : '✗'} ${toolNameLabel(tool.toolName)}：${tool.summary}`)
+  }
+  return lines.join('\n')
+}
+
+function formatParams(params: unknown): string {
+  if (!params || typeof params !== 'object') return ''
+  const p = params as Record<string, unknown>
+  if (typeof p.command === 'string' && p.command) return `命令: ${p.command}`
+  const parts: string[] = []
+  if (typeof p.url === 'string' && p.url) parts.push(`url: ${p.url}`)
+  if (typeof p.method === 'string' && p.method) parts.push(`method: ${p.method}`)
+  if (typeof p.path === 'string' && p.path) parts.push(`path: ${p.path}`)
+  if (p.headers && typeof p.headers === 'object') parts.push(`headers: ${JSON.stringify(p.headers)}`)
+  if (parts.length) return parts.join(' · ')
+  return JSON.stringify(p)
+}
 </script>
 
 <template>
@@ -445,6 +510,14 @@ const statusLabels: Record<string, string> = {
             演示结果 · 事实均引用证据，推断已单独标注
           </p>
         </article>
+        <article v-if="isWorking && !streamingAnswer" class="chat-message assistant chat-thinking">
+          <header>助手</header>
+          <p class="chat-message-content chat-thinking-text">正在思考 / 执行中…</p>
+        </article>
+        <article v-if="streamingAnswer" class="chat-message assistant">
+          <header>助手</header>
+          <p class="chat-message-content">{{ streamingAnswer }}</p>
+        </article>
         <div v-for="approval in pendingApprovals" :key="approval.approvalId" class="chat-card">
           <strong>工具审批</strong>
           <p>子任务 {{ approval.subtaskKey }} 申请调用 {{ approval.toolName }}</p>
@@ -487,9 +560,15 @@ const statusLabels: Record<string, string> = {
               <option value="glm-5.3">GLM 5.3</option>
             </optgroup>
           </select>
+          <select v-model="safetyMode" class="chat-model-select" aria-label="选择安全模式">
+            <option value="conservative">保守模式</option>
+            <option value="standard">标准模式</option>
+            <option value="expert">专家模式</option>
+          </select>
           <button
+            v-if="isWorking"
             type="button"
-            :disabled="!conversationId || stopping"
+            :disabled="stopping"
             @click="stopTurn"
           >
             停止
@@ -508,8 +587,12 @@ const statusLabels: Record<string, string> = {
         <small>{{ isWorking ? 'Agent 正在思考/执行…' : '待机' }}</small>
       </div>
 
-      <div v-if="activity.length" class="chat-activity">
-        <h3>运作过程</h3>
+      <div v-if="activity.length" ref="traceList" class="chat-activity chat-live-trace">
+        <h3>
+          <span class="chat-live-dot" :class="{ working: isWorking }"></span>
+          {{ stageLabels[turnStage] ?? turnStage }}
+          <small class="chat-live-trace-note">{{ isWorking ? '执行中…' : '本轮执行轨迹' }}</small>
+        </h3>
         <ol>
           <li v-for="item in activity" :key="item.id" :class="item.tone">
             <span class="chat-activity-ts">{{ item.ts }}</span>
@@ -518,19 +601,31 @@ const statusLabels: Record<string, string> = {
         </ol>
       </div>
 
-      <h2>任务图</h2>
-      <p v-if="subtaskList.length === 0" class="chat-empty-hint">
-        发送消息后，这里会实时展示子任务 DAG、模型分工与状态。
-      </p>
-      <ul>
-        <li v-for="subtask in subtaskList" :key="subtask.subtaskId">
-          <div class="chat-subtask-head">
-            <strong>{{ subtask.key }}</strong>
-            <span class="chat-provider" :class="subtask.provider">{{ subtask.provider }}</span>
-          </div>
-          <span class="chat-status">{{ statusLabels[subtask.status] ?? subtask.status }}</span>
-        </li>
-      </ul>
+      <div class="chat-task-graph">
+        <h2>任务图</h2>
+        <p v-if="subtaskList.length === 0" class="chat-empty-hint">
+          发送消息后，这里会实时展示子任务 DAG、模型分工与状态。
+        </p>
+        <ul>
+          <li v-for="subtask in subtaskList" :key="subtask.subtaskId" :title="subtaskTooltip(subtask)">
+            <div class="chat-subtask-head">
+              <strong>{{ subtask.key }}</strong>
+              <span class="chat-provider" :class="subtask.provider">{{ subtask.provider }}</span>
+            </div>
+            <span class="chat-status">{{ statusLabels[subtask.status] ?? subtask.status }}</span>
+            <p v-if="subtask.objective" class="chat-subtask-objective">{{ truncate(subtask.objective, 80) }}</p>
+            <p v-if="subtask.allowedTools.length" class="chat-subtask-objective">
+              工具：{{ truncate(subtask.allowedTools.map(toolNameLabel).join('、'), 70) }}
+            </p>
+            <ul v-if="subtask.tools.length" class="chat-subtask-tools">
+              <li v-for="tool in subtask.tools" :key="tool.toolName + tool.summary">
+                <span class="chat-tool-mark" :class="{ ok: tool.success }">{{ tool.success ? '✓' : '✗' }}</span>
+                {{ toolNameLabel(tool.toolName) }}
+              </li>
+            </ul>
+          </li>
+        </ul>
+      </div>
     </aside>
   </div>
 </template>
@@ -642,6 +737,12 @@ const statusLabels: Record<string, string> = {
   background: var(--cw-panel);
   color: var(--cw-text);
 }
+.chat-task-tree {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+}
 .chat-brand {
   font-weight: 700;
   margin-bottom: 12px;
@@ -695,7 +796,7 @@ const statusLabels: Record<string, string> = {
 .chat-messages {
   flex: 1;
   overflow-y: auto;
-  padding: 12px;
+  padding: 12px 12px 0;
 }
 .chat-message {
   margin-bottom: 10px;
@@ -703,6 +804,18 @@ const statusLabels: Record<string, string> = {
   border-radius: 8px;
   background: var(--cw-panel);
   border: 1px solid var(--cw-border);
+}
+.chat-thinking {
+  opacity: 0.85;
+}
+.chat-thinking-text {
+  color: var(--cw-muted);
+  font-style: italic;
+  animation: chat-thinking-pulse 1.4s ease-in-out infinite;
+}
+@keyframes chat-thinking-pulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
 }
 .chat-message header {
   color: var(--cw-muted);
@@ -888,6 +1001,8 @@ const statusLabels: Record<string, string> = {
 }
 .chat-activity-text {
   color: var(--cw-text);
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 .chat-activity li.stage .chat-activity-text {
   font-weight: 600;
@@ -895,6 +1010,50 @@ const statusLabels: Record<string, string> = {
 .chat-activity li.tool .chat-activity-text,
 .chat-activity li.synthesis .chat-activity-text {
   color: var(--cw-accent);
+}
+.chat-live-trace {
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  background: var(--cw-chat);
+  max-height: none;
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+.chat-task-graph {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--cw-border);
+}
+.chat-live-trace h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--cw-text);
+  text-transform: none;
+  letter-spacing: 0;
+}
+.chat-live-trace .chat-live-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--cw-muted);
+  flex: 0 0 auto;
+}
+.chat-live-trace .chat-live-dot.working {
+  background: var(--cw-accent);
+  animation: chat-live-pulse 1.1s ease-in-out infinite;
+}
+.chat-live-trace-note {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--cw-muted);
+  font-weight: 400;
 }
 @keyframes chat-live-pulse {
   0% { box-shadow: 0 0 0 0 rgba(15,154,169,0.4); }
@@ -920,6 +1079,34 @@ const statusLabels: Record<string, string> = {
 .chat-status {
   font-size: 12px;
   color: var(--cw-muted);
+}
+.chat-subtask-objective {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--cw-muted);
+  line-height: 1.5;
+  word-break: break-word;
+}
+.chat-subtask-tools {
+  list-style: none;
+  padding: 0;
+  margin: 6px 0 0;
+  display: grid;
+  gap: 2px;
+}
+.chat-subtask-tools li {
+  border: none;
+  padding: 0;
+  margin: 0;
+  font-size: 12px;
+  color: var(--cw-text);
+}
+.chat-tool-mark {
+  color: #d4507c;
+  font-weight: 700;
+}
+.chat-tool-mark.ok {
+  color: #2ba471;
 }
 @media (max-width: 900px) {
   .chat-workspace {

@@ -91,13 +91,13 @@ class _LoginFormParser(HTMLParser):
 class LoginProbe(BaseTool):
     name = "login_probe"
     scene = "web_analysis"
-    risk_level = RiskLevel.HIGH
+    risk_level = RiskLevel.MEDIUM
     idempotent = False
     requires_human_confirm = True
     timeout_seconds = 180.0
     description = (
         "对授权登录页面进行小规模弱口令和万能密码探测；"
-        "该动作会提交登录表单，必须经过人工确认。"
+        "该动作会提交登录表单，是否执行由系统安全策略决定。"
     )
     input_schema = {
         "type": "object",

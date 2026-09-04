@@ -23,8 +23,20 @@ from secagent.providers.validation import (
     validate_output,
 )
 
-MAX_OUTPUT_TOKEN_RETRY_LIMIT = 8192
+MAX_OUTPUT_TOKEN_RETRY_LIMIT = 128_000
 DEEPSEEK_V4_FLASH_MODEL = "deepseek-v4-flash"
+
+#: Errors worth a bounded retry before surfacing a failure. Transport errors
+#: (timeout/network/rate_limit/server) are already retried by the HTTP client,
+#: so they are excluded here. ``empty_content`` and schema mismatches are
+#: transient model hiccups that frequently succeed on a fresh attempt.
+_TRANSIENT_RETRY_CODES = frozenset(
+    {
+        ProviderErrorCode.EMPTY_CONTENT,
+        ProviderErrorCode.INVALID_SCHEMA,
+        ProviderErrorCode.INVALID_JSON,
+    }
+)
 
 
 class _StructuredProvider:
@@ -57,6 +69,7 @@ class _StructuredProvider:
         self.stage_effort_overrides = stage_effort_overrides or {}
         self.stage_thinking_overrides = stage_thinking_overrides or {}
         self.client = client
+        self.sleep = sleep
         self.transport = ProviderHTTPClient(
             provider=self.name,
             client=client,
@@ -71,6 +84,21 @@ class _StructuredProvider:
                 self.name, ProviderErrorCode.INVALID_SCHEMA, False
             )
         started = time.perf_counter()
+        last_exc: ProviderUnavailable | None = None
+        for attempt in range(3):
+            try:
+                return await self._complete_once(request, started)
+            except ProviderUnavailable as exc:
+                if exc.code not in _TRANSIENT_RETRY_CODES:
+                    raise
+                last_exc = exc
+                await self.sleep(min(1.0 * (2 ** attempt), 4.0))
+        assert last_exc is not None
+        raise last_exc
+
+    async def _complete_once(
+        self, request: ModelRequest, started: float
+    ) -> ModelResponse:
         (
             content,
             finish_reason,
@@ -186,7 +214,9 @@ class _StructuredProvider:
                     "role": "system",
                     "content": (
                         f"{request.system}\nReturn only a JSON object matching this "
-                        f"schema: {schema}\nExample JSON: {{\"result\":{{}}}}"
+                        f"schema. Do not wrap the output in markdown fences or add "
+                        f"explanatory text; do not add fields outside the schema.\n"
+                        f"Schema:\n{schema}"
                     ),
                 },
                 {"role": "user", "content": request.user},
@@ -301,9 +331,13 @@ class DeepSeekProvider(_StructuredProvider):
     max_tokens = {
         ModelStage.PLAN: 4096,
         ModelStage.CRITIC: 4096,
-        ModelStage.DECOMPOSE: 4096,
-        ModelStage.SUBTASK_EXECUTE: 4096,
-        ModelStage.SYNTHESIZE: 8192,
+        ModelStage.DECOMPOSE: 8192,
+        # Solver and final answer run with deep thinking enabled, which spends
+        # tokens on the reasoning trace before the JSON/text output. Give them
+        # the full output budget (mirroring the reference CTF agent) so the
+        # tool_request / subtask_result is never truncated by the reasoning.
+        ModelStage.SUBTASK_EXECUTE: 128_000,
+        ModelStage.SYNTHESIZE: 128_000,
     }
     #: Default stage-level reasoning-effort overrides (opencode-go style only).
     #: Decomposition is the measured latency hotspot (100-140 s at "high");

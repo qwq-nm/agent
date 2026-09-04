@@ -23,6 +23,27 @@ from secagent.tools.base import ToolContext
 from secagent.tools.registry import ToolRegistry
 
 
+def _bounded_params(params: dict[str, Any]) -> dict[str, Any]:
+    """Redacted, bounded tool params for a trace event payload."""
+    safe = redact_mapping(params)
+    if not isinstance(safe, dict):
+        return {}
+    bounded: dict[str, Any] = {}
+    for key, value in safe.items():
+        if isinstance(value, str):
+            bounded[key] = value[:400]
+        elif isinstance(value, dict):
+            bounded[key] = {
+                str(k)[:60]: (str(v)[:120] if isinstance(v, str) else v)
+                for k, v in list(value.items())[:10]
+            }
+        elif isinstance(value, list):
+            bounded[key] = [str(v)[:120] for v in value[:10]]
+        else:
+            bounded[key] = value
+    return bounded
+
+
 @dataclass(frozen=True)
 class ToolRequestOutcome:
     status: Literal["executed", "wait", "rejected"]
@@ -78,6 +99,7 @@ class ToolGateway:
                 "subtask_id": self.subtask_id,
                 "key": subtask_key,
                 "tool_name": redact_text(str(tool_name)),
+                "params": _bounded_params(params),
             },
         )
 
@@ -151,6 +173,7 @@ class ToolGateway:
         tool_scene: str,
         params: dict[str, Any],
     ) -> ToolResult:
+        params = self._with_target_url(tool_name, params)
         context = ToolContext(self.task_id, tool_scene, self.workspace)
         try:
             result: ToolResult = await self.registry.execute(
@@ -163,7 +186,52 @@ class ToolGateway:
                 error=f"{type(exc).__name__}: {exc}"[:500],
             )
         self._record(subtask_key, tool_name, params, result)
+        self.dag.record_subtask_event(
+            self.subtask_id,
+            "subtask.tool.completed",
+            {
+                "subtask_id": self.subtask_id,
+                "key": subtask_key,
+                "tool_name": tool_name,
+                "success": result.success,
+                "summary": (result.summary or "")[:400],
+                "error": result.error,
+                "findings": result.findings[:10],
+                "evidence": [
+                    {"content": str(item.get("content", ""))[:800]}
+                    for item in result.evidence[:2]
+                ],
+            },
+        )
         return result
+
+    def _with_target_url(
+        self, tool_name: str, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Backfill the authorized target URL for URL-addressed tools.
+
+        The subtask model occasionally requests a URL tool without the ``url``
+        parameter (e.g. ``dirsearch_scan``), which makes the tool fail with
+        "url is required". When the parameter is missing and the tool is a
+        URL-addressed one, fall back to the task's authorized target URL so a
+        forgotten parameter does not waste a tool budget slot.
+        """
+        if params.get("url"):
+            return params
+        if tool_name not in {
+            "url_guard",
+            "http_fetch",
+            "browser_snapshot",
+            "dirsearch_scan",
+            "login_probe",
+            "sqlmap_probe",
+        }:
+            return params
+        task = self.task_repository.get_task(self.task_id)
+        target_url = getattr(task, "target_url", None) if task is not None else None
+        if target_url:
+            return {**params, "url": target_url}
+        return params
 
     def _record(
         self,

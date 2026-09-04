@@ -28,6 +28,30 @@ class HttpRequest(BaseTool):
     # ToolGateway auto-approves it so web/CTF analysis runs to a result.
     risk_level = RiskLevel.MEDIUM
     idempotent = False
+    description = (
+        "对授权目标发起一次 HTTP 请求，返回状态码、响应头和正文预览。"
+        "支持自定义请求头（headers）、请求方法（method）、查询参数（query）和"
+        "请求体（body）。用于按题目要求构造带特殊请求头（如 User-Agent、Cookie、"
+        "Referer）的请求，例如解 HTTP 请求头类 CTF 题。"
+    )
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string", "description": "目标 URL"},
+            "method": {
+                "type": "string",
+                "enum": ["GET", "POST", "HEAD", "OPTIONS"],
+                "description": "请求方法，默认 GET",
+            },
+            "headers": {
+                "type": "object",
+                "description": '自定义请求头，如 {"User-Agent": "CTF-Robot/1.0"}',
+            },
+            "query": {"type": "object", "description": "查询参数"},
+            "body": {"type": "string", "description": "请求体（POST 等）"},
+        },
+        "required": ["url"],
+    }
 
     def __init__(
         self,
@@ -121,6 +145,11 @@ class HttpRequest(BaseTool):
                     preview = redact_text(
                         content.decode(encoding, errors="replace"),
                         include_generic_key=True,
+                        # Keep "Cookie: ..." visible: page content often carries
+                        # challenge instructions (e.g. an HTTP-header maze) whose
+                        # cookie value is a clue, not a real credential. Real
+                        # Set-Cookie response headers are still redacted above.
+                        redact_cookie=False,
                     )
                     safe_url = redact_text(current, include_generic_key=True)
                     safe_headers = self._safe_response_headers(response.headers)

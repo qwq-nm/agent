@@ -101,6 +101,10 @@ const TOOL_LABELS: Record<string, string> = {
   flag_pattern_detector: 'Flag 模式识别',
   cookie_analyzer: 'Cookie 安全属性分析',
   sensitive_file_checker: '敏感文件线索检查',
+  sandbox_bash: '沙箱命令执行',
+  sandbox_read_file: '沙箱读取文件',
+  sandbox_write_file: '沙箱写入文件',
+  sandbox_list_files: '沙箱列出文件',
   report_generator: '报告生成',
 }
 
@@ -145,6 +149,10 @@ const TOOL_PURPOSES: Record<string, string> = {
   flag_pattern_detector: '在已获取的公开页面内容中识别疑似 Flag 或比赛题目常见标记。',
   cookie_analyzer: '分析 Set-Cookie 中的安全属性，判断是否缺少 HttpOnly、Secure、SameSite 等推荐配置。',
   sensitive_file_checker: '基于公开内容中的路径和文件名线索，识别备份文件、配置文件或敏感文件提示。',
+  sandbox_bash: '在任务工作目录内执行一条诊断命令（如 curl 授权目标、解析下载文件）；高风险动作必须人工确认，命令、输出、耗时全部写入证据账本。',
+  sandbox_read_file: '读取任务工作目录内的一个文件（限制大小），用于查看已下载的源码或中间产物。',
+  sandbox_write_file: '在任务工作目录内写入一个文件，用于保存脚本或中间产物；需人工确认。',
+  sandbox_list_files: '列出任务工作目录内的文件，用于了解已下载或生成的中间产物。',
   log_type_detector: '识别日志类型和基础格式，确定后续应该使用哪类日志分析策略。',
   log_analyzer: '解析日志字段、访问来源、状态码和异常请求，为攻击特征识别提供结构化输入。',
   attack_pattern_detector: '根据日志中的路径、参数、状态码和访问频率识别扫描、爆破或常见攻击模式。',

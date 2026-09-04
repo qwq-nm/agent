@@ -12,12 +12,50 @@ from pydantic import (
     ConfigDict,
     Field,
     StringConstraints,
+    TypeAdapter,
     field_validator,
     model_validator,
 )
 
 from secagent.conversation_decomposition import SubtaskKey
 from secagent.conversation_domain import CanonicalUUID
+
+_PROMISING_LEAD_KEYS = frozenset(
+    {
+        "links",
+        "forms",
+        "cookies",
+        "candidate_flags",
+        "paths",
+        "directories",
+        "errors",
+        "differences",
+        "new_urls",
+    }
+)
+_PROMISING_LEAD_TERMS = frozenset(
+    {
+        "form",
+        "login",
+        "register",
+        "set-cookie",
+        "cookie",
+        "session",
+        "phpsessid",
+        "flag",
+        "error",
+        "exception",
+        "traceback",
+        "sql",
+        "x-powered-by",
+        "robots",
+        "disallow",
+        "/admin",
+        "/login",
+        "/register",
+    }
+)
+_WEB_SCENES = frozenset({"ctf_web", "web_analysis"})
 
 
 class _StrictModel(BaseModel):
@@ -34,6 +72,45 @@ def _unique(values: list[str]) -> list[str]:
     if len(values) != len(set(values)):
         raise ValueError("values must be unique")
     return values
+
+
+def is_web_analysis_scene(scene: str | None, goal: str | None = None) -> bool:
+    text = (goal or "").lower()
+    return (scene or "") in _WEB_SCENES or any(
+        token in text
+        for token in ("ctf", "flag", "web题", "web 题", "nssctf", "靶场", "网站")
+    )
+
+
+def has_promising_leads(evidence_items: list[dict[str, object]]) -> bool:
+    """Return whether evidence contains a lead worth another planning pass."""
+    for item in evidence_items:
+        metadata = item.get("metadata")
+        if isinstance(metadata, dict):
+            for key in _PROMISING_LEAD_KEYS:
+                value = metadata.get(key)
+                if isinstance(value, (list, tuple, set, dict)) and len(value) > 0:
+                    return True
+                if isinstance(value, str) and value.strip():
+                    return True
+        content = str(item.get("content") or item.get("summary") or "").lower()
+        if any(term in content for term in _PROMISING_LEAD_TERMS):
+            return True
+    return False
+
+
+def should_continue_planning(
+    *,
+    scene: str | None,
+    goal: str | None,
+    incomplete_required_count: int,
+    evidence_items: list[dict[str, object]],
+) -> bool:
+    return (
+        incomplete_required_count > 0
+        and is_web_analysis_scene(scene, goal)
+        and has_promising_leads(evidence_items)
+    )
 
 
 class JobKind(StrEnum):
@@ -145,6 +222,22 @@ class SubtaskResultDocument(_StrictModel):
     @classmethod
     def require_unique_notes(cls, value: list[str]) -> list[str]:
         return _unique(value)
+
+
+class ToolRequestDocument(_StrictModel):
+    """Worker request contract for one whitelisted tool call."""
+
+    status: Literal["tool_request"]
+    tool_name: Annotated[str, StringConstraints(strict=True, min_length=1, max_length=120), AfterValidator(_non_whitespace)]
+    params: dict[str, object] = Field(default_factory=dict)
+    reason: Annotated[str, StringConstraints(strict=True, min_length=1, max_length=1_000), AfterValidator(_non_whitespace)]
+    expected_evidence: Annotated[str, StringConstraints(strict=True, min_length=1, max_length=1_000), AfterValidator(_non_whitespace)]
+
+
+WorkerResponseDocument = Annotated[
+    ToolRequestDocument | SubtaskResultDocument, Field(discriminator="status")
+]
+WORKER_RESPONSE_ADAPTER = TypeAdapter(WorkerResponseDocument)
 
 
 class SynthesisDocument(_StrictModel):
@@ -279,5 +372,11 @@ __all__ = [
     "SubtaskStatus",
     "SubtaskTransitionError",
     "TERMINAL_SUBTASK_STATUSES",
+    "ToolRequestDocument",
+    "WORKER_RESPONSE_ADAPTER",
+    "WorkerResponseDocument",
     "dag_command_id",
+    "has_promising_leads",
+    "is_web_analysis_scene",
+    "should_continue_planning",
 ]

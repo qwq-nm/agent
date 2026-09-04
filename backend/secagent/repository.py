@@ -1473,8 +1473,52 @@ class TaskRepository:
     def add_evidence(self, *, lease: Any | None = None, **values: Any) -> str:
         if lease is not None:
             self.require_job_fence(lease, values["task_id"])
-        row = EvidenceRow(**values)
-        self.session.add(row)
+        task_id = str(values["task_id"])
+        source = str(values["source"])
+        digest = values.get("sha256")
+        if digest is None:
+            row = EvidenceRow(**values)
+            self.session.add(row)
+            self.session.commit()
+            return row.id
+
+        dialect_name = self.session.get_bind().dialect.name
+        if dialect_name == "postgresql":
+            statement = postgresql_insert(EvidenceRow).values(**values)
+        elif dialect_name == "sqlite":
+            statement = sqlite_insert(EvidenceRow).values(**values)
+        else:
+            existing = self.session.scalar(
+                select(EvidenceRow)
+                .where(
+                    EvidenceRow.task_id == task_id,
+                    EvidenceRow.sha256 == digest,
+                    EvidenceRow.source == source,
+                )
+                .with_for_update()
+            )
+            if existing is None:
+                self.session.add(EvidenceRow(**values))
+                self.session.flush()
+        if dialect_name in {"postgresql", "sqlite"}:
+            self.session.execute(
+                statement.on_conflict_do_nothing(
+                    index_elements=["task_id", "sha256", "source"]
+                )
+            )
+
+        row = self.session.scalar(
+            select(EvidenceRow)
+            .where(
+                EvidenceRow.task_id == task_id,
+                EvidenceRow.sha256 == digest,
+                EvidenceRow.source == source,
+            )
+            .with_for_update()
+        )
+        if row is None:
+            self.session.rollback()
+            raise ValueError("evidence insert did not produce a row")
         self.session.commit()
         return row.id
 

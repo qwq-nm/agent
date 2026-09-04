@@ -36,8 +36,8 @@ class Settings(BaseSettings):
     task_timeout_seconds: int = 3600
     max_parallel_subtasks_per_conversation: int = 3
     max_subtasks_per_turn: int = 16
-    max_model_calls_per_subtask: int = 6
-    max_tool_calls_per_subtask: int = 8
+    max_model_calls_per_subtask: int = 500
+    max_tool_calls_per_subtask: int = 500
     subtask_timeout_seconds: int = 300
     max_replans_per_turn: int = 4
     max_conversation_context_tokens: int = 32_000
@@ -73,7 +73,7 @@ class Settings(BaseSettings):
     #: avoids the same 100+ second reasoning cost on the official endpoint;
     #: synthesis keeps thinking enabled for answer quality.
     deepseek_decompose_thinking: str = "disabled"
-    deepseek_subtask_thinking: str = "disabled"
+    deepseek_subtask_thinking: str = "enabled"
 
     glm_api_key: str | None = None
     glm_api_key_file: Path | None = None

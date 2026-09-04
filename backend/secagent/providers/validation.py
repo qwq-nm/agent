@@ -121,8 +121,9 @@ def _validate(
     if len(errors) >= MAX_REPAIR_ERRORS:
         return
     resolved = _resolve(rule, root)
-    if "anyOf" in resolved:
-        if not any(_is_valid(value, item, root) for item in resolved["anyOf"]):
+    union = resolved.get("anyOf") or resolved.get("oneOf")
+    if union is not None:
+        if not any(_is_valid(value, item, root) for item in union):
             errors.append(f"{path}: no allowed schema matched")
         return
     if "enum" in resolved and value not in resolved["enum"]:

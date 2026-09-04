@@ -3,20 +3,23 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from secagent.conversation_domain import ConversationSettings
 from secagent.dag_domain import (
+    ClaimDocument,
     ModelFailureCreate,
     ModelFailureStage,
     SubtaskResultDocument,
     SubtaskStatus,
+    ToolRequestDocument,
     dag_command_id,
 )
 from secagent.db_models import ConversationRow, ConversationTurnRow, SubtaskRow
@@ -28,18 +31,30 @@ from secagent.repository import TaskRepository
 from secagent.security.redaction import redact_mapping
 from secagent.services.ledger import LedgerService
 from secagent.services.job_service import JobLease, JobService
+from secagent.services.runtime_memory import build_conversation_memory
 from secagent.services.tool_gateway import ToolGateway
 from secagent.subtask_prompts import build_subtask_request
 from secagent.tools.registry import ToolRegistry
 
+#: Tools addressed by a single target URL where the URL is the only meaningful
+#: parameter, so duplicate detection keys on the URL alone. ``http_fetch`` is
+#: deliberately excluded: its method/headers/body change the request (e.g. an
+#: HTTP-header-maze challenge needs different User-Agent/Cookie/Referer), so it
+#: falls back to full-params dedup.
+_URL_ADDRESSED_TOOLS = frozenset(
+    {
+        "url_guard",
+        "browser_snapshot",
+        "dirsearch_scan",
+        "login_probe",
+        "sqlmap_probe",
+    }
+)
 
-class ToolRequestOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    status: str = Field(default="tool_request")
-    tool_name: str
-    params: dict[str, Any] = Field(default_factory=dict)
-    thought: str | None = None
+#: Cap the accumulated tool observations per subtask so the prompt stays within
+#: the model's context window. Approximate compaction: once past this many, the
+#: oldest observations are dropped (the most recent are the most relevant).
+_MAX_TOOL_OBSERVATIONS = 40
 
 
 async def execute_subtask_job(
@@ -242,8 +257,10 @@ class SubtaskRunner:
         )
         goal_summary = self._goal_summary(turn_id)
         tool_observations: list[dict[str, Any]] = []
+        tool_history: set[str] = set()
         model_calls_left = budget.max_model_calls_per_subtask
         tool_calls_left = budget.max_tool_calls_per_subtask
+        runtime_memory = self._conversation_memory(conversation.id)
 
         with self.session_factory() as session:
             dag = DagRepository(session)
@@ -256,6 +273,10 @@ class SubtaskRunner:
             session.commit()
 
         while model_calls_left > 0:
+            # Compaction: keep only the most recent observations so the prompt
+            # does not grow past the model's context window.
+            if len(tool_observations) > _MAX_TOOL_OBSERVATIONS:
+                tool_observations = tool_observations[-_MAX_TOOL_OBSERVATIONS:]
             if not self._lease_active(lease):
                 return "failed"
             if not self._turn_dispatchable(turn_id):
@@ -274,6 +295,7 @@ class SubtaskRunner:
                     remaining_tool_calls=tool_calls_left,
                     registered_tools=self.registry.describe(),
                     preferred_provider=subtask.assigned_provider,
+                    runtime_memory=runtime_memory,
                 )
             response = await router.complete(
                 ModelStage.SUBTASK_EXECUTE, request, preferred=subtask.assigned_provider
@@ -297,11 +319,24 @@ class SubtaskRunner:
                         subtask_id, "tool budget exhausted before any tool call"
                     )
                 try:
-                    request_output = ToolRequestOutput.model_validate(safe_data)
-                except ValidationError:
-                    return self._finish_incomplete(
-                        subtask_id, "invalid tool request from model"
+                    request_output = ToolRequestDocument.model_validate(safe_data)
+                except ValidationError as exc:
+                    tool_observations.append(
+                        self._schema_feedback_observation(
+                            "tool_request_schema",
+                            "上一次工具请求格式不符合协议，工具未执行。",
+                            exc,
+                        )
                     )
+                    continue
+                signature = self._tool_signature(
+                    request_output.tool_name, request_output.params
+                )
+                if signature in tool_history:
+                    tool_observations.append(
+                        self._duplicate_tool_observation(request_output.tool_name)
+                    )
+                    continue
                 outcome = await self._submit_tool(
                     task_id=task_id,
                     turn_id=turn_id,
@@ -322,22 +357,51 @@ class SubtaskRunner:
                         session.commit()
                     return "completed"
                 if outcome.status == "rejected":
+                    tool_observations.append(
+                        {
+                            "tool_name": request_output.tool_name,
+                            "summary": (
+                                f"工具 {request_output.tool_name} 被安全策略拒绝："
+                                f"{outcome.reason}。请改用被动/低风险替代工具，"
+                                "或直接给出结论，不要重复请求被拒绝的工具。"
+                            ),
+                            "findings": [
+                                {
+                                    "kind": "tool_rejected",
+                                    "description": outcome.reason,
+                                }
+                            ],
+                        }
+                    )
                     continue
+                tool_history.add(signature)
                 tool_calls_left -= 1
                 assert outcome.result is not None
                 tool_observations.append(
-                    {
-                        "tool_name": request_output.tool_name,
-                        "summary": outcome.result.summary,
-                        "findings": outcome.result.findings,
-                    }
+                    self._tool_observation(
+                        request_output.tool_name, outcome.result
+                    )
                 )
+                if (
+                    request_output.tool_name == "submit_flag"
+                    and outcome.result.success
+                ):
+                    return self._finish_flag(
+                        subtask_id, attempt_id, request_output.params.get("flag")
+                    )
                 continue
 
             try:
                 result = SubtaskResultDocument.model_validate(safe_data)
-            except ValidationError:
-                continue  # one bounded retry with the remaining model budget
+            except ValidationError as exc:
+                tool_observations.append(
+                    self._schema_feedback_observation(
+                        "subtask_result_schema",
+                        "上一次子任务结果格式不符合协议，结果未保存。",
+                        exc,
+                    )
+                )
+                continue  # bounded correction with the remaining model budget
 
             return self._finish_with_result(subtask_id, attempt_id, result)
 
@@ -346,6 +410,114 @@ class SubtaskRunner:
         )
 
     # ----------------------------------------------------------------- helpers
+
+    def _schema_feedback_observation(
+        self, name: str, summary: str, exc: ValidationError
+    ) -> dict[str, Any]:
+        return {
+            "tool_name": name,
+            "summary": summary,
+            "findings": [
+                {
+                    "kind": "schema_error",
+                    "description": str(exc)[:1_000],
+                },
+                {
+                    "kind": "required_contract",
+                    "description": (
+                        "工具请求必须包含 status=tool_request、tool_name、params、"
+                        "reason、expected_evidence；最终结果必须包含合法的 "
+                        "status、summary、claims、evidence_refs、inference_notes、"
+                        "unresolved。"
+                    ),
+                },
+            ],
+        }
+
+    @staticmethod
+    def _tool_signature(tool_name: str, params: dict[str, Any]) -> str:
+        # http_fetch: key on the actual request (url/method/headers/body/query)
+        # so the model can't re-fetch the same page by tweaking cosmetic flags
+        # like details/include_body, while a genuinely different request (e.g.
+        # a different User-Agent/Cookie/Referer) is NOT treated as a duplicate.
+        if tool_name in {"http_fetch", "http_request"}:
+            request = {
+                key: params[key]
+                for key in ("url", "method", "query", "headers", "body")
+                if key in params
+            }
+            canonical = json.dumps(
+                redact_mapping(request),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            return f"{tool_name}:req:{canonical}"
+        if tool_name in _URL_ADDRESSED_TOOLS:
+            url = params.get("url")
+            if isinstance(url, str) and url.strip():
+                return f"{tool_name}:url:{url.strip()}"
+        canonical = json.dumps(
+            redact_mapping(params),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return f"{tool_name}:{canonical}"
+
+    @staticmethod
+    def _duplicate_tool_observation(tool_name: str) -> dict[str, Any]:
+        return {
+            "tool_name": tool_name,
+            "summary": (
+                f"工具 {tool_name} 及相同目标已在本子任务中执行过，结果不会改变；"
+                "请换一个方向继续，或直接给出结论。"
+            ),
+            "findings": [
+                {"kind": "duplicate_tool", "description": "重复工具调用已被跳过"}
+            ],
+        }
+
+    @staticmethod
+    def _tool_observation(tool_name: str, result: Any) -> dict[str, Any]:
+        """Bounded tool observation for the model.
+
+        Includes the tool's evidence metadata (e.g. http_fetch's body_preview
+        and headers) so the model can actually read the page content instead of
+        only a "HTTP 200" summary. Truncated to keep the prompt bounded.
+        """
+        observation: dict[str, Any] = {
+            "tool_name": tool_name,
+            "summary": result.summary,
+            "findings": result.findings,
+        }
+        evidence_view: list[dict[str, Any]] = []
+        for item in result.evidence[:8]:
+            entry: dict[str, Any] = {
+                "content": str(item.get("content", ""))[:400],
+            }
+            metadata = item.get("metadata")
+            if isinstance(metadata, dict):
+                bounded: dict[str, Any] = {}
+                for key, value in metadata.items():
+                    if isinstance(value, str):
+                        bounded[key] = value[:8000]
+                    elif isinstance(value, dict):
+                        bounded[key] = {
+                            str(k)[:80]: str(v)[:400]
+                            for k, v in list(value.items())[:64]
+                        }
+                    elif isinstance(value, list):
+                        bounded[key] = [str(v)[:400] for v in value[:64]]
+                    elif value is None or isinstance(value, (int, float, bool)):
+                        bounded[key] = value
+                    else:
+                        bounded[key] = str(value)[:400]
+                entry["metadata"] = bounded
+            evidence_view.append(entry)
+        if evidence_view:
+            observation["evidence"] = evidence_view
+        return observation
 
     async def _submit_tool(
         self,
@@ -416,6 +588,20 @@ class SubtaskRunner:
         if self.scheduler is not None:
             self.scheduler.on_subtask_finished(subtask_id)
         return "completed"
+
+    def _finish_flag(self, subtask_id: str, attempt_id: str, flag: Any) -> str:
+        flag_text = str(flag or "").strip()
+        result = SubtaskResultDocument(
+            status="completed",
+            summary=f"已找到并提交 flag：{flag_text}",
+            claims=[
+                ClaimDocument(
+                    statement=f"找到 flag {flag_text}",
+                    evidence_ref="submit_flag:flag",
+                )
+            ],
+        )
+        return self._finish_with_result(subtask_id, attempt_id, result)
 
     def _supersede(self, subtask_id: str) -> None:
         with self.session_factory() as session:
@@ -539,6 +725,12 @@ class SubtaskRunner:
 
             task = session.get(TaskRow, turn.task_id)
             return task.goal if task is not None else ""
+
+    def _conversation_memory(self, conversation_id: str) -> dict[str, Any]:
+        with self.session_factory() as session:
+            return build_conversation_memory(
+                session, conversation_id=conversation_id
+            )
 
     def _dependency_outputs(
         self, session: Session, subtask_id: str

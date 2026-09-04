@@ -221,6 +221,8 @@ class DagRepository:
                     "route_reason_code": row.route_reason_code,
                     "route_reason": row.route_reason,
                     "required": row.required,
+                    "objective": row.objective,
+                    "allowed_tools": json.loads(row.allowed_tools_json),
                 },
             )
         return [self._subtask_read(row) for row in rows.values()]

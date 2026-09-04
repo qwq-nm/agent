@@ -11,17 +11,28 @@ from __future__ import annotations
 from typing import Any
 
 from secagent.conversation_domain import canonical_json_dumps
-from secagent.dag_domain import SubtaskRead, SubtaskResultDocument
+from secagent.dag_domain import SubtaskRead, WORKER_RESPONSE_ADAPTER
 from secagent.domain import ModelRequest
 
 _SUBTASK_SYSTEM_PROMPT = (
-    "You are a bounded security-analysis subtask worker. Complete exactly the "
-    "assigned subtask using the supplied dependency outputs and tool evidence. "
-    "Return only the requested JSON document. When you need one whitelisted "
-    "tool call instead, return a tool_request object."
+    "You are an autonomous security solver. Solve the assigned objective by "
+    "calling whitelisted tools and reading their full output, then deciding the "
+    "next tool from what you learned. Return exactly one JSON object matching "
+    "the supplied response schema. When you need external evidence, return "
+    "status=tool_request with tool_name, params, reason, and expected_evidence; "
+    "the tool result (including the page body) comes back to you. Keep going "
+    "until you solve it — for a web challenge, if the page asks you to set an "
+    "HTTP header, call http_fetch with that header (User-Agent/Cookie/Referer). "
+    "Consult runtime_memory to avoid repeating visited URLs and failed attempts. "
+    "Return status=completed with the answer (e.g. the flag) in summary only "
+    "when it is actually found; otherwise keep requesting tools or return "
+    "incomplete with the concrete next lead. Do not invent tool results."
 )
 
-_WORKER_RESPONSE_SCHEMA = SubtaskResultDocument.model_json_schema()
+_WORKER_RESPONSE_SCHEMA = {
+    **WORKER_RESPONSE_ADAPTER.json_schema(),
+    "title": "WorkerResponseDocument",
+}
 
 
 def build_subtask_request(
@@ -34,6 +45,7 @@ def build_subtask_request(
     remaining_tool_calls: int,
     registered_tools: list[dict[str, Any]],
     preferred_provider: str,
+    runtime_memory: dict[str, Any] | None = None,
 ) -> ModelRequest:
     payload = {
         "subtask": {
@@ -47,6 +59,7 @@ def build_subtask_request(
         "turn_goal": goal_summary,
         "dependency_outputs": dependency_outputs,
         "tool_observations": tool_observations,
+        "runtime_memory": runtime_memory or {},
         "budget": {
             "remaining_model_calls": remaining_model_calls,
             "remaining_tool_calls": remaining_tool_calls,
@@ -61,6 +74,23 @@ def build_subtask_request(
             if tool.get("name") in set(subtask.allowed_tools)
         ],
         "preferred": preferred_provider,
+        "output_contract": {
+            "tool_request": {
+                "status": "tool_request",
+                "tool_name": "one item from subtask.allowed_tools",
+                "params": "object matching the selected tool input",
+                "reason": "why this call is needed for this subtask",
+                "expected_evidence": "what evidence the call should add",
+            },
+            "subtask_result": {
+                "status": "completed | incomplete | failed",
+                "summary": "bounded conclusion for this subtask",
+                "claims": "facts with evidence_ref, attachment_ref, or upstream_key",
+                "evidence_refs": "tool evidence ids used by the result",
+                "inference_notes": "separate assumptions from facts",
+                "unresolved": "remaining gaps only when evidence is insufficient",
+            },
+        },
     }
     return ModelRequest(
         system=_SUBTASK_SYSTEM_PROMPT,

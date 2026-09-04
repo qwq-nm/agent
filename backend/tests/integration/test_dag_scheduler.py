@@ -26,8 +26,10 @@ from secagent.dag_domain import (
 from secagent.db import Base, make_engine
 from secagent.db_models import (
     ConversationTurnRow,
+    EvidenceRow,
     JobRunRow,
     SubtaskRow,
+    TaskRow,
     UserRow,
 )
 from secagent.domain import TaskCreate, UserRole
@@ -80,6 +82,8 @@ def _turn_with_subtasks(
     factory: sessionmaker[Session],
     actor: AuthenticatedUser,
     specs: list[tuple[str, list[str], bool]],
+    *,
+    task_payload: dict | None = None,
 ) -> str:
     with factory() as session:
         repository = ConversationRepository(session)
@@ -93,8 +97,13 @@ def _turn_with_subtasks(
                 role="user", kind="user_text", content="调度测试", idempotency_key="k1"
             ),
         )
+        payload = {
+            "goal": "调度测试目标",
+            "authorization_scope": "仅测试数据",
+            **(task_payload or {}),
+        }
         task = TaskRepository(session).create_task(
-            TaskCreate(goal="调度测试目标", authorization_scope="仅测试数据"),
+            TaskCreate(**payload),
             owner_id=conversation.owner_id,
             commit=False,
         )
@@ -310,6 +319,68 @@ def test_all_required_terminal_creates_exactly_one_synthesize_job(
         scheduler.schedule_turn(turn_id) == 0
     )  # second pass never duplicates the job
     assert len(_jobs(factory, JobKind.TURN_SYNTHESIZE)) == 1
+
+
+def test_ctf_incomplete_with_promising_leads_creates_continuation_before_synthesis(
+    scheduler_env,
+) -> None:
+    factory, actor = scheduler_env
+    queue = FakeJobQueue()
+    turn_id = _turn_with_subtasks(
+        factory,
+        actor,
+        [("initial_recon", [], True)],
+        task_payload={
+            "goal": "这是一道 ctf web，帮我找出 flag",
+            "scene_hint": "ctf_web",
+            "target_url": "http://example.test/",
+        },
+    )
+    scheduler = _scheduler(factory, queue, max_parallel=3)
+    scheduler.schedule_turn(turn_id)
+
+    with factory() as session:
+        dag = DagRepository(session)
+        turn = session.get(ConversationTurnRow, turn_id)
+        task = session.get(TaskRow, turn.task_id)
+        row = session.scalar(
+            select(SubtaskRow).where(
+                SubtaskRow.turn_id == turn_id, SubtaskRow.key == "initial_recon"
+            )
+        )
+        session.add(
+            EvidenceRow(
+                task_id=task.id,
+                evidence_type="http_observation",
+                source="initial_recon:http://example.test/",
+                content="发现登录表单，Set-Cookie 返回 PHPSESSID，新路径 /login",
+                sha256="promising-lead-digest",
+                confidence=0.95,
+                metadata_json=(
+                    '{"forms":[{"action":"/login"}],"cookies":["PHPSESSID"],'
+                    '"links":["/login"]}'
+                ),
+                turn_id=turn_id,
+                subtask_id=row.id,
+            )
+        )
+        dag.transition_subtask(
+            row.id,
+            SubtaskStatus.INCOMPLETE,
+            expected={SubtaskStatus.QUEUED, SubtaskStatus.RUNNING},
+            reason="found leads but no flag",
+        )
+        session.commit()
+
+    created = scheduler.on_subtask_finished(
+        _subtask_rows(factory, turn_id)["initial_recon"].id
+    )
+
+    assert created == 1
+    assert _jobs(factory, JobKind.TURN_SYNTHESIZE) == []
+    decompose_jobs = _jobs(factory, JobKind.TURN_DECOMPOSE)
+    assert len(decompose_jobs) == 1
+    assert decompose_jobs[0].turn_id != turn_id
 
 
 def test_no_dispatch_when_turn_is_waiting_model_decision(scheduler_env) -> None:

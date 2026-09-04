@@ -43,12 +43,23 @@ AUDIT_ONLY_SENSITIVE_KEYS = {
 APPROVAL_REASON_MAX_LENGTH = 1000
 
 
-def redact_text(value: str, *, include_generic_key: bool = False) -> str:
-    redacted = _scrub_labeled_secrets(value, include_generic_key=include_generic_key)
+def redact_text(
+    value: str,
+    *,
+    include_generic_key: bool = False,
+    redact_cookie: bool = True,
+) -> str:
+    redacted = _scrub_labeled_secrets(
+        value,
+        include_generic_key=include_generic_key,
+        redact_cookie=redact_cookie,
+    )
     return SECRET_PATTERN.sub("***REDACTED***", redacted)
 
 
-def _scrub_labeled_secrets(value: str, *, include_generic_key: bool) -> str:
+def _scrub_labeled_secrets(
+    value: str, *, include_generic_key: bool, redact_cookie: bool
+) -> str:
     """Scrub assignment values in one forward pass over each matched value."""
     parts: list[str] = []
     copied_through = 0
@@ -56,6 +67,9 @@ def _scrub_labeled_secrets(value: str, *, include_generic_key: bool) -> str:
     while match := LABELED_SECRET_PREFIX_PATTERN.search(value, search_from):
         normalized_name = re.sub(r"[\s_-]+", "", match.group("name").lower())
         if normalized_name == "key" and not include_generic_key:
+            search_from = match.end()
+            continue
+        if normalized_name == "cookie" and not redact_cookie:
             search_from = match.end()
             continue
         scanned = _scan_secret_value(value, match.end())

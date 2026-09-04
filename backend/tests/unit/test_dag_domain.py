@@ -1,4 +1,5 @@
 import pytest
+from pydantic import TypeAdapter
 from pydantic import ValidationError
 
 from secagent.dag_domain import (
@@ -8,6 +9,8 @@ from secagent.dag_domain import (
     ModelFailureStage,
     SubtaskResultDocument,
     SubtaskStatus,
+    ToolRequestDocument,
+    WorkerResponseDocument,
     dag_command_id,
 )
 
@@ -83,6 +86,50 @@ def test_subtask_result_document_is_strict_and_valid() -> None:
         SubtaskResultDocument.model_validate(
             _result_document() | {"evidence_refs": ["a", "a"]}
         )
+
+
+def _tool_request_document() -> dict:
+    return {
+        "status": "tool_request",
+        "tool_name": "http_fetch",
+        "params": {"url": "http://example.test/"},
+        "reason": "需要获取首页内容作为后续判断依据。",
+        "expected_evidence": "HTTP 状态码、响应头与页面正文摘要。",
+    }
+
+
+def test_tool_request_document_is_strict_and_valid() -> None:
+    document = ToolRequestDocument.model_validate(_tool_request_document())
+    assert document.status == "tool_request"
+    assert document.tool_name == "http_fetch"
+    assert document.params["url"] == "http://example.test/"
+
+    with pytest.raises(ValidationError):
+        ToolRequestDocument.model_validate(_tool_request_document() | {"extra": True})
+
+    with pytest.raises(ValidationError):
+        ToolRequestDocument.model_validate(
+            _tool_request_document() | {"tool_name": "   "}
+        )
+
+    with pytest.raises(ValidationError):
+        ToolRequestDocument.model_validate(
+            _tool_request_document() | {"reason": "   "}
+        )
+
+    with pytest.raises(ValidationError):
+        ToolRequestDocument.model_validate(
+            _tool_request_document() | {"status": "completed"}
+        )
+
+
+def test_worker_response_document_accepts_tool_requests_and_results() -> None:
+    adapter = TypeAdapter(WorkerResponseDocument)
+    tool_request = adapter.validate_python(_tool_request_document())
+    result = adapter.validate_python(_result_document())
+
+    assert isinstance(tool_request, ToolRequestDocument)
+    assert isinstance(result, SubtaskResultDocument)
 
 
 def test_claim_document_accepts_any_single_reference_kind() -> None:

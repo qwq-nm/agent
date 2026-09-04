@@ -12,13 +12,13 @@ from secagent.tools.base import BaseTool, ToolContext
 class SqlmapProbe(BaseTool):
     name = "sqlmap_probe"
     scene = "web_analysis"
-    risk_level = RiskLevel.HIGH
+    risk_level = RiskLevel.MEDIUM
     idempotent = False
     requires_human_confirm = True
     timeout_seconds = 240.0
     description = (
         "调用原版 sqlmap 外部工具，对授权目标进行 SQL 注入探测；"
-        "该动作风险较高，必须经过人工确认后执行。"
+        "该动作属于主动验证，是否执行由系统安全策略决定。"
     )
     input_schema = {
         "type": "object",

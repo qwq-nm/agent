@@ -4,7 +4,6 @@ from secagent.providers.base import (
     ProviderErrorCode,
     ProviderUnavailable,
 )
-from secagent.providers.deepseek import DEEPSEEK_V4_FLASH_MODEL
 from secagent.security.redaction import redact_text
 
 
@@ -17,9 +16,6 @@ FIXED_PROVIDER = {
     ModelStage.SYNTHESIZE: "deepseek",
 }
 
-_FLASH_FIXED_STAGES = frozenset(
-    {ModelStage.DECOMPOSE, ModelStage.SYNTHESIZE}
-)
 _LOGICAL_ASSIGNMENT_PROVIDERS = frozenset({"glm", "deepseek"})
 
 
@@ -58,15 +54,7 @@ class ModelRouter:
         if stage is ModelStage.SUBTASK_EXECUTE:
             assert preferred is not None
             return self._require_provider(preferred)
-        provider = self._require_provider(FIXED_PROVIDER[stage])
-        if (
-            stage in _FLASH_FIXED_STAGES
-            and getattr(provider, "model", None) != DEEPSEEK_V4_FLASH_MODEL
-        ):
-            raise ProviderUnavailable(
-                "deepseek", ProviderErrorCode.INVALID_SCHEMA, retryable=False
-            )
-        return provider
+        return self._require_provider(FIXED_PROVIDER[stage])
 
     async def complete(
         self,

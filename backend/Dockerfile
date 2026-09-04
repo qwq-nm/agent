@@ -12,6 +12,11 @@ RUN python -c "import tomllib; data = tomllib.load(open('pyproject.toml', 'rb'))
     && pip install --no-cache-dir "setuptools>=75" \
     && pip install --no-cache-dir -r /tmp/requirements.txt
 RUN pip install --no-cache-dir dirsearch sqlmap
+# curl/wget so the sandbox_bash tool can construct HTTP requests with custom
+# headers (e.g. an HTTP-header-maze CTF challenge).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl wget ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 USER root
 RUN python -m playwright install --with-deps chromium
 

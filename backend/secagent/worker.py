@@ -30,6 +30,13 @@ from secagent.tools.browser_tool import BrowserSnapshot
 from secagent.tools.dirsearch_tool import DirsearchScan
 from secagent.tools.login_probe_tool import LoginProbe
 from secagent.tools.sqlmap_tool import SqlmapProbe
+from secagent.tools.sandbox_tool import (
+    SandboxBash,
+    SandboxListFiles,
+    SandboxReadFile,
+    SandboxWriteFile,
+)
+from secagent.tools.flag_tool import SubmitFlag
 from secagent.tools.source_tools import (
     ConfigChecker,
     ProjectDetector,
@@ -99,6 +106,11 @@ def build_worker_registry(allowed_hosts: set[str]) -> ToolRegistry:
             FlagPatternDetector(),
             CookieAnalyzer(),
             SensitiveFileChecker(),
+            SandboxBash(),
+            SandboxReadFile(),
+            SandboxWriteFile(),
+            SandboxListFiles(),
+            SubmitFlag(),
         ]
     )
 

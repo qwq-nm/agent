@@ -66,13 +66,22 @@ export async function listConversations(): Promise<ConversationSummary[]> {
   return apiRequest<ConversationSummary[]>('/api/conversations')
 }
 
+export interface ConversationSettingsUpdate {
+  preferred_model?: string | null
+  safety_mode?: string | null
+}
+
 export async function createConversation(
   title?: string,
   preferredModel?: string | null,
+  safetyMode?: string | null,
 ): Promise<ConversationSummary> {
   const body: Record<string, unknown> = {}
   if (title) body.title = title
-  if (preferredModel) body.settings = { preferred_model: preferredModel }
+  const settings: Record<string, unknown> = {}
+  if (preferredModel) settings.preferred_model = preferredModel
+  if (safetyMode) settings.safety_mode = safetyMode
+  if (Object.keys(settings).length) body.settings = settings
   return apiRequest<ConversationSummary>('/api/conversations', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -82,7 +91,7 @@ export async function createConversation(
 
 export async function patchConversation(
   conversationId: string,
-  settings: { preferred_model?: string | null },
+  settings: ConversationSettingsUpdate,
 ): Promise<ConversationSummary> {
   return apiRequest<ConversationSummary>(
     `/api/conversations/${encodeURIComponent(conversationId)}`,

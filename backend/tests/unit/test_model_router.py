@@ -243,22 +243,20 @@ async def test_decompose_missing_deepseek_never_calls_glm_or_mock(mode: str) -> 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stage", [ModelStage.DECOMPOSE, ModelStage.SYNTHESIZE])
-async def test_fixed_deepseek_stage_rejects_non_flash_adapter_before_call(
+async def test_fixed_deepseek_stage_allows_configured_deepseek_model(
     stage: ModelStage,
 ) -> None:
-    deepseek = StubProvider("deepseek", model="deepseek-v4-pro")
+    deepseek = StubProvider("deepseek", model="deepseek-chat")
     router = ModelRouter({"deepseek": deepseek}, mode="auto")
 
-    with pytest.raises(ProviderUnavailable) as caught:
-        await router.complete(
-            stage,
-            ModelRequest(system="s", user="u", response_schema={}),
-        )
+    response = await router.complete(
+        stage,
+        ModelRequest(system="s", user="u", response_schema={}),
+    )
 
-    assert caught.value.provider == "deepseek"
-    assert caught.value.code is ProviderErrorCode.INVALID_SCHEMA
-    assert caught.value.retryable is False
-    assert deepseek.complete_count == 0
+    assert response.provider == "deepseek"
+    assert response.model == "deepseek-chat"
+    assert deepseek.complete_count == 1
 
 
 @pytest.mark.asyncio
@@ -295,7 +293,7 @@ async def test_explicit_mock_subtask_still_requires_logical_preference() -> None
 
 @pytest.mark.asyncio
 async def test_decompose_does_not_require_glm_before_model_call() -> None:
-    deepseek = StubProvider("deepseek", model="deepseek-v4-flash")
+    deepseek = StubProvider("deepseek", model="deepseek-chat")
     router = ModelRouter({"deepseek": deepseek}, mode="auto")
 
     response = await router.complete(

@@ -134,7 +134,9 @@ class ProviderHTTPClient:
     ) -> ProviderUnavailable | None:
         if 200 <= status_code < 300:
             return None
-        if status_code in {401, 403}:
+        if status_code in {401, 402, 403}:
+            # 402 Payment Required is an account/billing failure, not a server
+            # error; surface it as auth so the operator knows to check credits.
             return ProviderUnavailable(
                 self.provider, ProviderErrorCode.AUTH, False, request_id
             )

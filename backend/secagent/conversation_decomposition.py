@@ -50,6 +50,22 @@ _POLICY_ROUTE_REASON_CODES: Final[frozenset[RouteReasonCode]] = frozenset(
     }
 )
 
+#: Route-reason codes the decomposition model is allowed to emit. The policy
+#: correction codes are backend-owned and must never appear in the model's
+#: response schema, otherwise the model occasionally picks one and fails the
+#: whole decompose with ``invalid_schema``.
+class ModelRouteReasonCode(StrEnum):
+    GLM_CHINESE_STRENGTH = "glm_chinese_strength"
+    GLM_LONG_DOCUMENT_STRENGTH = "glm_long_document_strength"
+    GLM_EXTRACTION_STRENGTH = "glm_extraction_strength"
+    DEEPSEEK_DECOMPOSITION_FIXED = "deepseek_decomposition_fixed"
+    DEEPSEEK_CODE_SECURITY_STRENGTH = "deepseek_code_security_strength"
+    DEEPSEEK_REVERSE_CAUSAL_STRENGTH = "deepseek_reverse_causal_strength"
+    DEEPSEEK_EVIDENCE_CONFLICT_STRENGTH = "deepseek_evidence_conflict_strength"
+    DEEPSEEK_SYNTHESIS_FIXED = "deepseek_synthesis_fixed"
+    BALANCED_MODEL_SUGGESTION = "balanced_model_suggestion"
+    TOOL_COMPATIBLE = "tool_compatible"
+
 
 def _non_whitespace(value: str) -> str:
     if not value.strip():
@@ -101,7 +117,7 @@ class SubtaskSpec(_StrictModel):
     dependency_keys: list[SubtaskKey] = Field(max_length=64)
     required_capabilities: list[CapabilityInput] = Field(max_length=9)
     proposed_provider: LogicalProvider = Field(strict=False)
-    route_reason_code: RouteReasonCode = Field(strict=False)
+    route_reason_code: ModelRouteReasonCode = Field(strict=False)
     allowed_tools: list[ToolName] = Field(max_length=64)
     expected_output: BoundedExpectedOutput
     required: bool
@@ -111,15 +127,6 @@ class SubtaskSpec(_StrictModel):
     def require_unique_values(cls, value: list[object]) -> list[object]:
         if len(value) != len(set(value)):
             raise ValueError("values must be unique")
-        return value
-
-    @field_validator("route_reason_code")
-    @classmethod
-    def reject_policy_correction_codes(
-        cls, value: RouteReasonCode
-    ) -> RouteReasonCode:
-        if value in _POLICY_ROUTE_REASON_CODES:
-            raise ValueError("policy correction route reason codes are not model input")
         return value
 
 

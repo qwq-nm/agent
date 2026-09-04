@@ -63,7 +63,7 @@ class MockProvider:
                 "emulated_provider": "deepseek",
                 "emulated_model": "deepseek-v4-flash",
             }
-        elif title == "SubtaskResultDocument":
+        elif title in {"SubtaskResultDocument", "WorkerResponseDocument"}:
             allowed_tools = [
                 name
                 for name in payload.get("subtask", {}).get("allowed_tools", [])
@@ -80,7 +80,8 @@ class MockProvider:
                     "status": "tool_request",
                     "tool_name": allowed_tools[0],
                     "params": {},
-                    "thought": "需要一次白名单工具调用以获取证据。",
+                    "reason": "需要一次白名单工具调用以获取证据。",
+                    "expected_evidence": "工具返回的结构化观察结果。",
                 }
                 emulation = {
                     "emulated_provider": preferred,

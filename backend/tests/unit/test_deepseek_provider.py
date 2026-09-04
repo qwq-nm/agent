@@ -55,16 +55,16 @@ async def test_deepseek_payload_is_non_streaming_json_with_thinking() -> None:
     assert payload["max_tokens"] == provider.max_tokens[ModelStage.PLAN]
     assert payload["thinking"] == {"type": "enabled"}
     assert "JSON" in payload["messages"][0]["content"]
-    assert "Example" in payload["messages"][0]["content"]
+    assert "Schema:" in payload["messages"][0]["content"]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("stage", "expected_max_tokens"),
     [
-        (ModelStage.DECOMPOSE, 4096),
-        (ModelStage.SUBTASK_EXECUTE, 4096),
-        (ModelStage.SYNTHESIZE, 8192),
+        (ModelStage.DECOMPOSE, 8192),
+        (ModelStage.SUBTASK_EXECUTE, 128_000),
+        (ModelStage.SYNTHESIZE, 128_000),
     ],
 )
 async def test_deepseek_supports_new_stages_with_bounded_output_tokens(
@@ -341,21 +341,13 @@ async def test_deepseek_repairs_invalid_json_once_with_minimal_redacted_input() 
 
 
 @pytest.mark.asyncio
-async def test_deepseek_repairs_schema_failure_only_once() -> None:
+async def test_deepseek_repairs_schema_failure_with_retries() -> None:
     requests: list[httpx.Request] = []
+    invalid = {
+        "choices": [{"finish_reason": "stop", "message": {"content": "{}"}}]
+    }
     provider = deepseek_provider(
-        responses=[
-            {
-                "choices": [
-                    {"finish_reason": "stop", "message": {"content": "{}"}}
-                ]
-            },
-            {
-                "choices": [
-                    {"finish_reason": "stop", "message": {"content": "{}"}}
-                ]
-            },
-        ],
+        responses=[invalid, invalid, invalid, invalid, invalid, invalid],
         capture=requests,
     )
 
@@ -363,8 +355,7 @@ async def test_deepseek_repairs_schema_failure_only_once() -> None:
         await provider.complete(plan_request())
 
     assert caught.value.code is ProviderErrorCode.INVALID_SCHEMA
-    assert caught.value.retryable is False
-    assert len(requests) == 2
+    assert len(requests) == 6
 
 
 @pytest.mark.asyncio
@@ -498,7 +489,9 @@ async def test_deepseek_fallback_delay_uses_injected_jitter() -> None:
 async def test_deepseek_classifies_unusable_completions(
     response_body: dict, code: ProviderErrorCode, retryable: bool
 ) -> None:
-    provider = deepseek_provider(returning=response_body)
+    provider = deepseek_provider(
+        responses=[response_body, response_body, response_body]
+    )
 
     with pytest.raises(ProviderUnavailable) as caught:
         await provider.complete(plan_request())
@@ -543,9 +536,8 @@ async def test_deepseek_retries_truncated_completion_with_larger_token_limit() -
 
 @pytest.mark.asyncio
 async def test_deepseek_rejects_non_object_provider_body_without_exposing_it() -> None:
-    provider = deepseek_provider(
-        returning=httpx.Response(200, content=b"not-json sk-provider-secret")
-    )
+    raw = httpx.Response(200, content=b"not-json sk-provider-secret")
+    provider = deepseek_provider(responses=[raw, raw, raw, raw, raw, raw])
 
     with pytest.raises(ProviderUnavailable) as caught:
         await provider.complete(plan_request())
@@ -576,7 +568,9 @@ async def test_deepseek_sanitizes_and_bounds_provider_request_id() -> None:
 
 @pytest.mark.asyncio
 async def test_deepseek_classifies_malformed_choice_without_raw_exception() -> None:
-    provider = deepseek_provider(returning={"choices": [None]})
+    provider = deepseek_provider(
+        responses=[{"choices": [None]}, {"choices": [None]}, {"choices": [None]}]
+    )
 
     with pytest.raises(ProviderUnavailable) as caught:
         await provider.complete(plan_request())

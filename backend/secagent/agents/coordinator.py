@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Iterable, Literal
+from typing import Annotated, Any, Iterable, Literal
 
 from pydantic import (
     AfterValidator,
@@ -141,6 +141,7 @@ class DecompositionContext(StrictModel):
     evidence: list[CoordinatorEvidence] = Field(max_length=128)
     unresolved_questions: list[Text1000] = Field(max_length=32)
     available_tools: list[CoordinatorTool] = Field(max_length=128)
+    runtime_memory: dict[str, Any] = Field(default_factory=dict)
     budget: TurnBudgetSnapshot
 
     @field_validator("conversation_summary")
@@ -230,7 +231,17 @@ class CoordinatorAgent:
         request = ModelRequest(
             system=(
                 "Decompose the bounded authorized conversation context into a "
-                "strict dependency-valid plan. Return only the requested JSON."
+                "strict dependency-valid plan. Return only the requested JSON. "
+                "For a CTF/web task with a target URL, emit a SINGLE end-to-end "
+                "solver subtask: fetch the target, read the page and follow any "
+                "instructions it contains, then keep using the whitelisted tools "
+                "(e.g. http_fetch with custom headers such as User-Agent/Cookie/"
+                "Referer, browser_snapshot, dirsearch_scan, sandbox_bash) and "
+                "reading their output until the flag is found. Give this subtask "
+                "every available discovery tool; do NOT split the solving into "
+                "many narrow subtasks. For non-web tasks, plan minimal steps as "
+                "usual. Never emit an empty allowed_tools, and do not repeat "
+                "already-visited URLs or completed work."
             ),
             user=canonical_json_dumps(payload),
             response_schema=DecompositionDocument.model_json_schema(),

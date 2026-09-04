@@ -7,6 +7,7 @@ import json
 from contextlib import suppress
 from typing import Any
 
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -47,13 +48,13 @@ from secagent.services.job_service import JobLease
 from secagent.subtask_prompts import _WORKER_RESPONSE_SCHEMA  # noqa: F401
 
 _SYNTHESIS_SYSTEM_PROMPT = (
-    "You are the final synthesis stage. Combine the completed subtask results "
-    "into one Chinese answer. Every entry in facts MUST copy one evidence_ref "
-    "verbatim from the provided subtask_results[].evidence_refs (or cite an "
-    "upstream_key); if you cannot cite anything, put the statement into "
-    "inference_notes instead - never leave all three reference fields empty. "
-    "Anything unverified goes to inference_notes; missing inputs go to "
-    "unresolved. Never invent facts and never call tools."
+    "You are the final answer stage. Relay the solver subtask's result in "
+    "concise Chinese. If a subtask summary contains an actual flag string "
+    "(e.g. flag{...} or NSSCTF{...}), copy that exact string into the summary "
+    "and state the challenge is solved. If no actual flag string is present, "
+    "state plainly that it is not yet solved and list what remains in "
+    "unresolved. Never guess or invent a flag, and never claim success without "
+    "an actual flag string. Never call tools."
 )
 
 _SYNTHESIS_RESPONSE_SCHEMA = SynthesisDocument.model_json_schema()

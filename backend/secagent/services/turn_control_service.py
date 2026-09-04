@@ -31,8 +31,9 @@ from secagent.db_models import (
     ConversationTurnRow,
     JobRunRow,
     SubtaskRow,
+    TaskRow,
 )
-from secagent.domain import TaskCreate
+from secagent.domain import TaskCreate, TaskStatus
 from secagent.repositories.dag_repository import DagRepository
 from secagent.repository import TaskRepository
 
@@ -313,12 +314,47 @@ class TurnControlService:
             role=UserRole(owner_row.role) if owner_row else UserRole.ANALYST,
         )
         repository = ConversationRepository(session)
+        source_task = (
+            session.get(TaskRow, source_turn.task_id)
+            if source_turn.task_id is not None
+            else None
+        )
         task = task_repository.create_task(
             TaskCreate(
                 goal=(goal or f"Replan of turn {source_turn.id}")[:4000],
-                authorization_scope="Conversation replan",
+                authorization_scope=(
+                    source_task.authorization_scope
+                    if source_task is not None
+                    else "Conversation replan"
+                ),
+                route_mode=(
+                    source_task.route_mode if source_task is not None else "auto"
+                ),
+                safety_mode=(
+                    source_task.safety_mode
+                    if source_task is not None
+                    else "conservative"
+                ),
+                preferred_model=(
+                    source_task.preferred_model if source_task is not None else None
+                ),
+                scene_hint=(
+                    source_task.scene_hint if source_task is not None else None
+                ),
+                target_url=(
+                    source_task.target_url if source_task is not None else None
+                ),
             ),
             owner_id=conversation.owner_id,
+            commit=False,
+        )
+        # The decompose job's legacy claim path requires the compat task to be
+        # QUEUED; without this the replan turn's decompose job is cancelled at
+        # claim time and the turn stalls at "created".
+        task_repository.transition_task_status(
+            task.id,
+            TaskStatus.CREATED,
+            TaskStatus.QUEUED,
             commit=False,
         )
         turn = repository.create_replan_turn(
@@ -361,6 +397,41 @@ class TurnControlService:
                 "system",
                 to_publish,
                 goal=goal,
+            )
+            session.commit()
+        self._publish(to_publish)
+        return new_turn_id
+
+    def continue_planning_from_turn(self, source_turn_id: str, goal: str) -> str | None:
+        """Create a continuation turn before final synthesis when leads remain."""
+        to_publish: list[tuple[JobKind, str, str, str]] = []
+        with self.session_factory() as session:
+            dag = DagRepository(session)
+            task_repository = TaskRepository(session)
+            source_turn = dag.require_turn(source_turn_id)
+            if self._replan_depth(session, source_turn_id) >= self.max_auto_continues:
+                return None
+            try:
+                dag.mark_turn_state(
+                    source_turn_id,
+                    "partial",
+                    expected={"running", "scheduling", "waiting_tool_approval"},
+                )
+            except Exception:
+                return None
+            new_turn_id = self._create_replan_turn(
+                session,
+                dag,
+                task_repository,
+                source_turn,
+                "system",
+                to_publish,
+                goal=goal,
+            )
+            dag.record_turn_event(
+                source_turn_id,
+                "turn.continue_planning",
+                {"source_turn_id": source_turn_id, "new_turn_id": new_turn_id},
             )
             session.commit()
         self._publish(to_publish)

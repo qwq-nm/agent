@@ -8,6 +8,7 @@ uses a constant command id so at most one can ever exist per turn.
 
 from __future__ import annotations
 
+import json
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -20,12 +21,14 @@ from secagent.dag_domain import (
     JobKind,
     SubtaskStatus,
     SubtaskTransitionError,
+    should_continue_planning,
     subtask_execute_command_id,
     turn_synthesize_command_id,
 )
-from secagent.db_models import ConversationRow, ConversationTurnRow, SubtaskRow
+from secagent.db_models import ConversationRow, ConversationTurnRow, EvidenceRow, SubtaskRow, TaskRow
 from secagent.repositories.dag_repository import DagRepository
 from secagent.repository import TaskRepository
+from secagent.services.ctf_solver_loop import decide_continue
 
 if TYPE_CHECKING:  # pragma: no cover
     from secagent.queue.base import DagJobQueue
@@ -53,12 +56,16 @@ class DagScheduler:
         session_factory: sessionmaker[Session],
         queue: "DagJobQueue",
         max_parallel: int = 3,
+        max_auto_continues: int = 15,
+        max_stale_rounds: int = 2,
     ) -> None:
         if max_parallel < 1:
             raise ValueError("max_parallel must be at least 1")
         self.session_factory = session_factory
         self.queue = queue
         self.max_parallel = max_parallel
+        self.max_auto_continues = max_auto_continues
+        self.max_stale_rounds = max_stale_rounds
 
     def schedule_turn(self, turn_id: str) -> int:
         return self._dispatch(turn_id)
@@ -75,6 +82,7 @@ class DagScheduler:
 
     def _dispatch(self, turn_id: str) -> int:
         to_publish: list[_PendingPublish] = []
+        continue_goal: str | None = None
         with self.session_factory() as session:
             dag = DagRepository(session)
             task_repository = TaskRepository(session)
@@ -96,10 +104,25 @@ class DagScheduler:
             created = self._fill_slots(
                 session, dag, task_repository, turn, to_publish
             )
-            created += self._maybe_synthesize(
-                session, dag, task_repository, turn, to_publish
-            )
+            continue_goal = self._continue_planning_goal(session, dag, turn)
+            if continue_goal is None:
+                created += self._maybe_synthesize(
+                    session, dag, task_repository, turn, to_publish
+                )
             session.commit()
+
+        if continue_goal is not None:
+            from secagent.services.turn_control_service import TurnControlService
+
+            control = TurnControlService(
+                session_factory=self.session_factory,
+                queue=self.queue,
+                logical_providers=frozenset({"glm", "deepseek"}),
+                max_parallel=self.max_parallel,
+                max_auto_continues=self.max_auto_continues,
+            )
+            if control.continue_planning_from_turn(turn_id, continue_goal) is not None:
+                created += 1
 
         self._publish(to_publish)
         return created
@@ -144,6 +167,65 @@ class DagScheduler:
         if created and turn.status == "scheduling":
             dag.mark_turn_state(turn.id, "running", expected={"scheduling"})
         return created
+
+    def _continue_planning_goal(
+        self,
+        session: Session,
+        dag: DagRepository,
+        turn: ConversationTurnRow,
+    ) -> str | None:
+        turn_id = turn.id
+        subtasks = dag.list_subtasks(turn_id)
+        if not subtasks:
+            return None
+        required = [item for item in subtasks if item.required]
+        if not required or not all(
+            item.status in TERMINAL_SUBTASK_STATUSES for item in required
+        ):
+            return None
+        incomplete_required = [
+            item for item in required if item.status == SubtaskStatus.INCOMPLETE
+        ]
+        if not incomplete_required or turn.task_id is None:
+            return None
+        if (
+            session.scalar(
+                select(ConversationTurnRow.id)
+                .where(ConversationTurnRow.replan_from_turn_id == turn_id)
+                .limit(1)
+            )
+            is not None
+        ):
+            return None
+
+        task = session.get(TaskRow, turn.task_id)
+        if task is None:
+            return None
+        evidence_items = self._collect_lead_evidence(session, turn_id)
+        if not should_continue_planning(
+            scene=task.scene or task.scene_hint,
+            goal=task.goal,
+            incomplete_required_count=len(incomplete_required),
+            evidence_items=evidence_items,
+        ):
+            return None
+
+        decision = decide_continue(
+            session,
+            turn=turn,
+            incomplete_required=incomplete_required,
+            evidence_items=evidence_items,
+            original_goal=task.goal,
+            max_stale_rounds=self.max_stale_rounds,
+        )
+        if not decision.should_continue:
+            dag.record_turn_event(
+                turn_id,
+                "turn.continue_stopped",
+                {"turn_id": turn_id, "reason": decision.reason},
+            )
+            return None
+        return decision.goal
 
     def _maybe_synthesize(
         self,
@@ -206,6 +288,30 @@ class DagScheduler:
             )
         )
         return 1
+
+    @staticmethod
+    def _collect_lead_evidence(session: Session, turn_id: str) -> list[dict[str, object]]:
+        rows = session.scalars(
+            select(EvidenceRow)
+            .where(EvidenceRow.turn_id == turn_id)
+            .order_by(EvidenceRow.created_at.desc())
+            .limit(64)
+        ).all()
+        items: list[dict[str, object]] = []
+        for row in rows:
+            try:
+                metadata = json.loads(row.metadata_json or "{}")
+            except json.JSONDecodeError:
+                metadata = {}
+            items.append(
+                {
+                    "source": row.source,
+                    "content": row.content,
+                    "metadata": metadata if isinstance(metadata, dict) else {},
+                    "evidence_type": row.evidence_type,
+                }
+            )
+        return items
 
     def _publish(self, to_publish: list[_PendingPublish]) -> None:
         if not to_publish:

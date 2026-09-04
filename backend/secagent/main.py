@@ -38,6 +38,13 @@ from secagent.tools.browser_tool import BrowserSnapshot
 from secagent.tools.dirsearch_tool import DirsearchScan
 from secagent.tools.login_probe_tool import LoginProbe
 from secagent.tools.sqlmap_tool import SqlmapProbe
+from secagent.tools.sandbox_tool import (
+    SandboxBash,
+    SandboxListFiles,
+    SandboxReadFile,
+    SandboxWriteFile,
+)
+from secagent.tools.flag_tool import SubmitFlag
 from secagent.tools.log_tools import (
     AttackPatternDetector,
     LogAnalyzer,
@@ -155,6 +162,11 @@ def create_app(
             FlagPatternDetector(),
             CookieAnalyzer(),
             SensitiveFileChecker(),
+            SandboxBash(),
+            SandboxReadFile(),
+            SandboxWriteFile(),
+            SandboxListFiles(),
+            SubmitFlag(),
         ]
     )
     app.include_router(system_router)
